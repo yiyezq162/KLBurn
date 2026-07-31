@@ -434,7 +434,7 @@ class Data(object):
         "NO_DHCP":    "链路已连接，但未获取到 DHCP 地址",
         "NO_GATEWAY": "已获取地址，但 DHCP 未下发网关",
         "PING_FAIL":  "已获取地址，但 ping 网关不通",
-        "NO_CLIENT":  "未测试（盘内缺少 DHCP 客户端）",
+        "NO_CLIENT":  "未测试（当前测试环境不具备该项检测条件）",
     }
 
     def nics(self):
@@ -567,21 +567,26 @@ class Data(object):
 
     # ---------- 采样曲线 ----------
     def sys_series(self):
+        """CPU 温度 / 频率 / 封装功耗三条曲线。
+
+        cpu_power_w 是 0.6.0 才加的列（读 RAPL 算的），老的 run-dir 里没有这一列，
+        DictReader 取不到就当没有——报告里那张图直接不画，不能因此崩掉。
+        RAPL 读不到的机器（部分 AMD、虚拟机）也是同样处理。
+        """
         path = os.path.join(self.run_dir, "sys_metrics.csv")
-        temps, freqs = [], []
+        temps, freqs, powers = [], [], []
         if not os.path.exists(path):
-            return temps, freqs
+            return temps, freqs, powers
         with open(path, newline="", encoding="utf-8", errors="replace") as f:
             for row in csv.DictReader(f):
-                try:
-                    temps.append(float(row["cpu_temp_c"]))
-                except (ValueError, KeyError, TypeError):
-                    pass
-                try:
-                    freqs.append(float(row["cpu_freq_mhz"]))
-                except (ValueError, KeyError, TypeError):
-                    pass
-        return temps, freqs
+                for key, bucket in (("cpu_temp_c", temps),
+                                    ("cpu_freq_mhz", freqs),
+                                    ("cpu_power_w", powers)):
+                    try:
+                        bucket.append(float(row[key]))
+                    except (ValueError, KeyError, TypeError):
+                        pass
+        return temps, freqs, powers
 
     def gpu_series(self):
         """返回 {gpu_index: {'temp': [...], 'power': [...], 'name': str}}"""
@@ -890,27 +895,56 @@ def build_html(data):
         A('<span class="rd">%s</span>' % E(r.get("detail")))
         A("</div>")
 
+    # 判定阈值从 meta.json 取实际生效的值——现场可以在 klburn.conf 里覆盖，
+    # 报告里写死一份就会和实际判定对不上。老的 run-dir 没有这一段，用默认值兜底。
+    def thr(key, default):
+        try:
+            v = (meta.get("thresholds") or {}).get(key)
+            return int(float(v))
+        except (TypeError, ValueError):
+            return default
+
     # ---------------- CPU 曲线 ----------------
-    temps, freqs = data.sys_series()
-    if temps or freqs:
-        A(SUB("CPU 温度 / 频率曲线"))
+    CPU_TEMP_WARN, CPU_TEMP_FAIL = thr("cpu_temp_warn", 95), thr("cpu_temp_fail", 100)
+    GPU_TEMP_WARN, GPU_TEMP_FAIL = thr("gpu_temp_warn", 83), thr("gpu_temp_fail", 90)
+    temps, freqs, powers = data.sys_series()
+    if temps or freqs or powers:
+        A(SUB("CPU 温度 / 频率 / 功耗曲线"))
         if temps:
+            A('<p class="sub">温度峰值 %d°C（告警线 %s°C，判故障线 %s°C）</p>'
+              % (max(temps), CPU_TEMP_WARN, CPU_TEMP_FAIL))
             A(svg_line_chart([("CPU 温度", temps)], y_label="°C", y_suffix="°C"))
         if freqs:
             A(svg_line_chart([("CPU 平均频率", freqs)], y_label="MHz", y_suffix="MHz"))
-        A('<p class="sub">采样间隔 5 秒，覆盖 CPU / 内存 / 硬盘全部压测阶段。</p>')
+        if powers:
+            A('<p class="sub">封装功耗峰值 %d W（读自 RAPL 能量计数器，多路 CPU 已求和）</p>'
+              % max(powers))
+            A(svg_line_chart([("CPU 封装功耗", powers)], y_label="W", y_suffix="W"))
+        A('<p class="sub">采样间隔 5 秒，覆盖 CPU / 内存 / 硬盘全部压测阶段。'
+          "读不到的项目（部分平台不提供 RAPL 或 CPU 温度驱动）不画图，不影响判定。</p>")
 
     # ---------------- GPU 曲线 ----------------
     gs = data.gpu_series()
     if gs:
         A(SUB("GPU 温度 / 功耗曲线"))
         temp_series, power_series = [], []
+        peak_t, peak_p = [], []
         for idx in sorted(gs.keys(), key=lambda x: int(x) if str(x).isdigit() else 0):
             label = "GPU%s %s" % (idx, gs[idx]["name"])
             temp_series.append((label, gs[idx]["temp"]))
             power_series.append((label, gs[idx]["power"]))
+            if gs[idx]["temp"]:
+                peak_t.append("GPU%s %d°C" % (idx, max(gs[idx]["temp"])))
+            if gs[idx]["power"]:
+                peak_p.append("GPU%s %dW" % (idx, max(gs[idx]["power"])))
+        if peak_t:
+            A('<p class="sub">逐卡温度峰值：%s（告警线 %s°C，判故障线 %s°C）</p>'
+              % (E("、".join(peak_t)), GPU_TEMP_WARN, GPU_TEMP_FAIL))
         A(svg_line_chart(temp_series, y_label="°C", y_suffix="°C"))
+        if peak_p:
+            A('<p class="sub">逐卡功耗峰值：%s</p>' % E("、".join(peak_p)))
         A(svg_line_chart(power_series, y_label="W", y_suffix="W"))
+        A('<p class="sub">采样间隔 5 秒，数据来自 nvidia-smi，覆盖 GPU 满载压测全程。</p>')
 
     # ---------------- fio ----------------
     fio = data.fio_results()
@@ -967,7 +1001,11 @@ def build_html(data):
     A("<footer>")
     A("本报告由 KLBurn v%s 自动生成，所有数据来自被测机器实测采集，未经人工修改。<br>"
       % E(meta.get("klburn_version")))
-    A("报告目录：%s" % E(os.path.basename(data.run_dir)))
+    # ⚠️ 这份 HTML 是**交付给客户**的，页脚绝不能出现 git commit hash、
+    # 源码版本、构建目录这类只有我们内部才用得上的东西。
+    # 版本可追溯性靠 meta.json 里的 git_commit —— 那个文件留在内部的工程目录里，
+    # 不随报告交付（0.3.0 出过"盘自称的版本和仓库对不上"的悬案，靠它定位）。
+    A("报告编号：%s" % E(os.path.basename(data.run_dir)))
     A("</footer></div>")
 
     return ('<!DOCTYPE html><html lang="zh-CN"><head><meta charset="utf-8">'
