@@ -244,6 +244,40 @@ rm -rf "$STAGE"; mkdir -p "$STAGE"
 install -m 0755 "$SCRIPT_DIR/chroot-setup.sh" "$STAGE/chroot-setup.sh"
 install -m 0644 "$SCRIPT_DIR/config.sh"       "$STAGE/config.sh"
 
+# 把源码的 git 状态钉进这张盘。
+#
+# 0.3.0 出过一次悬案：ISO 构建完 23 分钟后又改了代码却没动版本号，现场那根盘
+# 自称 0.3.0、跑的却是修复前的代码，对着仓库怎么看都对不上。版本号靠人记得 bump，
+# 而 commit hash 是构建脚本自己取的，骗不了人；工作区脏不脏也一并记上——
+# 「0.5.0 + abc1234 + dirty」一眼就知道这盘里有没进版本库的改动。
+#
+# 每一条都必须 `|| true`：本脚本是 -Eeuo pipefail，而这台机器可能压根没装 git、
+# 或者源码目录不是个 git 仓库，一次失败的赋值型命令替换就能把整个构建静默弄死
+# （config.sh 里的 getent、chroot-setup.sh 里的 find 都栽过同一个坑）。
+# safe.directory 是因为构建要 sudo/root 跑，而仓库属于普通用户，
+# 新版 git 会以 "dubious ownership" 拒绝工作。
+GIT_ARGS=(-c "safe.directory=*" -C "$PROJ_DIR")
+GIT_COMMIT="$(git "${GIT_ARGS[@]}" rev-parse --short HEAD 2>/dev/null || true)"
+GIT_DIRTY=""
+if [[ -n "$GIT_COMMIT" ]]; then
+  # --porcelain 有输出 = 工作区有未提交的改动
+  if [[ -n "$(git "${GIT_ARGS[@]}" status --porcelain 2>/dev/null || true)" ]]; then
+    GIT_DIRTY="-dirty"
+  fi
+else
+  GIT_COMMIT="unknown"
+fi
+log "源码版本: ${KLBURN_VERSION}  git ${GIT_COMMIT}${GIT_DIRTY}"
+[[ -n "$GIT_DIRTY" ]] && warn "工作区有未提交的改动，这张盘里会标记为 dirty"
+
+# 追加到暂存的 config.sh 末尾，chroot-setup.sh source 它时就能拿到，
+# 不用额外开一条传参通道。注意只改暂存副本，不碰仓库里的 build/config.sh。
+cat >> "$STAGE/config.sh" <<EOF
+
+# ---------- 以下由 build-iso.sh 在构建时追加，勿手改 ----------
+GIT_COMMIT="${GIT_COMMIT}${GIT_DIRTY}"
+EOF
+
 # rootfs 覆盖层（去 CRLF 后再拷）
 # 排除 __pycache__：本机跑过 py_compile / 测试后会留下，没必要进 ISO
 rsync -a --chmod=D755 --exclude='__pycache__' --exclude='*.pyc' \
