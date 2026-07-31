@@ -27,7 +27,14 @@ fi
 # RUN_DIR 确定之前先写 /tmp，确定之后 log_attach 会把内容接过去
 MAIN_LOG="/tmp/klburn-early.log"
 
-_log_raw() { printf '%s\n' "$*" >> "$MAIN_LOG" 2>/dev/null || true; }
+# ⚠️ 外面这层 `{ ...; } 2>/dev/null` 不是多余的。
+# 重定向失败（日志文件不可写）时，报错是 **shell 在执行命令之前**打出来的，
+# 打在 shell 自己的 stderr 上：
+#     core.sh: line NN: /tmp/klburn-early.log: Permission denied
+# 命令级的 `2>/dev/null` 和 `|| true` 都管不着它 —— 前者只管 printf 自己的
+# stderr，后者只吞退出码。和 capture() 里吃掉 bash 那行 "Killed" 是同一类问题。
+# 日志写不进去绝不能在现场屏幕上刷红字，更不能因此中断测试。
+_log_raw() { { printf '%s\n' "$*" >> "$MAIN_LOG"; } 2>/dev/null || true; }
 
 ts()   { date '+%Y-%m-%d %H:%M:%S'; }
 tss()  { date '+%H:%M:%S'; }
@@ -136,8 +143,11 @@ metric_add() {
 
 # ---------------------------------------------------------------- 温度阈值
 # 可在 /opt/klburn/klburn.conf 里覆盖
-: "${CPU_TEMP_WARN:=88}"
-: "${CPU_TEMP_FAIL:=98}"
+# 服务器 CPU 满载跑到 80 多度是常态，88 告警太灵敏，现场每台机器都刷黄。
+# 0.6.0 起放宽到 95 告警 / 100 判故障：Intel 服务器 CPU 的 Tjmax 一般在 100~105°C，
+# 到 100 度已经在降频保护了，那才是真的散热不行。
+: "${CPU_TEMP_WARN:=95}"
+: "${CPU_TEMP_FAIL:=100}"
 : "${GPU_TEMP_WARN:=83}"
 : "${GPU_TEMP_FAIL:=90}"
 # 硬盘温度。以前叫 NVME_TEMP_*，但定义了之后一直没人用（任何盘的温度都不参与判定）。
@@ -178,6 +188,100 @@ cpu_temp_max_c() {
     done
   fi
   printf '%s' "$max"
+}
+
+# ---------------------------------------------------------------- CPU 功耗
+# 读 RAPL 能量计数器算封装功耗（瓦）。
+#
+# RAPL 给的是**累计能量**（微焦耳），不是瞬时功率，所以必须两次采样求差再除以时间。
+# 第一次调用只能记下基准、没法给出数字，返回空——调用方要能接受空值
+# （读不到数据绝不能当成 0 瓦或者故障）。
+#
+# 只取 package 域（intel-rapl:0、intel-rapl:1 ...），不取里面的 core/uncore 子域
+# （intel-rapl:0:0 之类），否则会重复计算。多路机器把每颗 CPU 加起来。
+# AMD 的 zen 系列在新内核上也走 intel-rapl 这套接口，名字如此而已。
+#
+# 计数器会回绕，超出 max_energy_range_uj 就从 0 重来；差值为负时按一次回绕补回来。
+_RAPL_PREV_UJ=""
+_RAPL_PREV_TS=""
+cpu_power_w() {
+  local total=0 found=0 d f v now
+  for d in /sys/class/powercap/intel-rapl:[0-9]* /sys/class/powercap/intel-rapl/intel-rapl:[0-9]*; do
+    # 只要 package 层：名字里带两个冒号的是子域，跳过
+    [[ "$(basename "$d")" == *:*:* ]] && continue
+    f="$d/energy_uj"
+    [[ -r "$f" ]] || continue
+    v="$(<"$f")" 2>/dev/null || continue
+    [[ "$v" =~ ^[0-9]+$ ]] || continue
+    total=$(( total + v ))
+    found=1
+  done
+  (( found )) || { printf ''; return; }
+
+  now="$(date +%s%N)"
+  if [[ -z "$_RAPL_PREV_UJ" || -z "$_RAPL_PREV_TS" ]]; then
+    _RAPL_PREV_UJ="$total"; _RAPL_PREV_TS="$now"
+    printf ''   # 第一次没有可比的基准
+    return
+  fi
+
+  local duj=$(( total - _RAPL_PREV_UJ ))
+  local dns=$(( now - _RAPL_PREV_TS ))
+  _RAPL_PREV_UJ="$total"; _RAPL_PREV_TS="$now"
+
+  (( dns > 0 )) || { printf ''; return; }
+  # 回绕：差值为负说明计数器翻过一轮，用第一个域的量程补一次，补不出来就放弃这个点
+  if (( duj < 0 )); then
+    local maxf max=""
+    for maxf in /sys/class/powercap/intel-rapl:0/max_energy_range_uj \
+                /sys/class/powercap/intel-rapl/intel-rapl:0/max_energy_range_uj; do
+      [[ -r "$maxf" ]] && { max="$(<"$maxf")"; break; }
+    done
+    [[ "$max" =~ ^[0-9]+$ ]] || { printf ''; return; }
+    duj=$(( duj + max ))
+    (( duj < 0 )) && { printf ''; return; }
+  fi
+
+  # 瓦 = 微焦 / 微秒 = duj / (dns/1000)
+  awk -v uj="$duj" -v ns="$dns" 'BEGIN{ w = uj * 1000 / ns; if (w >= 0 && w < 3000) printf "%d", w }'
+}
+
+# 逐颗物理 CPU 的封装温度 -> 每行 "CPU<N> <摄氏度>"，读不到就不输出那一行。
+#
+# 一个 coretemp/k10temp 的 hwmon 目录对应一颗物理 CPU。优先取带
+# "Package id N"（Intel）或 "Tctl"/"Tdie"（AMD）标签的那一路 —— 那是整颗
+# 封装的温度；取不到才退回该颗 CPU 所有核心里的最高值。
+#
+# 为什么要逐颗而不是只报一个最大值：双路机器上一颗 52°C、另一颗 78°C
+# 是典型的散热器没装好/风道偏，只报最大值看不出来是哪一颗。
+cpu_temp_per_pkg() {
+  local d name f label v best idx=0
+  for d in /sys/class/hwmon/hwmon*; do
+    [[ -r "$d/name" ]] || continue
+    name="$(<"$d/name")"
+    case "$name" in
+      coretemp|k10temp|zenpower|cpu_thermal) ;;
+      *) continue ;;
+    esac
+    best=""
+    for f in "$d"/temp*_input; do
+      [[ -r "$f" ]] || continue
+      label=""
+      [[ -r "${f%_input}_label" ]] && label="$(<"${f%_input}_label")"
+      v="$(<"$f")"
+      [[ "$v" =~ ^[0-9]+$ ]] || continue
+      v=$(( v / 1000 ))
+      (( v > 0 && v < 150 )) || continue
+      case "$label" in
+        Package*|Tctl*|Tdie*) best="$v"; break ;;   # 整颗封装的读数，优先
+      esac
+      [[ -z "$best" || v -gt best ]] && best="$v"
+    done
+    if [[ -n "$best" ]]; then
+      printf 'CPU%d %s\n' "$idx" "$best"
+      idx=$(( idx + 1 ))
+    fi
+  done
 }
 
 # 全核平均频率 MHz
