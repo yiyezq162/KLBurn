@@ -54,7 +54,7 @@ cleanup() {
 trap cleanup EXIT
 
 banner
-info "KLBurn v${KLBURN_VERSION:-?}  built ${BUILD_DATE:-?}  base ${BASE_OS:-?}"
+info "KLBurn v${KLBURN_VERSION:-?} (git ${GIT_COMMIT:-unknown})  built ${BUILD_DATE:-?}  base ${BASE_OS:-?}"
 info "Kernel: $(uname -r)"
 
 # ---------------------------------------------------------------- 报告落盘位置
@@ -103,11 +103,34 @@ MACHINE_TAG="$(get_machine_tag "$RUN_STAMP")"
 # 报告和原始数据全部放进同一个以 MACHINE_TAG 命名的文件夹里，
 # out\ 根目录下不再直接堆 .html 文件——U 盘反复插不同机器测下来，
 # 历史记录一多，散落的文件会很难找。
+
+# 目录重名要避开，不能直接覆盖。
+#
+# 现场实证：那台机器纽扣电池没电，RTC 每次开机都回退到**完全相同**的时间点，
+# 连测两次得到的 MACHINE_TAG 一模一样（20251126_021640_...），
+# 第二次直接把第一次的报告和原始数据整个盖掉了 —— 对比两次结果时才发现少了一份。
+# 时间戳不可靠的机器上这不是小概率事件，是必然。
 RUN_DIR="$RESULT_ROOT/$MACHINE_TAG"
+if [[ -e "$RUN_DIR" ]]; then
+  dup=2
+  while [[ -e "${RUN_DIR}_$(printf '%02d' "$dup")" ]] && (( dup < 100 )); do
+    dup=$(( dup + 1 ))
+  done
+  MACHINE_TAG="${MACHINE_TAG}_$(printf '%02d' "$dup")"
+  RUN_DIR="$RESULT_ROOT/$MACHINE_TAG"
+  warn "A run folder with the same name already exists (RTC time may be stuck)."
+  warn "Using $MACHINE_TAG instead - the previous run is NOT overwritten."
+fi
 RAW_DIR="$RUN_DIR/raw"
 REPORT_HTML="$RUN_DIR/${MACHINE_TAG}.html"
 mkdir -p "$RAW_DIR"
 log_attach "$RUN_DIR/klburn.log"
+
+# 校时那一步跑在 RUN_DIR 建立之前，日志只能先落 /tmp，现在搬进来存证。
+# 以后再遇到"时间不对"，报告里直接就有 chronyd 的原话，不用靠猜。
+if [[ -f /tmp/klburn-clocksync.log ]]; then
+  mv /tmp/klburn-clocksync.log "$RAW_DIR/clock-sync.log" 2>/dev/null || true
+fi
 
 info "Serial      : $SERIAL"
 info "Machine     : $MACHINE_TAG"
@@ -148,7 +171,7 @@ if (( ${#DISK_CAND[@]} > 0 )); then
     DISK_CONFIRMED=1
   fi
 else
-  DISK_SKIP_REASON="未发现可测试的本机硬盘（U盘和已挂载的盘已排除）"
+  DISK_SKIP_REASON="未发现可进行读写压力测试的本机硬盘（系统正在使用的磁盘不参与破坏性测试）"
 fi
 
 # ---------------------------------------------------------------- 时间分配
@@ -233,6 +256,7 @@ fi
 cat > "$RUN_DIR/meta.json" <<EOF
 {
   "klburn_version": "${KLBURN_VERSION:-}",
+  "git_commit":     "${GIT_COMMIT:-unknown}",
   "company_name":   "${COMPANY_NAME:-}",
   "base_os":        "${BASE_OS:-}",
   "build_date":     "${BUILD_DATE:-}",
@@ -252,6 +276,11 @@ cat > "$RUN_DIR/meta.json" <<EOF
   },
   "disk_tested":    "${DISK_TESTED_LIST}",
   "disk_confirmed": ${DISK_CONFIRMED},
+  "thresholds": {
+    "cpu_temp_warn":  ${CPU_TEMP_WARN},  "cpu_temp_fail":  ${CPU_TEMP_FAIL},
+    "gpu_temp_warn":  ${GPU_TEMP_WARN},  "gpu_temp_fail":  ${GPU_TEMP_FAIL},
+    "disk_temp_warn": ${DISK_TEMP_WARN}, "disk_temp_fail": ${DISK_TEMP_FAIL}
+  },
   "data_partition": "${DATA_DEV:-none}",
   "clock_synced":   ${CLOCK_SYNCED},
   "clock_suspect":  ${CLOCK_SUSPECT}
