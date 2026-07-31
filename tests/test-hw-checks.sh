@@ -878,26 +878,119 @@ echo "=== 客户可见文案里不许出现内部/开发用语（全局扫描）
 #
 # 这条守卫是全局正则扫描，不针对具体某一句 —— 以后新写的文案自动受它约束。
 # 屏幕输出（英文）和代码注释不在此列，所以要排掉注释行和纯 ASCII 的行。
+#
+# ⚠️ 必须先把反斜杠续行拼成一整行再扫。
+# 第一版写的是 `grep -oE 'result_add [^\n]*'` —— grep 本来就是逐行工作的，
+# 那个 [^\n]* 只能吃到**调用的第一行**，而所有长文案都是写在续行里的：
+#     result_add "collect_raid" "阵列卡" "$ST_SKIP" \
+#       "...（需要厂商专用管理工具，本测试盘未包含）" \      <- 违规就藏在这里
+# 于是这条守卫从上线起就是个摆设，collect.sh 里那句「本测试盘未包含」
+# 一直大摇大摆地进客户报告。
+#
+# ⚠️ 拼行**不能用正则**匹配行尾的反斜杠。实测（GNU sed 4.9 / gawk，WSL 和
+# Git Bash 上都能复现）：一行以中文标点收尾、后面紧跟反斜杠时，`/\\$/` 匹配不上——
+#     printf '\xe3\x80\x82\\\nX\n' | sed -n '/\\$/p'     # 什么也没有
+# 而我们的文案恰恰全是"……。\"这种收尾。所以改成按**字符**取最后一位来判断，
+# 完全绕开正则引擎。
+#
+# 内部工程报告（generate_internal.py）**不在此列** —— 那份不交付，
+# 里面本来就该直说盘里少带了哪个工具。
 RT="$(cd "$LIB/.." && pwd)"
 FORBIDDEN='测试盘|盘内|精简版|构建目录|重新出盘|vendor/|storcli|README|源码|commit|ISO 里|打包进|未正确安装'
 
-# 只看 result_add 的 detail（第 4 个参数）和报告生成器里的中文串
+join_continuations() {
+  awk '{
+    cur = $0; n = length(cur)
+    if (n > 0 && substr(cur, n, 1) == "\\") { buf = buf substr(cur, 1, n - 1); next }
+    print buf cur; buf = ""
+  } END { if (buf != "") print buf }' "$@"
+}
+
+JOINED="$(join_continuations "$RT"/lib/*.sh "$RT"/factory-test.sh 2>/dev/null)"
+
+# 先自检：拼行到底有没有生效。"此项不影响整机结论"这句只写在续行里，
+# 扫不到它就说明拼行白做了，这条守卫又变回摆设。
+#
+# ⚠️ 这里不能用 `... | grep -q 关键字 && echo yes || echo no`：
+# grep -q 匹配到第一条就退出，上游的 grep 随即吃到 SIGPIPE 退出码 141，
+# 而本脚本是 `set -o pipefail` —— 整条管道的退出码就成了 141，
+# 于是"匹配成功"反而走到 || 分支，永远是 no。改成先数数再比。
+joined_hits="$(printf '%s\n' "$JOINED" | grep -E '^[[:space:]]*result_add ' \
+               | grep -c '此项不影响整机结论' || true)"
+[[ "$joined_hits" =~ ^[0-9]+$ ]] || joined_hits=0
+check "续行拼接必须生效（否则整条守卫是摆设）" "yes" \
+      "$( (( joined_hits > 0 )) && echo yes || echo no )"
+
+# 只看**带中文的字符串字面量**：
+#   - result_add 的显示名和 detail 都是中文串，跑不掉
+#   - ref 参数是 "raw/storcli-show.txt" 这类纯 ASCII 路径，它不进 HTML，
+#     一起扫会被 storcli 这个词误伤（报告生成器根本不渲染 ref）
+#
+# ⚠️ 别用 [一-龥] 这种字符区间挑中文：现场跑测试的 locale 是 C，grep 会直接
+# 报 "Invalid collation character" 然后**什么都不输出** —— 于是 offenders 恒为空，
+# 这条守卫看着全绿、实际上永远不会红。改成"先取所有引号串，再留下含非 ASCII 的"，
+# 只用 ASCII 端点的区间，任何 locale 下都成立。
+customer_text_offenders() {
+  grep -oE '"[^"]*"' | grep -E '[^ -~]' | grep -vE '^\s*#' | grep -E "$FORBIDDEN" || true
+}
+
 offenders="$(
   {
-    grep -rhoE 'result_add [^\n]*' "$RT"/lib/*.sh "$RT"/factory-test.sh 2>/dev/null
-    grep -rhoE '"[^"]*[一-龥][^"]*"' "$RT"/report/generate_report.py 2>/dev/null
-  } | grep -vE '^\s*#' | grep -E "$FORBIDDEN" || true
+    printf '%s\n' "$JOINED" | grep -E '^[[:space:]]*result_add '
+    cat "$RT"/report/generate_report.py 2>/dev/null
+  } | customer_text_offenders
 )"
 check "会进报告的中文文案里不许出现内部/开发用语" "0" \
       "$(printf '%s' "$offenders" | grep -c . || true)"
 if [[ -n "$offenders" ]]; then
   printf '     命中的行：\n'
-  printf '%s\n' "$offenders" | head -6 | sed 's/^/       /'
+  printf '%s\n' "$offenders" | head -6 | cut -c1-160 | sed 's/^/       /'
 fi
+
+# 上面那条断言必须**有能力变红**。这个项目栽过一次"从没红过的测试等于没写"，
+# 所以这里拿一句故意写坏的文案喂给同一条管道，它必须被抓出来。
+check "守卫本身必须抓得住违规文案（否则上一条是摆设）" "1" \
+      "$(printf '%s\n' \
+           '  result_add "collect_raid" "阵列卡" "$ST_SKIP" "把 storcli64 放进 vendor/ 后重新出盘" ""' \
+         | customer_text_offenders | grep -c . || true)"
 
 # 注：「报告里不许出现 git hash」那条放在 tests/test-report-render.sh 里 ——
 # 那边会真的生成一份 HTML 再去查，比在源码里 grep 靠谱得多
 # （在源码里 grep 会被注释里提到的变量名绊倒，第一版就是这么红的）。
+
+# ================================================================
+echo
+echo "=== 时长档位：菜单里有几档，报告就得认得几档 ==="
+# 屏幕上是英文 key（meta.json 里存的也是它），报告里显示中文名。
+# 加档位时只改了菜单、忘了加中文名的话，客户报告上会直接出现 "ENDURANCE"
+# 这种词 —— 这条守卫就是防这个。
+UI_SH="$LIB/ui.sh"
+GEN_PY="$(cd "$LIB/../report" && pwd)/generate_report.py"
+
+profiles="$(grep -oE 'DURATION_PROFILE="[A-Z]+";[[:space:]]*DURATION_SECONDS=[0-9]+' "$UI_SH" || true)"
+check "菜单里应有 6 个时长档位" "6" "$(printf '%s\n' "$profiles" | grep -c . || true)"
+
+while read -r name secs; do
+  [[ -n "$name" ]] || continue
+  check "$name 的秒数应为 $secs" "1" \
+        "$(printf '%s\n' "$profiles" \
+           | grep -c "DURATION_PROFILE=\"$name\";[[:space:]]*DURATION_SECONDS=$secs" || true)"
+  check "报告里必须有 $name 对应的中文名" "1" \
+        "$(grep -c "\"$name\":" "$GEN_PY" || true)"
+done <<'EOF'
+QUICK 600
+STANDARD 1800
+EXTENDED 3600
+LONG 7200
+SOAK 14400
+ENDURANCE 28800
+EOF
+
+# 默认档位不能变：现场 30 秒不按键就按它跑，改错了没人会立刻发现
+check "倒计时结束的默认档位必须是 STANDARD（30 分钟）" "yes" \
+      "$(if grep -q 'default_key="2"' "$UI_SH" \
+            && printf '%s\n' "$profiles" | grep -q 'STANDARD";[[:space:]]*DURATION_SECONDS=1800'; \
+         then echo yes; else echo no; fi)"
 
 # ================================================================
 echo
