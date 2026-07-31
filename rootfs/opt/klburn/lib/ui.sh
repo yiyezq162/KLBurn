@@ -68,30 +68,38 @@ select_duration() {
   local default_key="2" timeout=30 key start now remaining chosen=""
 
   section "SELECT TEST DURATION"
-  printf '   %s[1]%s  QUICK      10 minutes   (smoke test)\n'      "$C_BLD" "$C_RST"
-  printf '   %s[2]%s  STANDARD   30 minutes   (default)\n'         "$C_BLD" "$C_RST"
-  printf '   %s[3]%s  LONG        2 hours     (full burn-in)\n'    "$C_BLD" "$C_RST"
+  printf '   %s[1]%s  QUICK       10 minutes   (smoke test)\n'       "$C_BLD" "$C_RST"
+  printf '   %s[2]%s  STANDARD    30 minutes   (default)\n'          "$C_BLD" "$C_RST"
+  printf '   %s[3]%s  EXTENDED     1 hour\n'                         "$C_BLD" "$C_RST"
+  printf '   %s[4]%s  LONG         2 hours     (full burn-in)\n'     "$C_BLD" "$C_RST"
+  printf '   %s[5]%s  SOAK         4 hours\n'                        "$C_BLD" "$C_RST"
+  printf '   %s[6]%s  ENDURANCE    8 hours     (overnight)\n'        "$C_BLD" "$C_RST"
   printf '\n'
+  printf '   %sCPU / memory / GPU run concurrently for the full time above.%s\n' "$C_GRY" "$C_RST"
+  printf '   %sIf disk stress is confirmed, it adds another 30%% on top.%s\n\n'  "$C_GRY" "$C_RST"
 
   start=$(date +%s)
   while :; do
     now=$(date +%s)
     remaining=$(( timeout - (now - start) ))
     if (( remaining <= 0 )); then chosen="$default_key"; printf '\n'; break; fi
-    printf '\r\033[K  %sPress 1/2/3 to choose, ENTER to start now.  Auto-start STANDARD in %2ds%s' \
+    printf '\r\033[K  %sPress 1-6 to choose, ENTER to start now.  Auto-start STANDARD in %2ds%s' \
       "$C_YEL" "$remaining" "$C_RST"
     if IFS= read -r -s -t 1 -n 1 key; then
       case "$key" in
-        1|2|3) chosen="$key"; printf '\n'; break ;;
+        [1-6]) chosen="$key"; printf '\n'; break ;;
         '')    chosen="$default_key"; printf '\n'; break ;;
       esac
     fi
   done
 
   case "$chosen" in
-    1) DURATION_PROFILE="QUICK";    DURATION_SECONDS=600 ;;
-    3) DURATION_PROFILE="LONG";     DURATION_SECONDS=7200 ;;
-    *) DURATION_PROFILE="STANDARD"; DURATION_SECONDS=1800 ;;
+    1) DURATION_PROFILE="QUICK";     DURATION_SECONDS=600 ;;
+    3) DURATION_PROFILE="EXTENDED";  DURATION_SECONDS=3600 ;;
+    4) DURATION_PROFILE="LONG";      DURATION_SECONDS=7200 ;;
+    5) DURATION_PROFILE="SOAK";      DURATION_SECONDS=14400 ;;
+    6) DURATION_PROFILE="ENDURANCE"; DURATION_SECONDS=28800 ;;
+    *) DURATION_PROFILE="STANDARD";  DURATION_SECONDS=1800 ;;
   esac
   printf '  %s==> %s (%s total stress time)%s\n\n' \
     "$C_GRN$C_BLD" "$DURATION_PROFILE" "$(fmt_dur "$DURATION_SECONDS")" "$C_RST"
@@ -249,8 +257,8 @@ progress_bar_concurrent() {
   cpu_power_w >/dev/null 2>&1 || true
 
   # 读数块的间隔：按总时长自适应，全程大约打 20 块。
-  # QUICK(10min) -> 30s，STANDARD(30min) -> 90s，LONG(2h) -> 360s。
-  # 固定 30 秒的话，长测两小时会刷出 240 块，把屏幕淹掉。
+  # 10min -> 30s，30min -> 90s，2h -> 6min，8h -> 24min。
+  # 固定 30 秒的话，八小时的耐久测试会刷出近千块，把屏幕淹掉。
   local interval="${STATUS_BLOCK_INTERVAL:-0}"
   if (( interval <= 0 )); then
     interval=$(( total / 20 ))
