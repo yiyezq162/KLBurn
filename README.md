@@ -11,6 +11,7 @@
 
 ## 目录
 
+- [三样产物的归属（先看这个）](#三样产物的归属先看这个)
 - [它做什么](#它做什么)
 - [快速上手](#快速上手)
 - [WSL 构建环境准备](#wsl-构建环境准备)
@@ -23,6 +24,38 @@
 - [设计要点](#设计要点)
 - [验证状态](#验证状态)
 - [故障排查](#故障排查)
+
+---
+
+## 三样产物的归属（先看这个）
+
+这个项目产出三样东西，**只有一样交给客户**。改任何代码之前先把这件事记牢：
+
+| 产物 | 内容 | 去哪儿 |
+|---|---|---|
+| **ISO 测试盘** | `out/KLBurn-*.iso` | 🔒 内部，发货前测试用，**不交付** |
+| **工程目录** | `raw/`、`meta.json`、`results.jsonl`、`klburn.log`、`sys_metrics.csv`、`gpu_metrics.csv` | 🔒 内部留档，日后回档追溯用，**不交付** |
+| **`报告名.html`** | 自包含的中文报告 | ✅ **随机器交付给客户** |
+
+由此推出两条硬规矩：
+
+1. **工程目录里越详细越好。** 命令原文、退出码、内部路径、git commit、完整
+   `journalctl -b`、光模块读数、NVMe 控制器参数……全都可以塞。
+   客户半年后反馈问题时，这些是唯一的证据来源。
+   `collect_deep()` 就是专门干这个的，它只落数据、不产生任何判定。
+2. **`report.html` 必须假设读者是客户的采购或运维。** 他不知道 KLBurn 是什么、
+   盘是怎么做的、少了哪个工具、去哪儿补。报告里不许出现「本测试盘为精简版」
+   「把 storcli64 放进 vendor/」「源码版本 5fb41af」这类东西。
+
+**详细规范见 [`docs/report-policy.md`](docs/report-policy.md)，并且有两处自动化守卫
+在 `tests/` 里盯着，写出违规文案会直接跑红。**
+
+其中最要紧的一条：**能力缺失 ≠ 硬件故障**。我们的盘没带某个厂商的管理工具，
+是我们环境的限制，跟被测机器好不好毫无关系 —— 这类一律判 SKIP、写明
+「此项不影响整机结论」，绝不能让客户以为他买的机器缺了什么。
+
+同理，**测试环境自身的问题也绝不能判成硬件故障**（比如内存压测被 OOM killer
+打死，那是测试程序要的容量超过了当时系统能给的，不是内存条坏了）。
 
 ---
 
@@ -48,8 +81,8 @@
 
 | 项目 | 工具 | 说明 |
 |---|---|---|
-| CPU | `stress-ng` 全核 | 同时每 5 秒记录温度和频率 |
-| 内存 | `stressapptest` | 吃掉可用内存的 90%，校验数据错误 |
+| CPU | `stress-ng` 全核 | 同时每 5 秒记录温度、频率和封装功耗 |
+| 内存 | `stressapptest` | 吃掉可用内存减去安全余量的部分，校验数据错误（见下） |
 | 硬盘 | `fio` 裸盘读写 | **破坏性操作，需现场二次确认**，见下 |
 | GPU | `gpu_burn` | 满载，每 5 秒记录温度/功耗/频率（第二阶段） |
 
@@ -275,7 +308,28 @@ Ubuntu 24.04.4 的 live server ISO 有 5 层 squashfs：
      按其它任何键或 60 秒超时都跳过
 
    跳过记为 SKIP，**不算 FAIL**，其余项目照常跑。
-8. **CPU / 内存 /（GPU）并发跑满全部选定时长**，屏幕是一条合并进度条；
+8. **CPU / 内存 /（GPU）并发跑满全部选定时长**，屏幕是一条合并进度条，
+   另外每隔一段时间打印一整块实时读数（逐颗 CPU、逐张显卡各占一行）：
+
+   ```
+   ------------------------------------------------------------------
+     17:15:49  BURN-IN  0h02m00s / 0h10m00s
+      CPU   CPU0   52 C  CPU1   49 C     2699 MHz    968 W
+      GPU0   79 C     431 W    2520 MHz  util 100%  NVIDIA GeForce RTX 4090
+      GPU1   75 C     428 W    2505 MHz  util 100%  NVIDIA GeForce RTX 4090
+   ------------------------------------------------------------------
+   ```
+
+   块的间隔按总时长自适应（全程约 20 块）：快测 30 秒一块，长测 6 分钟一块。
+   滚上去能看到整个压测过程的温度变化历史。
+
+   > 读数为什么是"整块滚动打印"而不是"固定在屏幕底部刷新"：
+   > 0.6.0/0.7.0 试过用 `\033[A` 做粘滞两行区，现场直接翻车——
+   > 只要有别的东西往控制台上写（内核的 OOM 消息、bash 的 `Killed`、
+   > 并发子 shell 的日志），光标就不在预期位置上了，之后每次 `\r` 都回到错的行，
+   > 进度条碎片被甩到屏幕右边，**看着就像整个程序卡死**。
+   > 现在不跟光标较劲，就算被插一脚也最多是块之间多几行日志。
+
    硬盘单独测（不占并发那段时间），跑在并发阶段结束之后
 9. 测后复查
 10. 生成报告，显示 PASS / FAIL 大字
@@ -333,11 +387,32 @@ python3 rootfs/opt/klburn/report/generate_report.py \
 从 https://www.nvidia.cn/drivers/ 下载 Linux x64 驱动 `.run` 包，放到：
 
 ```
-vendor/nvidia/NVIDIA-Linux-x86_64-570.86.16.run
+vendor/nvidia/NVIDIA-Linux-x86_64-595.84.run
 ```
 
-**版本要求**：RTX 5090 和 RTX Pro 6000（Blackwell，sm_120）**必须 ≥ 570.xx**。
-RTX 4090（Ada，sm_89）≥ 520 即可。直接用 570+ 一个驱动通吃。
+**一个驱动通吃所有卡**——NVIDIA 的 Unix `.run` 包是一份统一的支持列表，
+消费卡、工作站卡、数据中心卡混在一起，不需要区分「GeForce 驱动」和「数据中心驱动」。
+595.84（当前 Latest Production Branch）的支持列表实测覆盖：
+
+| 卡 | 架构 | PCI ID |
+|---|---|---|
+| RTX 4090 | Ada (sm_89) | `10de:2684` |
+| RTX 5090 | Blackwell (sm_120) | `10de:2B85` |
+| RTX PRO 6000 Blackwell WS | Blackwell (sm_120) | `10de:2BB1` |
+| L20 | Ada (sm_89) | `10de:26BA` |
+| H100 | Hopper (sm_90) | `10de:2339` |
+
+⚠️ **Blackwell 只能用 open kernel module**。NVIDIA 的说明是：proprietary 模块只支持到
+Turing / Ampere / Ada / Hopper，**Blackwell 及以后只有 open 模块支持**。所以
+`chroot-setup.sh` 装驱动时显式传了 `-M=open`，装完还会用 `modinfo -F license` 复核
+（open 是 `Dual MIT/GPL`，proprietary 是 `NVIDIA`）。
+
+不这么做的后果很隐蔽：用 proprietary 装完，5090 / RTX PRO 6000 上 `nvidia-smi`
+一张卡都认不到，而按 `gpu.sh` 的判定那会被记成 **FAIL**「驱动加载失败，
+显卡/供电/插槽异常」——把好卡判成坏卡。
+
+**已知限制**：H100 的 SXM/HGX 版（带 NVSwitch）需要 `nvidia-fabricmanager`，
+本盘未包含，PCIe 版不受影响；H100 若开了 MIG，gpu_burn 的行为尚未验证。
 
 ### 2. 装 CUDA Toolkit（只为编译 gpu_burn，WSL 里不需要真显卡）
 
@@ -360,22 +435,46 @@ sudo apt-get install -y cuda-toolkit-12-8 build-essential git
 **不需要 root，也不需要机器上真有 N 卡**（只编译，不运行）。脚本会：
 自动在 `/usr/local/cuda*` 下找 `nvcc` → 从 GitHub 克隆
 [wilicc/gpu-burn](https://github.com/wilicc/gpu-burn) 到 `~/klburn-build/gpu-burn-src`
-（`$KLBURN_WORK` 下，已克隆过就复用并尝试 `git pull`）→ 编译 → 把产物
-`gpu_burn` 和 `compare.ptx` 装进 `vendor/gpu_burn/`。
+（`$KLBURN_WORK` 下，已克隆过就复用并尝试 `git pull`）→ 编译 → **裁剪 cuBLAS 静态库并静态链接**
+→ 把 `gpu_burn` 和 `compare.fatbin` 装进 `vendor/gpu_burn/`。
 
 所以这一步**需要能访问 GitHub**。克隆失败的话脚本会提示你手动把源码解压到那个目录再重跑。
 
-两个可用的环境变量：
+三个可用的环境变量：
 
 | 变量 | 默认 | 用途 |
 |---|---|---|
 | `CUDAPATH` | 自动在 `/usr/local/cuda`、`cuda-13*`、`cuda-12*` 里找 | 自动找不到 nvcc 时手工指定 |
-| `COMPUTE`  | `89` | PTX 基线架构 |
+| `COMPUTE`  | `75` | gpu_burn 自己那个 compare 核的 PTX 基线架构 |
+| `GPU_ARCHS`| `80 86 89 90 120` | cuBLAS 里保留哪几代卡的 cubin |
 
-> 关于同时兼容 sm_89 和 sm_120：gpu_burn 走的是 **PTX + 驱动 JIT** 的路子
-> （`compare.ptx`，不是预编译 cubin）。PTX 是向上兼容的——用 `compute_89` 编出来的
-> PTX，在 sm_120 的卡上由驱动 JIT 成原生代码。所以一个文件通吃两代卡。
-> 想换基线架构：`COMPUTE=75 ./build/build-gpu-burn.sh`
+#### 为什么必须静态链接（踩过的坑）
+
+gpu-burn 的 Makefile 默认是 `-lcuda -lcublas -lcudart` **动态**链接，还往二进制里
+硬编 `-Wl,-rpath=<构建机的CUDA路径>`。但是：
+
+- `libcuda.so` 来自**显卡驱动** → 测试盘上有 ✅
+- `libcublas.so` / `libcudart.so` 来自 **CUDA Toolkit** → **测试盘上没有** ❌
+
+直接打包出来的盘一跑就是 `error while loading shared libraries: libcublas.so.12`，
+然后被 `gpu_stress()` 判成「gpu_burn 异常退出 → 显卡故障」，纯粹的误杀。
+
+随盘带 `.so` 也能解决，但 `libcublasLt.so` 一个就 **717MB**。
+所以改成 `nvprune` 裁剪静态库（只留 `GPU_ARCHS` 里那几代）再静态链接，
+最后是一个 **330MB 出头的自包含二进制**，体积少一半，还不用操心 rpath。
+`libcuda` 仍然动态链接——它属于驱动，必须用目标机器上那一份。
+
+`chroot-setup.sh` 里有一道自检：装完用 `ldd` 确认二进制没有动态依赖
+cuBLAS/cudart，依赖了就直接让构建失败，不会让这种盘流到现场。
+
+> 关于跨代兼容：`compare` 核走的是 **PTX/fatbin + 驱动 JIT**，PTX 向上兼容，
+> 用 `compute_75` 编出来的在 sm_120 的卡上由驱动 JIT 成原生代码。
+> 真正的算力负载来自 cuBLAS 里的预编译 cubin，所以 `COMPUTE` 定低不会削弱压测强度，
+> 反而让更老的卡也能跑。
+>
+> ⚠️ 上游早些年产出的是 `compare.ptx`，现在换成了 `compare.fatbin`。
+> 构建脚本和 `chroot-setup.sh` 两个名字都认，但这个文件是 gpu_burn 运行时
+> 按相对路径加载的，**丢了会直接跑不起来**——所以 chroot 里没找到会直接报错停下。
 
 ### 4. 构建带 GPU 的 ISO
 
@@ -440,7 +539,8 @@ KLBurn/
 │   └── test-disk-exclusion.sh   U盘排除逻辑（需 root，造 dm 设备）
 ├── vendor/                      离线包（不进版本库，见 vendor/README.md）
 ├── docs/
-│   └── usb-rufus.md             Rufus 写盘 + 建 exFAT 分区详细步骤
+│   ├── usb-rufus.md             Rufus 写盘 + 建 exFAT 分区详细步骤
+│   └── report-policy.md         ★ 报告文案规范（哪些东西不能给客户看）
 └── out/                         构建产物 ISO
 ```
 
@@ -463,8 +563,8 @@ sudo ./tests/test-disk-exclusion.sh
 
 | 测试 | 锁住什么 | 改了谁就要跑 | 额外要求 |
 |---|---|---|---|
-| `test-log-parsing.sh`     | stressapptest / stress-ng / gpu_burn 日志的判读 | `lib/stress.sh`、`lib/gpu.sh` | — |
-| `test-hw-checks.sh`       | 内存容量核对、**电源整体判定**、ping/地址解析、网卡型号反查、阵列卡 BMC 交叉核对、硬盘温度判定、**计数不能算出 `0\n0`**、**`collect_all`/`verify_all` 调用链不能少人** | `lib/collect.sh`、`lib/network.sh`、`lib/verify.sh`、`lib/core.sh` | 硬盘温度那组要 `jq`，没装会自动跳过 |
+| `test-log-parsing.sh`     | stressapptest / stress-ng / gpu_burn 日志的判读、**被 OOM killer 打死不许判成硬件故障** | `lib/stress.sh`、`lib/gpu.sh` | — |
+| `test-hw-checks.sh`       | 内存容量核对、**电源整体判定**、ping/地址解析、网卡型号反查、网卡协商速率、阵列卡 BMC 交叉核对、硬盘温度判定、PCIe 链路（只查端点）、开机内核日志、**dm 设备枚举（Ventoy 报告落盘）**、**客户可见文案不许有内部用语**、**计数不能算出 `0\n0`**、**`collect_all`/`verify_all` 调用链不能少人** | `lib/collect.sh`、`lib/network.sh`、`lib/verify.sh`、`lib/core.sh`、`lib/storage.sh` | 硬盘温度那组要 `jq`；`mknod` 那组要 root，非 root 自动跳过 |
 | `test-report-render.sh`   | 报告渲染：不泄露通电时间、`Unknown!` 归一化、二级编号不跳号、空 run-dir 不崩 | `report/generate_report.py` | `python3` |
 | `test-capture.sh`         | 采集命令超时不把 bash 的 `Killed` 漏到屏幕上，且要留下 TIMEOUT 记录 | `lib/core.sh` | 约 12 秒（SIGKILL 宽限期写死 10 秒） |
 | `test-concurrent-burn.sh` | CPU/内存/GPU 是真并发不是排队，进度条跟着任务提前退出，**并发期间只能有一个采样器**，**cleanup 要连孙进程一起收**，盘内没带 gpu_burn 时 GPU 结论不能凭空消失 | `factory-test.sh`、`lib/ui.sh`、`lib/gpu.sh`、`lib/stress.sh` | 约 12 秒（要等采样间隔） |
@@ -493,12 +593,27 @@ dm-linear 搭出和 Ventoy 一模一样的设备链，并**故意删掉 `/dev/ma
 
 ## 设计要点
 
-### 报告落盘的三层回退
+### 报告落盘的四层回退
+0. **所有 device-mapper 设备里文件系统是 exFAT 的**（Ventoy 唯一挂得上的那一个）
 1. 卷标是 `KLBURN` 的分区
 2. live 介质所在盘上的 exFAT 分区（同一根 U 盘的第二分区）
 3. 任意可移动盘上的 exFAT 分区
 
-三层都找不到 → 报告落 `/tmp`，屏幕打黄色大框警告，并给出排查命令。
+四层都找不到 → 报告落 `/tmp`，屏幕打黄色大框警告，并把 `lsblk` / `blkid` /
+`/sys/block` / dm slaves 链整个倒进 `klburn.log` 存证。
+
+> **第 0 层是 0.8.0 补的，之前 Ventoy 下会翻车。** Ventoy 用 dm-mapper 把 exFAT
+> 分区包了一层，**能挂上的是 dm 映射**（历史数据里 `data_partition` 一直是
+> `/dev/dm-1` 或 `/dev/dm-2`），底下的真实分区被 device-mapper 以 `FMODE_EXCL`
+> 独占持有，直接挂只会得到 `Can't open blockdev`。
+>
+> 而 1~3 层的候选全靠 `blkid` 枚举，`blkid` 只扫 `/dev` 下**真实存在**的节点；
+> Ventoy 禁掉了 udev 规则，`/dev/mapper` 下只有 `control`，有时连 `/dev/dm-N`
+> 都不会被创建 —— 于是唯一能挂的候选凭空消失，报告落 `/tmp`，关机就没了。
+>
+> 第 0 层直接读 `/sys/block/dm-*`（不受 udev 影响），缺设备节点就按 sysfs 里的
+> 设备号 `mknod` 补建，再用 `blkid -p` 低层探测（普通 `blkid` 走缓存，
+> 刚造出来的节点查不到）。它排在最前面：Ventoy 下先试真实分区纯属白等。
 
 ### 裸盘写入的排除规则
 被 fio 写的盘必须全部通过这些检查，任一命中就排除：
@@ -545,11 +660,18 @@ WARN 不会拉低结论，但会在报告抬头单独列一块（少一条内存
 
 | 项目 | 变量 | WARN | FAIL |
 |---|---|---|---|
-| CPU（`coretemp` / `k10temp` / `zenpower` / `cpu_thermal`，退路是 thermal zone） | `CPU_TEMP_*` | ≥ 88 °C | ≥ 98 °C |
+| CPU（`coretemp` / `k10temp` / `zenpower` / `cpu_thermal`，退路是 thermal zone） | `CPU_TEMP_*` | ≥ 95 °C | ≥ 100 °C |
 | GPU（`nvidia-smi` 读数，逐卡判） | `GPU_TEMP_*` | ≥ 83 °C | ≥ 90 °C |
 | 硬盘（SMART 上报的测后温度，逐盘判） | `DISK_TEMP_*` | ≥ 70 °C | ≥ 80 °C |
 
 CPU/GPU 取压测整段的峰值；硬盘取测后那次 SMART 的读数（测前是冷的，没有参考价值）。
+
+> CPU 那两档 0.6.0 起从 88/98 放宽到 **95/100**：服务器 CPU 满载跑到 80 多度是常态，
+> 88 告警太灵敏，现场每台机器都刷黄。Intel 服务器 CPU 的 Tjmax 一般在 100~105 °C，
+> 到 100 度已经在降频保护了，那才是真的散热不行。
+>
+> 实际生效的阈值会写进 `meta.json` 的 `thresholds` 段，报告里显示的就是这一份——
+> 现场在 `klburn.conf` 里改了阈值，报告不会和判定对不上。
 
 **读不到温度就整条跳过，绝不当成故障**——服务器 CPU 的温度驱动不一定是
 `coretemp`/`k10temp`，部分 SATA 盘和阵列卡后面的盘也不通过 SMART 上报温度，
@@ -559,10 +681,38 @@ CPU/GPU 取压测整段的峰值；硬盘取测后那次 SMART 的读数（测�
 写法是 `: "${CPU_TEMP_WARN:=88}"`——现场想临时改，`Alt+F2` 进去在
 `/opt/klburn/klburn.conf` 里写一行同名赋值即可覆盖（那个文件在 `core.sh` 之后被 source）。
 
-### 为什么内存按"可用内存"的 90% 而不是"总内存"
-live 系统的 overlay 上层在内存里（tmpfs），按总内存的 90% 去分配会直接触发 OOM，
-把测试进程打死。所以按 `MemAvailable` 的 90% 算，报告里会同时写明
-实际测了多少、占总内存百分之多少。
+### 内存压测容量怎么算（以及为什么不是简单的百分比）
+
+```
+余量   = 总内存的 10%，下限 2GB，上限 8GB
+目标量 = (MemAvailable - 余量) x MEM_TEST_PERCENT%      # 默认 100
+```
+
+两个坑都踩过，所以是现在这个形状：
+
+1. **不能按"总内存"的百分比算。** live 系统的 overlay 上层在内存里（tmpfs），
+   按总内存去分配会直接触发 OOM。
+2. **也不能直接按 `MemAvailable` 的百分比算。** 0.7.0 就栽在这：一台 32GB 的机器，
+   `MemAvailable` 29194MB，按 95% 取到 27734MB，跑到第 9 分钟被 OOM killer 打死。
+   `MemAvailable` 是**此刻**的估计，而测试跑起来之后 tmpfs 还在涨（报告、日志、
+   raw 数据都写在内存里，尤其是报告落 `/tmp` 的时候），squashfs 的 page cache
+   也在争内存。**必须先扣一个绝对余量，再谈百分比。**
+
+余量取「总内存的 10%，夹在 2GB 和 8GB 之间」这个形状，是因为 live 系统本身的占用
+**不随机器内存增长**：
+
+| 机器内存 | 余量 | 实测覆盖率 |
+|---|---|---|
+| 32 GB | 3.1 GB | 约 82% |
+| 128 GB | 8 GB（触上限） | 约 93% |
+| 512 GB | 8 GB（触上限） | 约 98% |
+
+小内存机器保守、大内存机器激进，正好符合"内存越大越该测透"的直觉。
+想再收紧就在 `klburn.conf` 里调 `MEM_TEST_PERCENT`。
+
+**万一还是被 OOM killer 打死**（退出码 137），判定是 **WARN 而不是 FAIL**，
+并在报告里写明"这是测试环境的容量限制，不是内存故障"。
+GPU 压测同理——并发跑的内存压测把内存吃光时，OOM killer 会连坐收掉 `gpu_burn`。
 
 ### 关掉的东西
 `snapd`、`cloud-init`、`unattended-upgrades`、`apt-daily.timer`、
@@ -681,7 +831,7 @@ blkid
 测试脚本发现年份早于 2024、或者测试时间早于这张 ISO 的构建日期时，
 会在屏幕和报告里同时给出提示。
 
-**阵列卡这项是 WARN，报告里只有 PCI 型号**
+**阵列卡这项是 SKIP，报告里只有型号没有固件版本**
 这张盘里没带 `storcli64`。它是 Broadcom 的闭源工具，不在 Ubuntu 源里，
 只能手工下载后放进 `vendor/storcli/` 再重新出盘——步骤见
 [`vendor/README.md`](vendor/README.md)。整个解压目录原样丢进去就行，
@@ -689,6 +839,12 @@ blkid
 
 补上之后阵列卡的固件版本、逻辑盘状态、卡后面挂了哪些物理盘才会进报告。
 **阵列卡始终只采集不压测**，所以这一项永远不会是 FAIL。
+
+> 注意这一项判的是 **SKIP 不是 WARN**，而且报告里的措辞是
+> 「当前测试环境的管理工具不支持该型号」——**不提工具名，也不提怎么补**。
+> 原因见 [`docs/report-policy.md`](docs/report-policy.md)：报告是给客户的，
+> 我们盘里少带一个工具是**我们环境**的限制，不该让客户以为他的卡有毛病。
+> 补工具是我们内部的事。
 
 **没有温度数据**
 服务器 CPU 的温度驱动可能不是 `coretemp`/`k10temp`。
