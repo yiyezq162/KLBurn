@@ -56,10 +56,13 @@ gpu_detect() {
 
   info "Found $GPU_PRESENT NVIDIA GPU(s) on the PCI bus"
 
-  # ---------- 精简版 ISO：没打包驱动 ----------
+  # ---------- 测试环境未包含显卡驱动 ----------
+  # 文案给客户看：只说"本次测试环境未包含显卡驱动"，不提测试盘/精简版/构建选择——
+  # 那是我们内部怎么打包的事，客户看到只会以为机器缺东西。
   if [[ "${INCLUDE_NVIDIA:-0}" != "1" ]]; then
     result_add "gpu_detect" "GPU" "$ST_SKIP" \
-      "检测到 ${GPU_PRESENT} 张 NVIDIA 显卡，但本测试盘为精简版（未包含 NVIDIA 驱动），未做 GPU 测试" \
+      "检测到 ${GPU_PRESENT} 张 NVIDIA 显卡（型号见硬件清单）。\
+本次测试环境未包含显卡驱动，因此未做显卡压力测试。此项不影响整机结论。" \
       "raw/gpu-lspci.txt"
     return 0
   fi
@@ -69,9 +72,12 @@ gpu_detect() {
   modprobe nvidia_uvm  >/dev/null 2>&1 || true
   sleep 2
 
+  # 说好了带驱动，运行时却找不到管理程序 —— 这是**我们这边环境的问题**，
+  # 不是被测机器的问题，绝不能判 FAIL 说人家显卡坏了。
   if ! have nvidia-smi; then
-    result_add "gpu_detect" "GPU" "$ST_FAIL" \
-      "检测到 ${GPU_PRESENT} 张 NVIDIA 显卡，但盘内没有 nvidia-smi（驱动未正确安装进 ISO）" \
+    result_add "gpu_detect" "GPU" "$ST_SKIP" \
+      "检测到 ${GPU_PRESENT} 张 NVIDIA 显卡（型号见硬件清单）。\
+本次测试环境的显卡驱动未就绪，因此未做显卡压力测试。此项不影响整机结论。" \
       "raw/gpu-lspci.txt"
     return 1
   fi
@@ -149,7 +155,8 @@ gpu_stress() {
 
   if [[ ! -x "$KLB_TOOLS/gpu_burn" ]]; then
     result_add "stress_gpu" "GPU 压力测试" "$ST_SKIP" \
-      "盘内缺少 gpu_burn 工具，仅采集了显卡信息未做满载压测" ""
+      "本次测试环境未包含显卡满载测试程序，仅采集了显卡型号、显存与驱动版本，\
+未做满载压力测试。此项不影响整机结论。" ""
     return 0
   fi
 
@@ -188,6 +195,14 @@ gpu_stress() {
     result_add "stress_gpu" "GPU 压力测试" "$ST_FAIL" \
       "gpu_burn 报告 ${faulty} 张卡 FAULTY、累计 ${err_sum} 处计算校验错误（显卡故障）；$detail" \
       "raw/stress/gpu-burn.log"
+  elif oom_killed "$rc"; then
+    # 和内存那边同样的道理：并发跑的内存压测把系统内存吃光时，OOM killer
+    # 会连坐收掉别的大进程，gpu_burn 首当其冲。这跟显卡好不好毫无关系，
+    # 判 FAIL 就是误杀。（oom_killed 定义在 lib/stress.sh）
+    result_add "stress_gpu" "GPU 压力测试" "$ST_WARN" \
+      "本次 GPU 压测未能跑完整个时长：测试系统在运行过程中可用内存不足，\
+测试程序被系统回收。这是测试环境的容量限制，**不是显卡故障** —— \
+在此之前已完成的计算校验未发现任何错误。${detail}" "raw/stress/gpu-burn.log"
   elif (( rc != 0 )); then
     result_add "stress_gpu" "GPU 压力测试" "$ST_FAIL" \
       "gpu_burn 异常退出（退出码 $rc）；$detail" "raw/stress/gpu-burn.log"

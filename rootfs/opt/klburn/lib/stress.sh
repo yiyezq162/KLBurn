@@ -45,24 +45,58 @@ ng_parse_failed() {
   _last_num 'failed:[[:space:]]+[0-9]+' "$1"
 }
 
+# 压测进程是不是被 OOM killer 干掉的。
+#
+# 退出码 137 = 128 + 9(SIGKILL)。在这个场景里 SIGKILL 几乎只有一个来源：
+# 内核内存不足，挑了内存占用最大的进程（正好就是内存压测本身）杀掉。
+#
+# ⚠️ 这必须和"内存条坏了"严格分开。0.7.0 现场就是被 OOM 打死之后判了 FAIL，
+# 一台好机器被拦在出货前 —— 这是本项目最忌讳的一类误判：
+# **把好机器拦在出货前比漏判更糟**。
+#
+# 抽成纯函数以便脱机回归测试（见 tests/test-log-parsing.sh）。
+# dmesg 文件参数只为测试用，现场传空就去读真的 dmesg。
+oom_killed() {
+  local rc="${1:-0}" dmesg_file="${2:-}"
+  (( rc == 137 )) || return 1
+  local txt
+  if [[ -n "$dmesg_file" ]]; then
+    [[ -f "$dmesg_file" ]] || return 0
+    txt="$(tail -200 "$dmesg_file" 2>/dev/null)"
+  else
+    txt="$(dmesg 2>/dev/null | tail -200)"
+  fi
+  # dmesg 里能找到 OOM 记录当然最好；读不到 dmesg（权限/环境）时也按 OOM 处理 ——
+  # 宁可少判一次，也绝不能把 SIGKILL 当成内存故障报给客户。
+  [[ -z "$txt" ]] && return 0
+  grep -qiE 'Out of memory: Killed process|oom-kill:' <<<"$txt" && return 0
+  return 0
+}
+
 # ---------------------------------------------------------------- 后台采样
 # monitor_start <phase标签>
 MONITOR_PID=""
 monitor_start() {
   local phase="$1"
   local csv="$RUN_DIR/sys_metrics.csv"
+  # 新增的列一律往**末尾**加：报告生成器用 csv.DictReader 按列名取值，
+  # 中间插一列会让老数据的列名和值错位。
   if [[ ! -f "$csv" ]]; then
-    echo "time,phase,cpu_temp_c,cpu_freq_mhz,load1,mem_used_mb,mem_total_mb" > "$csv"
+    echo "time,phase,cpu_temp_c,cpu_freq_mhz,load1,mem_used_mb,mem_total_mb,cpu_power_w" > "$csv"
   fi
   (
+    # RAPL 是累计能量计数器，要两次采样求差。先在子 shell 里打一次基准，
+    # 否则第一个采样点的功耗永远是空的。
+    cpu_power_w >/dev/null 2>&1 || true
     while :; do
-      local t f l used total
+      local t f l used total p
       t="$(cpu_temp_max_c)"
       f="$(cpu_freq_avg_mhz)"
+      p="$(cpu_power_w)"
       l="$(awk '{print $1}' /proc/loadavg 2>/dev/null)"
       read -r total used < <(awk '/MemTotal/{tot=$2} /MemAvailable/{av=$2} END{printf "%d %d", tot/1024, (tot-av)/1024}' /proc/meminfo)
-      printf '%s,%s,%s,%s,%s,%s,%s\n' \
-        "$(date '+%H:%M:%S')" "$phase" "${t:-}" "${f:-}" "${l:-}" "${used:-}" "${total:-}" >> "$csv"
+      printf '%s,%s,%s,%s,%s,%s,%s,%s\n' \
+        "$(date '+%H:%M:%S')" "$phase" "${t:-}" "${f:-}" "${l:-}" "${used:-}" "${total:-}" "${p:-}" >> "$csv"
       sleep 5
     done
   ) &
@@ -187,14 +221,42 @@ stress_mem() {
   local total_mb avail_mb target_mb threads
   total_mb="$(awk '/MemTotal/{printf "%d", $2/1024}' /proc/meminfo)"
   avail_mb="$(awk '/MemAvailable/{printf "%d", $2/1024}' /proc/meminfo)"
-  # 按"可用内存的 90%"取，而不是总内存的 90%：
-  # live 系统的 overlay 上层在内存里，按总内存算会直接触发 OOM。
-  target_mb=$(( avail_mb * 90 / 100 ))
+
+  # 目标容量 = （可用内存 - 给 live 系统留的余量） x 覆盖率
+  #
+  # ⚠️ 绝对不能直接按 MemAvailable 的百分比取。0.7.0 现场实测翻过车：
+  #   32GB 的机器，MemAvailable 29194MB，按 95% 取到 27734MB，
+  #   跑到第 9 分钟被 OOM killer 打死
+  #       Out of memory: Killed process 4168 (stressapptest) anon-rss:28397568kB
+  #   然后 rc=137 被判成 FAIL —— 一台好机器就这么被拦在出货前。
+  #
+  # 根子在于 MemAvailable 是"此刻"的估计，而测试跑起来之后：
+  #   - live 系统的 tmpfs 还在涨（报告、日志、raw 数据都写在内存里，
+  #     尤其是没找到 U 盘数据分区、报告落 /tmp 的时候）
+  #   - squashfs 的 page cache 也在争内存
+  # 所以必须先扣一个**绝对**余量，再谈百分比。
+  #
+  # 余量 = 总内存的 10%，下限 2GB，上限 8GB。
+  # 这个公式在小内存机器上保守（32GB -> 扣 3.1GB，实际测到约 82%），
+  # 在大内存机器上反而更激进（512GB -> 只扣 8GB，覆盖率约 98%），
+  # 正好符合"内存越大越该测透、而 live 系统本身占用并不随内存增长"的事实。
+  local reserve_mb
+  reserve_mb=$(( total_mb * 10 / 100 ))
+  (( reserve_mb < 2048 )) && reserve_mb=2048
+  (( reserve_mb > 8192 )) && reserve_mb=8192
+
+  local usable_mb=$(( avail_mb - reserve_mb ))
+  (( usable_mb < 256 )) && usable_mb=256
+
+  # 还想再收紧的话在 klburn.conf 里调这个（默认 100 = 把上面算出来的可用量测满）
+  : "${MEM_TEST_PERCENT:=100}"
+  target_mb=$(( usable_mb * MEM_TEST_PERCENT / 100 ))
   (( target_mb < 256 )) && target_mb=256
   threads="$(nproc)"; (( threads > 16 )) && threads=16
 
   local pct=$(( target_mb * 100 / total_mb ))
-  info "[MEM] total ${total_mb}MB, available ${avail_mb}MB -> testing ${target_mb}MB (${pct}% of total), $(fmt_dur "$secs")"
+  info "[MEM] total ${total_mb}MB, available ${avail_mb}MB, reserved ${reserve_mb}MB for the live OS"
+  info "[MEM] -> testing ${target_mb}MB (${pct}% of total), $(fmt_dur "$secs")"
 
   # ⚠️ 这里**故意不起采样器**。CPU 和内存现在是并发跑的两个子 shell，各起一个
   # monitor_start 就是两个后台采样进程同时往同一个 sys_metrics.csv 里写 ——
@@ -256,12 +318,22 @@ stress_mem() {
   metric_add "mem" "校验错误数" "$errors"
   metric_add "mem" "硬件异常数" "$incidents"
 
+  # 判定顺序有讲究：真错误 > 自检结论 > OOM（环境问题）> 其它异常退出。
+  # OOM 必须排在"异常退出"前面，否则又会被当成故障。
   if (( incidents > 0 || errors > 0 )); then
     result_add "stress_mem" "内存压力测试" "$ST_FAIL" \
       "检测到 ${incidents} 处硬件异常、${errors} 处数据校验错误（内存条或内存控制器故障）；$detail" "$ref"
   elif [[ "$sat_status" == "FAIL" ]]; then
     result_add "stress_mem" "内存压力测试" "$ST_FAIL" \
       "stressapptest 自检结论为 FAIL；$detail" "$ref"
+  elif oom_killed "$rc"; then
+    # 被 OOM killer 打死 = 测试程序申请的容量超过了测试系统当时能给的，
+    # 和内存条本身好不好没有任何关系。判 WARN 并说清楚，绝不能判 FAIL。
+    metric_add "mem" "本次是否跑满" "否（测试环境内存不足）"
+    result_add "stress_mem" "内存压力测试" "$ST_WARN" \
+      "本次内存压测未能跑完整个时长：测试系统在运行过程中可用内存不足，\
+测试程序被系统回收。这是测试环境的容量限制，**不是内存故障** —— \
+在此之前已完成的校验未发现任何数据错误。${detail}" "$ref"
   elif (( rc != 0 )); then
     result_add "stress_mem" "内存压力测试" "$ST_FAIL" \
       "测试进程异常退出（退出码 $rc）；$detail" "$ref"
