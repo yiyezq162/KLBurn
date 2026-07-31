@@ -51,7 +51,7 @@ net_result_text() {
     NO_DHCP)     printf '链路已连接，但未获取到 DHCP 地址' ;;
     NO_GATEWAY)  printf '已获取地址，但 DHCP 未下发网关' ;;
     PING_FAIL)   printf '已获取地址，但 ping 网关不通' ;;
-    NO_CLIENT)   printf '未测试（盘内缺少 DHCP 客户端）' ;;
+    NO_CLIENT)   printf '未测试（当前测试环境不具备该项检测条件）' ;;
     *)           printf '未测试' ;;
   esac
 }
@@ -108,7 +108,15 @@ net_link_up_all() {
 # 建立之前就要用这个函数——那时候 $RAW_DIR 还没定义，日志就先落 /tmp，
 # 不影响功能，只是这几行 dhclient 输出不会进最终报告目录。
 net_dhcp() {
-  local ifn="$1" log="${RAW_DIR:-/tmp}/nic/${ifn}-dhcp.log"
+  # ⚠️ 必须拆成两条 local。同一条 local 里后一个变量看不到前一个刚赋的值
+  # （bash 在调用 local 之前就把所有参数展开完了），写成
+  #     local ifn="$1" log="...${ifn}..."
+  # 时那个 ${ifn} 取到的是**调用方作用域里**碰巧同名的变量 —— 现在两个调用方
+  # 的循环变量恰好都叫 ifn，所以一路蒙对；哪天有人把循环变量改个名，
+  # 日志就会写成 "-dhcp.log"，或者在 set -u 下直接 unbound variable 崩掉。
+  # 同样的坑 mem_gap_tolerance_mb 那里已经栽过一次了。
+  local ifn="$1"
+  local log="${RAW_DIR:-/tmp}/nic/${ifn}-dhcp.log"
   mkdir -p "$(dirname "$log")" /var/lib/dhcp
   if have dhclient; then
     # -1 = 试一轮拿不到就退出（默认会无限重试，现场没有 DHCP 就卡死在这）。
@@ -157,13 +165,28 @@ net_release() {
 # 正式再做一遍（那才是写进报告的结论）；这里只是"顺手蹭一次网"，
 # 所以拿到时间就退出，不用把每个口都测一遍。
 sync_clock_now() {
-  have chronyd || return 1
-  local cfg="" srv
+  have chronyd || { dbg "clock sync: no chronyd on this media"; return 1; }
+
+  # ⚠️ 每条 server 指令必须是**一个独立的命令行参数**。
+  #
+  # chronyd 的用法是 `chronyd [OPTION]... [DIRECTIVE]...`，一个参数就是一条指令。
+  # 0.4.0 之前是把三个服务器拼成一个三行的字符串塞进去，chronyd 直接
+  #     Fatal error : Could not parse server directive at line 1
+  # 秒退——也就是说校时**从来就没跑起来过**，现场日志里那句"1 秒就放弃"
+  # 不是网络不通，是这里参数传错了。（在 WSL 里两种写法对比实测过。）
+  local args=() srv
   for srv in "${NET_TIME_SERVERS[@]}"; do
-    cfg+="server $srv iburst maxsamples 1
-"
+    args+=("server $srv iburst maxsamples 1")
   done
-  timeout "$NET_TIME_SYNC_TIMEOUT" chronyd -q "$cfg" >/dev/null 2>&1
+
+  # 输出不要再往 /dev/null 里扔了：校时失败时现场和报告里都得看得到原因，
+  # 否则下次还是只能靠猜。RUN_DIR 这时候还没建立，先落 /tmp，
+  # 由 factory-test.sh 在 RUN_DIR 就绪后搬进 raw/。
+  local log="${KLB_CLOCK_LOG:-/tmp/klburn-clocksync.log}"
+  {
+    printf '=== %s try sync via %s ===\n' "$(date '+%F %T')" "${NET_TIME_SERVERS[*]}"
+  } >> "$log" 2>/dev/null
+  timeout "$NET_TIME_SYNC_TIMEOUT" chronyd -q "${args[@]}" >> "$log" 2>&1
 }
 
 try_sync_clock_via_network() {
@@ -195,6 +218,108 @@ try_sync_clock_via_network() {
     warn "No network time source reached - keeping BIOS/RTC clock as-is."
   fi
   return $(( synced ? 0 : 1 ))
+}
+
+# ---------------------------------------------------------------- 协商速率达标
+# 一个万兆口协商成了千兆（线序不对 / 光模块不对 / 对端口不对 / 线缆质量差），
+# 连通性测试照样全绿——能拿到 DHCP 地址、也 ping 得通网关，只是慢了十倍。
+# ethtool 的 "Supported link modes"（这块网卡的额定能力）和 "Speed"（实际协商结果）
+# 采集阶段早就落盘了，只差比对这一步。
+#
+# 只比协商速率，不做吞吐测试：那需要对端再架一台机器打流，出厂测试台上没有这个条件。
+#
+# nic_supported_max_mbps <ethtool输出文件> -> 支持的最高速率(Mb/s)，取不到给 0
+# "Supported link modes" 可能跨多行，后续行没有字段名、只是缩进：
+#     Supported link modes:   1000baseT/Full
+#                             10000baseT/Full
+# 所以要一直吃到下一个 "字段名:" 出现为止。
+nic_supported_max_mbps() {
+  local f="${1:-}"
+  [[ -f "$f" ]] || { printf '0'; return; }
+  awk '
+    /Supported link modes:/ { inblock = 1 }
+    inblock {
+      # 碰到下一个字段名就收工（"Supported link modes:" 那行自己不算）
+      if ($0 !~ /Supported link modes:/ && $0 ~ /^[[:space:]]*[A-Za-z][A-Za-z0-9 \/()-]*:/) {
+        inblock = 0
+        next
+      }
+      line = $0
+      # 一行里可能有多个模式，全都抠出来取最大：10000baseT/Full 25000baseCR/Full ...
+      while (match(line, /[0-9]+base/)) {
+        v = substr(line, RSTART, RLENGTH - 4) + 0
+        if (v > max) max = v
+        line = substr(line, RSTART + RLENGTH)
+      }
+    }
+    END { printf "%d", max + 0 }
+  ' "$f"
+}
+
+# nic_current_mbps <ethtool输出文件> -> 当前协商速率(Mb/s)，取不到给 0
+# 没插线时 ethtool 报的是 "Speed: Unknown!"，必须当成"读不到"而不是 0 速率。
+nic_current_mbps() {
+  local f="${1:-}"
+  [[ -f "$f" ]] || { printf '0'; return; }
+  awk '
+    /^[[:space:]]*Speed:/ {
+      s = $0
+      sub(/^[[:space:]]*Speed:[[:space:]]*/, "", s)
+      sub(/Mb\/s.*$/, "", s)
+      if (s ~ /^[0-9]+$/) { printf "%d", s; found = 1 }
+      exit
+    }
+    END { if (!found) printf "0" }
+  ' "$f"
+}
+
+# 只判"已接网线"的口。没插线的口 ethtool 报的速率是假的，绝不能参与判定
+# （这正是 collect_all 里要先 net_link_up_all 再 collect_nic 的原因）。
+check_nic_speed() {
+  info "Checking NIC negotiated link speed ..."
+
+  local ifaces=() ifn
+  while read -r ifn; do [[ -n "$ifn" ]] && ifaces+=("$ifn"); done < <(net_phys_ifaces)
+
+  if (( ${#ifaces[@]} == 0 )); then
+    result_add "check_nic_speed" "网卡协商速率" "$ST_SKIP" "未发现物理网口" ""
+    return
+  fi
+
+  local checked=0 slow=() f cur max
+  for ifn in "${ifaces[@]}"; do
+    f="$RAW_DIR/nic/${ifn}-ethtool.txt"
+    [[ -f "$f" ]] || continue
+    # 没接网线的口不参与判定
+    grep -qE '^[[:space:]]*Link detected:[[:space:]]*yes' "$f" 2>/dev/null || continue
+
+    max="$(nic_supported_max_mbps "$f")"
+    cur="$(nic_current_mbps "$f")"
+    [[ "$max" =~ ^[0-9]+$ ]] || max=0
+    [[ "$cur" =~ ^[0-9]+$ ]] || cur=0
+    # 两个数任一读不到就整条让开——读不到数据绝不能当成故障
+    (( max > 0 && cur > 0 )) || continue
+
+    checked=$((checked+1))
+    metric_add "nic" "${ifn} 协商速率Mb/s" "$cur"
+    if (( cur < max )); then
+      slow+=("${ifn}：实际 ${cur}Mb/s，额定 ${max}Mb/s")
+    fi
+  done
+
+  if (( checked == 0 )); then
+    result_add "check_nic_speed" "网卡协商速率" "$ST_SKIP" \
+      "现场没有接网线的网口（或 ethtool 读不到速率），无法核对协商速率" "raw/nic-summary.txt"
+  elif (( ${#slow[@]} > 0 )); then
+    result_add "check_nic_speed" "网卡协商速率" "$ST_WARN" \
+      "$(printf '%s；' "${slow[@]}")共核对 ${checked} 个已接网线的网口。\
+协商速率没跑到网卡额定值，常见原因：网线规格不够（万兆要 Cat6A 以上）、光模块型号不匹配、\
+对端交换机口速率不够或被锁死。注意这只反映本次接入的对端条件，不一定是网卡本身的问题。" \
+      "raw/nic-summary.txt"
+  else
+    result_add "check_nic_speed" "网卡协商速率" "$ST_PASS" \
+      "${checked} 个已接网线的网口均协商到网卡额定速率" "raw/nic-summary.txt"
+  fi
 }
 
 # ---------------------------------------------------------------- 主流程
