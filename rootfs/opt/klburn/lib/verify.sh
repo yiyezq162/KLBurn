@@ -122,6 +122,93 @@ verify_disk_temp() {
 }
 
 # ---------------------------------------------------------------- dmesg 查错
+#
+# 真正代表硬件问题的关键字。故意不含泛泛的 "error"，否则噪声太大。
+#
+# ⚠️ 这个模式的每一条都拿现场真机日志验过：正样本是那台 MegaRAID 濒死的机器
+# （dmesg 里有完整故障链），负样本是同一台机器换了张盘之后的健康日志（2575 行）
+# 加上一份手工挑的"长得像错误但完全正常"的行。加新关键字必须两边都跑一遍，
+# 见 tests/test-hw-checks.sh 里「内核日志关键字」那组。
+#
+# 两个曾经踩过/差点踩到的坑，改的时候别退回去：
+#   1. 裸 NMI —— 会命中每台机器开机都有的三行正常日志：
+#          ACPI: X2APIC_NMI (uid[...] high edge lint[0x1])
+#          ACPI: LAPIC_NMI  (acpi_id[...] high edge lint[0x1])
+#          NMI watchdog: Enabled. Permanently consumes one hw-PMU counter.
+#      只在扫 delta 时没发作（它们都在开机阶段，被 comm -13 减掉了），
+#      一旦拿去扫开机日志就是每台机器三条误报。所以换成真正的 NMI 故障原文。
+#   2. EDAC.*(CE|UE) —— "CE" 两个字母在 SOURCE / DEVICE / INTERFACE 里都有，
+#      而 EDAC 初始化时会刷十几行 "EDAC MC0: Giving out device to module ..."。
+#      收紧成 EDAC 真实报错的格式：EDAC MC0: 1 CE memory read error on ...
+dmesg_hw_error_pattern() {
+  local pat='Machine Check|Hardware Error|mce: \[Hardware Error\]|'
+  pat+='EDAC MC[0-9]*: [0-9]+ (CE|UE) |Uncorrected|uncorrectable|'
+  # NMI 只认真正的故障原文，不认裸 NMI（见上面第 1 条）
+  pat+='Uhhuh\. NMI|NMI: (IOCK|PCI system) error|Dazed and confused|'
+  pat+='PCIe Bus Error|AER:|I/O error|Buffer I/O error|medium error|'
+  pat+='ATA bus error|failed command|link is down|controller failure|'
+  pat+='thermal throttl|critical temperature|Out of memory|'
+  # ---- 以下是 0.5.0 新增：驱动 / 控制器级故障 ----
+  # 现场那台 MegaRAID 开机 3 秒就出事，完整链条是
+  #   DPC: containment event, ERR_NONFATAL -> AER: can't recover
+  #   -> FW in FAULT state -> resetting adapter -> reset never cleared (x3)
+  #   -> Reset failed, killing adapter -> Failed from megasas_fault_detect_work
+  # 旧模式里只有 "AER:" 能命中其中两条，而那两条又都在开机阶段、被 delta 减掉了，
+  # 于是整台机器判 PASS。
+  pat+='DPC: containment event|ERR_FATAL|ERR_NONFATAL|EDR: |'
+  pat+='in FAULT state|killing adapter|reset adapter never cleared|'
+  pat+='Reset failed|device recovery failed|'
+  pat+='resetting .*adapter|Failed from [a-z_]+ [0-9]'
+  printf '%s' "$pat"
+}
+
+# dmesg_scan_hw_errors <输入日志> <输出文件>
+# 抽成纯函数，好让回归测试直接拿真实日志喂它，见 tests/test-hw-checks.sh
+dmesg_scan_hw_errors() {
+  local in="$1" out="$2"
+  : > "$out"
+  [[ -f "$in" ]] || return 0
+  grep -EI "$(dmesg_hw_error_pattern)" "$in" 2>/dev/null \
+    | grep -viE 'thermal throttl.*not|nouveau' \
+    > "$out" || true
+  return 0
+}
+
+# 开机与采集阶段的内核日志复查。
+#
+# 为什么非要单独来一项：verify_dmesg 扫的是 delta（测后减测前），
+# 而 delta 按定义**排除了开机阶段的一切**。现场那台机器的阵列卡是开机 3 秒
+# 就挂的，9 条故障日志全在 dmesg-pre 里，被 comm -13 一条不剩地减光，
+# 于是"内核日志复查 PASS"。光改正则修不好这个，必须单独扫一遍 dmesg-pre。
+#
+# 判 FAIL 而不是 WARN：用的是和 verify_dmesg 完全同一套关键字，
+# 那边命中即 FAIL，这边没道理更宽松——一张开机就进 FAULT state、
+# 被内核 kill 掉的阵列卡，就是坏了。模式已经在真实健康机日志上验过零误报。
+#
+# 在 PHASE 1 结束时调用（不是 PHASE 4）：让现场在开始压测之前就知道机器有硬伤，
+# 而不是白等 30 分钟跑完才看到。
+verify_dmesg_boot() {
+  info "Scanning boot-time kernel log for hardware errors ..."
+
+  if [[ ! -f "$RAW_DIR/dmesg-pre.txt" ]]; then
+    result_add "verify_dmesg_boot" "开机内核日志复查" "$ST_SKIP" "未采集到开机内核日志" ""
+    return
+  fi
+
+  dmesg_scan_hw_errors "$RAW_DIR/dmesg-pre.txt" "$RAW_DIR/dmesg-errors-boot.txt"
+  local n; n="$(count_lines "$RAW_DIR/dmesg-errors-boot.txt")"
+
+  if (( n > 0 )); then
+    local sample; sample="$(head -3 "$RAW_DIR/dmesg-errors-boot.txt" | tr '\n' ' ' | cut -c1-300)"
+    result_add "verify_dmesg_boot" "开机内核日志复查" "$ST_FAIL" \
+      "开机与硬件采集阶段内核日志出现 ${n} 条硬件错误（这些发生在压测开始之前，\
+说明机器在上电初始化时就有硬件异常）。示例：${sample}" "raw/dmesg-errors-boot.txt"
+  else
+    result_add "verify_dmesg_boot" "开机内核日志复查" "$ST_PASS" \
+      "开机与硬件采集阶段无硬件错误日志" "raw/dmesg-pre.txt"
+  fi
+}
+
 verify_dmesg() {
   info "Scanning kernel log for hardware errors ..."
   capture "dmesg-post.txt" dmesg -T
@@ -134,15 +221,7 @@ verify_dmesg() {
     cp "$RAW_DIR/dmesg-post.txt" "$RAW_DIR/dmesg-delta.txt"
   fi
 
-  # 真正代表硬件问题的关键字。故意不含泛泛的 "error"，否则噪声太大。
-  local pat='Machine Check|Hardware Error|MCE|EDAC.*(CE|UE)|Uncorrected|uncorrectable|'
-  pat+='PCIe Bus Error|AER:|I/O error|Buffer I/O error|medium error|'
-  pat+='ATA bus error|failed command|link is down|controller failure|'
-  pat+='NMI|thermal throttl|critical temperature|Out of memory'
-
-  grep -EI "$pat" "$RAW_DIR/dmesg-delta.txt" 2>/dev/null \
-    | grep -viE 'thermal throttl.*not|nouveau' \
-    > "$RAW_DIR/dmesg-errors.txt" || true
+  dmesg_scan_hw_errors "$RAW_DIR/dmesg-delta.txt" "$RAW_DIR/dmesg-errors.txt"
 
   local n; n="$(count_lines "$RAW_DIR/dmesg-errors.txt")"
 
