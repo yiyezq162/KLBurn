@@ -308,10 +308,88 @@ has "$OUT" "广州市鲲林科技有限公司" "公司名"
 echo
 echo "=== 二级编号不跳号（本例无 GPU、无 fio）==="
 has    "$OUT" "<h3>2.1 各项结论</h3>"       "第一节"
-has    "$OUT" "<h3>2.2 CPU 温度 / 频率曲线</h3>" "第二节"
+has    "$OUT" "<h3>2.2 CPU 温度 / 频率 / 功耗曲线</h3>" "第二节"
 has    "$OUT" "<h3>2.3 其他实测指标</h3>"   "第三节紧接着，不能跳到 2.5"
 has_no "$OUT" "<h3>2.4"                     "没有第四节"
 has_no "$OUT" "<h3>2.5"                     "更不该有第五节"
+
+echo
+echo "=== 老 run-dir 没有 cpu_power_w 这一列，不能崩、也不该画功耗图 ==="
+# 上面那份 fixture 用的就是 0.5.0 之前的表头（没有 cpu_power_w）。
+# 新增列一律往末尾加，老数据用 DictReader 取不到就跳过——这条守的是这个约定。
+has_no "$OUT" "CPU 封装功耗" "老数据没有功耗列时不该凭空画出一张功耗图"
+has    "$OUT" "温度峰值 73°C" "温度峰值照常要算出来"
+
+echo
+echo "=== 有 GPU + CPU 功耗的完整场景 ==="
+RD3="$TMP/run-gpu"
+cp -r "$RD" "$RD3"
+cat > "$RD3/sys_metrics.csv" <<'EOF'
+time,phase,cpu_temp_c,cpu_freq_mhz,load1,mem_used_mb,mem_total_mb,cpu_power_w
+02:17:05,cpu,45,1156,8.28,2305,31763,95
+02:17:10,cpu,51,2699,17.87,2764,31763,281
+02:17:15,cpu,66,2681,64.20,2795,31763,347
+02:17:20,cpu,73,2675,99.10,2801,31763,352
+EOF
+# 两张卡，逐卡一行。gpu_monitor 写出来就是这个格式。
+cat > "$RD3/gpu_metrics.csv" <<'EOF'
+time,index,name,temp_c,power_w,clock_sm_mhz,util_pct,mem_used_mb
+02:17:05,0,NVIDIA GeForce RTX 4090,42,58,420,0,12
+02:17:05,1,NVIDIA GeForce RTX 4090,40,55,420,0,12
+02:17:10,0,NVIDIA GeForce RTX 4090,71,431,2520,100,21504
+02:17:10,1,NVIDIA GeForce RTX 4090,68,428,2505,100,21504
+02:17:15,0,NVIDIA GeForce RTX 4090,79,449,2490,100,21504
+02:17:15,1,NVIDIA GeForce RTX 4090,75,441,2490,100,21504
+EOF
+# 现场可以在 klburn.conf 里改阈值，报告必须显示实际生效的那一套，不能写死
+python3 - "$RD3/meta.json" <<'PYEOF'
+import json, sys
+p = sys.argv[1]
+m = json.load(open(p, encoding="utf-8"))
+m["thresholds"] = {"cpu_temp_warn": 95, "cpu_temp_fail": 100,
+                   "gpu_temp_warn": 83, "gpu_temp_fail": 90,
+                   "disk_temp_warn": 70, "disk_temp_fail": 80}
+json.dump(m, open(p, "w", encoding="utf-8"), ensure_ascii=False)
+PYEOF
+OUT3="$TMP/report-gpu.html"
+if python3 "$GEN" --run-dir "$RD3" --out "$OUT3" >/dev/null 2>"$TMP/err3"; then
+  has "$OUT3" "CPU 封装功耗"        "有 cpu_power_w 列时要画 CPU 功耗图"
+  has "$OUT3" "封装功耗峰值 352 W"  "CPU 功耗峰值"
+  has "$OUT3" "GPU 温度 / 功耗曲线" "GPU 曲线小节"
+  has "$OUT3" "GPU0 79°C"           "逐卡温度峰值 - 第 0 张"
+  has "$OUT3" "GPU1 75°C"           "逐卡温度峰值 - 第 1 张"
+  has "$OUT3" "GPU0 449W"           "逐卡功耗峰值"
+  has "$OUT3" "告警线 95°C，判故障线 100°C" "CPU 阈值要取 meta.json 里实际生效的值"
+  has "$OUT3" "告警线 83°C，判故障线 90°C"  "GPU 阈值同理"
+  # 两张卡的图例都要在，否则多卡机器看不出是哪张卡
+  has "$OUT3" "GPU0 NVIDIA GeForce RTX 4090" "图例要带卡号和型号"
+  has "$OUT3" "GPU1 NVIDIA GeForce RTX 4090" "第二张卡的图例"
+else
+  bad "GPU 场景的报告没能生成：$(cat "$TMP/err3")"
+fi
+
+echo
+echo "=== 交付给客户的 HTML 里不许出现任何内部/开发信息 ==="
+# 这份 HTML 是给客户的；ISO、工程目录、meta.json 只留在我们内部。
+# 下面这些词一旦出现在报告里，客户要么看不懂，要么以为机器缺东西/有毛病。
+# meta.json 里塞了 git_commit（内部追溯用），正好用来验证它没有漏进 HTML。
+python3 - "$RD3/meta.json" <<'PYEOF'
+import json, sys
+p = sys.argv[1]
+m = json.load(open(p, encoding="utf-8"))
+m["git_commit"] = "deadbee-dirty"
+json.dump(m, open(p, "w", encoding="utf-8"), ensure_ascii=False)
+PYEOF
+OUT4="$TMP/report-clean.html"
+if python3 "$GEN" --run-dir "$RD3" --out "$OUT4" >/dev/null 2>"$TMP/err4"; then
+  has_no "$OUT4" "deadbee"      "git commit hash 绝不能印在交付给客户的报告上"
+  has_no "$OUT4" "源码版本"      "同上"
+  for w in "测试盘" "精简版" "storcli" "vendor/" "重新出盘" "构建目录" "盘内缺少"; do
+    has_no "$OUT4" "$w" "内部/开发用语"
+  done
+else
+  bad "清洁性检查用的报告没能生成：$(cat "$TMP/err4")"
+fi
 
 echo
 echo "=== 边界：几乎空的 run-dir 也不能崩 ==="

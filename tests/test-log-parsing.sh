@@ -115,5 +115,54 @@ check "空日志不崩、全部归零" \
 
 # ================================================================
 echo
+echo "=== 被 OOM killer 打死绝不能当成硬件故障 ==="
+# 0.7.0 现场真事：内存压测目标容量取得太满，跑到第 9 分钟被 OOM killer 打死
+#     Out of memory: Killed process 4168 (stressapptest) anon-rss:28397568kB
+# 退出码 137，旧代码直接判 FAIL「测试进程异常退出」——
+# 一台完全正常的机器就这么被拦在出货前。
+# 这是本项目最忌讳的一类错误：**把好机器拦在出货前比漏判更糟**。
+
+cat > "$TMP/dmesg-oom.txt" <<'EOF'
+[  600.123456] stressapptest invoked oom-killer: gfp_mask=0x140cca(GFP_HIGHUSER_MOVABLE|__GFP_COMP), order=0
+[  609.539575] Out of memory: Killed process 4168 (stressapptest) total-vm:29736252kB, anon-rss:28397568kB, file-rss:2048kB, shmem-rss:0kB, UID:0 pgtables:55780kB oom_score_adj:0
+EOF
+cat > "$TMP/dmesg-clean.txt" <<'EOF'
+[    8.680607] EXT4-fs (sda1): mounted filesystem with ordered data mode
+[  609.539575] nvidia-nvlink: Nvlink Core is being initialized
+EOF
+
+check "退出码 137 且 dmesg 里有 OOM 记录 -> 认定为 OOM" \
+      "yes" "$(oom_killed 137 "$TMP/dmesg-oom.txt" && echo yes || echo no)"
+# 读不到 dmesg 时也要按 OOM 处理：宁可少判一次，也绝不能把 SIGKILL 当成内存故障
+check "退出码 137 但 dmesg 读不到 -> 仍按 OOM 处理（不许误判成故障）" \
+      "yes" "$(oom_killed 137 "$TMP/no-such-file.txt" && echo yes || echo no)"
+# 反向：正常退出和其它错误码不能被当成 OOM，否则真故障就被掩盖了
+check "退出码 0 不是 OOM" \
+      "no" "$(oom_killed 0 "$TMP/dmesg-oom.txt" && echo yes || echo no)"
+check "退出码 1（工具自己报错）不是 OOM，该判故障还得判" \
+      "no" "$(oom_killed 1 "$TMP/dmesg-oom.txt" && echo yes || echo no)"
+check "退出码 134（SIGABRT）不是 OOM" \
+      "no" "$(oom_killed 134 "$TMP/dmesg-clean.txt" && echo yes || echo no)"
+
+# 判定分支的顺序：OOM 必须排在"异常退出"前面，否则又会被当成故障
+mem_chain="$(declare -f stress_mem)"
+check "stress_mem 里 OOM 判定必须排在「异常退出」判定之前" \
+      "yes" \
+      "$(if [[ "$(grep -n 'oom_killed' <<<"$mem_chain" | head -1 | cut -d: -f1)" \
+               -lt "$(grep -n 'rc != 0' <<<"$mem_chain" | tail -1 | cut -d: -f1)" ]]; \
+         then echo yes; else echo no; fi)"
+gpu_chain="$(declare -f gpu_stress)"
+check "gpu_stress 里 OOM 判定必须排在「异常退出」判定之前" \
+      "yes" \
+      "$(if [[ "$(grep -n 'oom_killed' <<<"$gpu_chain" | head -1 | cut -d: -f1)" \
+               -lt "$(grep -n 'rc != 0' <<<"$gpu_chain" | tail -1 | cut -d: -f1)" ]]; \
+         then echo yes; else echo no; fi)"
+check "OOM 分支必须判 WARN，不许判 FAIL" \
+      "yes" \
+      "$(if grep -A3 'oom_killed' <<<"$mem_chain" | grep -q 'ST_WARN'; \
+         then echo yes; else echo no; fi)"
+
+# ================================================================
+echo
 printf '通过 %d 项，失败 %d 项\n' "$PASS" "$FAIL"
 exit $(( FAIL > 0 ? 1 : 0 ))

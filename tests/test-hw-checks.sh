@@ -211,7 +211,8 @@ psu_case() {
 }
 
 LAST_STATUS=""
-result_add() { LAST_STATUS="$3"; }
+LAST_DETAIL=""
+result_add() { LAST_STATUS="$3"; LAST_DETAIL="$4"; }
 metric_add() { :; }
 
 DMI_OK_OK='Handle 0x1, DMI type 39, 22 bytes
@@ -483,9 +484,12 @@ else
   RAW_DIR="$TMP/disktemp"; RUN_DIR="$TMP/disktemp"
   mkdir -p "$RAW_DIR/smart-pre" "$RAW_DIR/smart-post"
 
-  # 截获 result_add / metric_add：不依赖真的写 results.jsonl，直接看结论
-  LAST_STATUS=""
-  result_add() { LAST_STATUS="$3"; }
+  # 截获 result_add / metric_add：不依赖真的写 results.jsonl，直接看结论。
+  # 注意 detail($4) 也要接住 —— 后面几组用例会断言文案内容，
+  # 这里要是只接 $3，就会把上面那个完整的替身覆盖掉，
+  # 于是 LAST_DETAIL 从这行往下永远是空的（本来就这么坑过一次）。
+  LAST_STATUS=""; LAST_DETAIL=""
+  result_add() { LAST_STATUS="$3"; LAST_DETAIL="$4"; }
   metric_add() { :; }
 
   mk_post() { printf '{"temperature_c":%s}\n' "$2" > "$RAW_DIR/smart-post/$1.norm.json"; }
@@ -536,6 +540,367 @@ fi
 
 # ================================================================
 echo
+echo "=== 内核日志关键字：真故障要抓住，正常噪声一条都不许命中 ==="
+# 正样本取自现场那台 MegaRAID 濒死的机器（2x Xeon Gold 6530），完整故障链。
+# 这 9 行里，旧模式只有 "AER:" 那两条能命中，而且它们全在 dmesg-pre 里、
+# 被 verify_dmesg 的 delta 减光了，所以那台机器"内核日志复查"判的是 PASS。
+DMESG_BAD="$TMP/dmesg-bad.txt"
+cat > "$DMESG_BAD" <<'EOF'
+[Wed Nov 26 02:16:27 2025] pcieport 0000:97:01.0: EDR: EDR event received
+[Wed Nov 26 02:16:27 2025] pcieport 0000:97:01.0: DPC: containment event, status:0x1f03, ERR_NONFATAL received from 0000:98:00.0
+[Wed Nov 26 02:16:27 2025] megaraid_sas 0000:98:00.0: AER: can't recover (no error_detected callback)
+[Wed Nov 26 02:16:28 2025] megaraid_sas 0000:98:00.0: FW in FAULT state Fault code:0xfff0000 subcode:0xff00 func:megasas_wait_for_outstanding_fusion
+[Wed Nov 26 02:16:28 2025] megaraid_sas 0000:98:00.0: resetting fusion adapter scsi0.
+[Wed Nov 26 02:16:28 2025] pcieport 0000:97:01.0: AER: device recovery failed
+[Wed Nov 26 02:18:15 2025] megaraid_sas 0000:98:00.0: Diag reset adapter never cleared megasas_adp_reset_fusion 4100
+[Wed Nov 26 02:21:49 2025] megaraid_sas 0000:98:00.0: Reset failed, killing adapter scsi0.
+[Wed Nov 26 02:21:50 2025] megaraid_sas 0000:98:00.0: Failed from megasas_fault_detect_work 1963, do not re-arm timer
+EOF
+
+# 负样本全部取自同一台机器**健康那次**的真实 dmesg，长得都很像错误但完全正常。
+# 前三行是 0.4.0 的裸 NMI 模式会命中的——那是每台机器开机都有的，
+# 一旦漏进来就是"每台机器都报 3 条硬件错误"，比漏判更糟。
+DMESG_NOISE="$TMP/dmesg-noise.txt"
+cat > "$DMESG_NOISE" <<'EOF'
+[Wed Nov 26 02:16:23 2025] ACPI: X2APIC_NMI (uid[0xffffffff] high edge lint[0x1])
+[Wed Nov 26 02:16:23 2025] ACPI: LAPIC_NMI (acpi_id[0xff] high edge lint[0x1])
+[Wed Nov 26 02:16:23 2025] NMI watchdog: Enabled. Permanently consumes one hw-PMU counter.
+[Wed Nov 26 02:16:23 2025] acpi PNP0A08:00: _OSC: platform does not support [SHPCHotplug AER LTR DPC]
+[Wed Nov 26 02:16:24 2025] pci 0000:d7:03.0: bridge window [io  size 0x1000]: failed to assign
+[Wed Nov 26 02:16:24 2025] ERST: Error Record Serialization Table (ERST) support is initialized.
+[Wed Nov 26 02:16:24 2025] RAS: Correctable Errors collector initialized.
+[Wed Nov 26 02:16:22 2025] x86/split lock detection: #AC: crashing the kernel on kernel split_locks and warning on user-space split_locks
+[Wed Nov 26 02:16:31 2025] systemd[1]: smartd.service: Cannot add dependency job, ignoring: Unit smartd.service failed to load properly, please adjust/correct and reload service manager: File exists
+[Wed Nov 26 02:16:25 2025] megaraid_sas 0000:98:00.0: FW now in Ready state
+[Wed Nov 26 02:16:26 2025] megaraid_sas 0000:98:00.0: firmware crash dump	: no
+[Wed Nov 26 02:16:26 2025] megaraid_sas 0000:98:00.0: FW provided TM TaskAbort/Reset timeout	: 0 secs/0 secs
+[Wed Nov 26 02:16:26 2025] megaraid_sas 0000:98:00.0: Online Controller Reset(OCR)	: Enabled
+[Wed Nov 26 02:21:49 2025] ixgbe 0000:27:00.0: invalid VPD tag 0xff (size 65378) at offset 25091
+[Wed Nov 26 02:16:24 2025] pcieport 0000:d7:01.0: PME: Signaling with IRQ 71
+[Wed Nov 26 02:16:24 2025] EDAC MC0: Giving out device to module i10nm_edac controller Intel_10nm Socket#0 IMC#0: DEV 0000:7e:0c.0 (INTERRUPT)
+[Wed Nov 26 02:16:24 2025] EDAC MC: Ver: 3.0.0
+[Wed Nov 26 02:16:24 2025] EDAC i10nm: No hbm memory
+EOF
+
+dmesg_scan_hw_errors "$DMESG_BAD" "$TMP/hits-bad.txt"
+check "阵列卡完整故障链 9 行必须全部命中" "9" "$(count_lines "$TMP/hits-bad.txt")"
+
+dmesg_scan_hw_errors "$DMESG_NOISE" "$TMP/hits-noise.txt"
+check "开机正常噪声一条都不许命中（含 NMI / AER无冒号 / EDAC 初始化 / Correctable Errors）" \
+      "0" "$(count_lines "$TMP/hits-noise.txt")"
+
+# 逐条钉死几个最容易被改坏的，免得以后有人把裸 NMI 或裸 CE 加回来
+for bad_line in \
+  'ACPI: X2APIC_NMI (uid[0xffffffff] high edge lint[0x1])' \
+  'NMI watchdog: Enabled. Permanently consumes one hw-PMU counter.' \
+  'acpi PNP0A08:00: _OSC: platform does not support [SHPCHotplug AER LTR DPC]' \
+  'EDAC MC0: Giving out device to module i10nm_edac controller Intel_10nm Socket#0 IMC#0: DEV 0000:7e:0c.0 (INTERRUPT)' \
+  'RAS: Correctable Errors collector initialized.' \
+  'megaraid_sas 0000:98:00.0: FW now in Ready state'
+do
+  printf '[Wed Nov 26 02:16:23 2025] %s\n' "$bad_line" > "$TMP/one.txt"
+  dmesg_scan_hw_errors "$TMP/one.txt" "$TMP/one-hit.txt"
+  check "不许命中: ${bad_line:0:60}" "0" "$(count_lines "$TMP/one-hit.txt")"
+done
+
+# 真正的 EDAC 报错格式必须还能抓住（收紧模式别把真错误也关在门外）
+printf '[Wed Nov 26 02:16:23 2025] EDAC MC0: 1 CE memory read error on CPU_SrcID#0_MC#0_Chan#0_DIMM#0\n' > "$TMP/one.txt"
+dmesg_scan_hw_errors "$TMP/one.txt" "$TMP/one-hit.txt"
+check "真的 EDAC 可纠正错误必须命中" "1" "$(count_lines "$TMP/one-hit.txt")"
+printf '[Wed Nov 26 02:16:23 2025] Uhhuh. NMI received for unknown reason 3d on CPU 0.\n' > "$TMP/one.txt"
+dmesg_scan_hw_errors "$TMP/one.txt" "$TMP/one-hit.txt"
+check "真的 NMI 故障必须命中" "1" "$(count_lines "$TMP/one-hit.txt")"
+
+# ================================================================
+echo
+echo "=== 开机内核日志复查（这一项就是为了堵住 delta 减掉开机错误那个洞）==="
+RAW_DIR="$TMP/boot"; RUN_DIR="$TMP/boot"
+rm -rf "$RAW_DIR"; mkdir -p "$RAW_DIR"
+
+cp "$DMESG_BAD" "$RAW_DIR/dmesg-pre.txt"
+LAST_STATUS=""; verify_dmesg_boot
+check "开机日志里有阵列卡故障 -> FAIL" "FAIL" "$LAST_STATUS"
+
+cp "$DMESG_NOISE" "$RAW_DIR/dmesg-pre.txt"
+LAST_STATUS=""; verify_dmesg_boot
+check "开机日志只有正常噪声 -> PASS" "PASS" "$LAST_STATUS"
+
+rm -f "$RAW_DIR/dmesg-pre.txt"
+LAST_STATUS=""; verify_dmesg_boot
+check "没采到开机日志 -> SKIP（读不到数据不能当故障）" "SKIP" "$LAST_STATUS"
+
+# ================================================================
+echo
+echo "=== PCIe 链路：只查端点，桥的正常降速一条都不许报 ==="
+# 全部取自现场真机 lspci -vv -nn 的原始格式。
+# 两个桥是关键负样本：它们的 LnkSta 确实低于 LnkCap，但那是设计如此
+# （LnkCap 是槽位能力，LnkSta 是和对端协商的结果）。把桥一起判 = 每台机器都告警。
+RAW_DIR="$TMP/pcie"; RUN_DIR="$TMP/pcie"
+rm -rf "$RAW_DIR"; mkdir -p "$RAW_DIR"
+cat > "$RAW_DIR/lspci-vv.txt" <<'EOF'
+00:0f.0 PCI bridge [0604]: Intel Corporation Device [8086:1bbf] (rev 11) (prog-if 00 [Normal decode])
+	Capabilities: [40] Express (v2) Root Port (Slot+), MSI 00
+		LnkCap:	Port #15, Speed 8GT/s, Width x1, ASPM not supported
+		LnkSta:	Speed 5GT/s, Width x1
+		LnkCap2: Supported Link Speeds: 2.5-8GT/s, Crosslink- Retimer- 2Retimers- DRS-
+26:01.0 PCI bridge [0604]: Intel Corporation Device [8086:352a] (rev 30) (prog-if 00 [Normal decode])
+	Capabilities: [40] Express (v2) Root Port (Slot+), MSI 00
+		LnkCap:	Port #9, Speed 32GT/s, Width x8, ASPM not supported
+		LnkSta:	Speed 5GT/s, Width x8
+27:00.0 Ethernet controller [0200]: Intel Corporation 82599ES 10-Gigabit SFI/SFP+ Network Connection [8086:10fb] (rev 01)
+	Capabilities: [a0] Express (v2) Endpoint, MSI 00
+		LnkCap:	Port #4, Speed 5GT/s, Width x8, ASPM L0s, Exit Latency L0s <1us
+		LnkSta:	Speed 5GT/s, Width x8
+c8:00.0 VGA compatible controller [0300]: NVIDIA Corporation AD102 [GeForce RTX 4090] [10de:2684] (rev a1) (prog-if 00 [VGA controller])
+	Capabilities: [60] Express (v2) Legacy Endpoint, MSI 00
+		LnkCap:	Port #0, Speed 16GT/s, Width x16, ASPM L1, Exit Latency L1 <4us
+		LnkSta:	Speed 16GT/s, Width x16
+EOF
+
+rows="$(pcie_link_scan "$RAW_DIR/lspci-vv.txt")"
+check "只解析出 2 个端点（两个 PCI bridge 必须被跳过）" "2" "$(printf '%s\n' "$rows" | grep -c .)"
+check "桥 26:01.0 不许出现在结果里" "0" "$(printf '%s\n' "$rows" | grep -c '^26:01\.0')"
+check "4090 端点被识别" "1" "$(printf '%s\n' "$rows" | grep -c '^c8:00\.0')"
+check "4090 的额定/实际解析正确" "c8:00.0|NVIDIA Corporation AD102 [GeForce RTX 4090]|16|16|16|16" \
+      "$(printf '%s\n' "$rows" | grep '^c8:00\.0')"
+
+LAST_STATUS=""; check_pcie_link
+check "两个端点都满速 -> PASS（桥的降速不算数）" "PASS" "$LAST_STATUS"
+
+# 把 4090 改成插在 x8 槽、且只训练到 Gen1
+sed -i 's/^\t\tLnkSta:\tSpeed 16GT\/s, Width x16/\t\tLnkSta:\tSpeed 2.5GT\/s, Width x8/' "$RAW_DIR/lspci-vv.txt"
+LAST_STATUS=""; check_pcie_link
+check "端点宽度和速率都没跑到额定 -> WARN" "WARN" "$LAST_STATUS"
+check "WARN 文案里要点名是哪个设备" "1" "$(printf '%s' "$LAST_DETAIL" | grep -c 'c8:00.0')"
+
+rm -f "$RAW_DIR/lspci-vv.txt"
+LAST_STATUS=""; check_pcie_link
+check "没有 lspci-vv 数据 -> SKIP" "SKIP" "$LAST_STATUS"
+
+# ================================================================
+echo
+echo "=== 网卡协商速率达标 ==="
+RAW_DIR="$TMP/nicspeed"; RUN_DIR="$TMP/nicspeed"
+rm -rf "$RAW_DIR"; mkdir -p "$RAW_DIR/nic"
+
+# 现场真机 ens9f0 的原样输出：万兆口，协商到 10000Mb/s
+ETH_10G_OK='Settings for ens9f0:
+	Supported ports: [ FIBRE ]
+	Supported link modes:   10000baseT/Full
+	Supported pause frame use: Symmetric
+	Supports auto-negotiation: No
+	Supported FEC modes: Not reported
+	Advertised link modes:  10000baseT/Full
+	Speed: 10000Mb/s
+	Duplex: Full
+	Port: FIBRE
+	Link detected: yes'
+
+# 同一块卡，只协商到千兆（线不对 / 模块不对 / 对端口不对）
+ETH_10G_SLOW="${ETH_10G_OK//Speed: 10000Mb\/s/Speed: 1000Mb/s}"
+
+# 支持多档速率、且跨行列出的口——解析要吃到下一个字段名为止，取最大值
+ETH_MULTI='Settings for eno1:
+	Supported ports: [ TP ]
+	Supported link modes:   100baseT/Full
+	                        1000baseT/Full
+	                        10000baseT/Full
+	Supported pause frame use: Symmetric
+	Speed: 10000Mb/s
+	Duplex: Full
+	Link detected: yes'
+
+# 没插网线：ethtool 报的速率是假的，必须整条让开
+ETH_NOLINK='Settings for ens66f0:
+	Supported link modes:   10000baseT/Full
+	Speed: Unknown!
+	Duplex: Unknown! (255)
+	Link detected: no'
+
+# 也是没插网线，但驱动没报 Unknown!，而是留了个陈旧/缺省的速率。
+# 这种才是 "Link detected: yes" 那道守卫真正要挡的：光靠"速率读不到就让开"
+# 兜不住它，会把一个压根没插线的口判成"万兆口只跑了 10Mb/s"。
+ETH_NOLINK_STALE='Settings for ens66f1:
+	Supported link modes:   10000baseT/Full
+	Speed: 10Mb/s
+	Duplex: Half
+	Link detected: no'
+
+printf '%s\n' "$ETH_MULTI" > "$TMP/eth-multi.txt"
+check "跨行的 Supported link modes 取最大值 10000" "10000" "$(nic_supported_max_mbps "$TMP/eth-multi.txt")"
+check "当前速率解析 10000" "10000" "$(nic_current_mbps "$TMP/eth-multi.txt")"
+printf '%s\n' "$ETH_NOLINK" > "$TMP/eth-nolink.txt"
+check "Speed: Unknown! 要当成读不到（0），不能当成 0 速率故障" "0" "$(nic_current_mbps "$TMP/eth-nolink.txt")"
+
+nic_speed_case() {
+  rm -rf "$RAW_DIR/nic"; mkdir -p "$RAW_DIR/nic"
+  local n=1 body
+  for body in "$@"; do
+    printf '%s\n' "$body" > "$RAW_DIR/nic/eth${n}-ethtool.txt"
+    n=$((n+1))
+  done
+  # check_nic_speed 靠 net_phys_ifaces 取网口列表，这里替身掉
+  net_phys_ifaces() { local i; for i in $(seq 1 $(( n - 1 ))); do printf 'eth%d\n' "$i"; done; }
+  LAST_STATUS=""; LAST_DETAIL=""
+  check_nic_speed
+}
+
+nic_speed_case "$ETH_10G_OK" "$ETH_MULTI"
+check "两个口都协商到额定速率 -> PASS" "PASS" "$LAST_STATUS"
+
+nic_speed_case "$ETH_10G_SLOW"
+check "万兆口只协商到千兆 -> WARN" "WARN" "$LAST_STATUS"
+check "WARN 文案要写清实际和额定" "1" "$(printf '%s' "$LAST_DETAIL" | grep -c '实际 1000Mb/s，额定 10000Mb/s')"
+
+nic_speed_case "$ETH_NOLINK"
+check "全都没接网线 -> SKIP（不接网线是测试台常态，不是故障）" "SKIP" "$LAST_STATUS"
+
+nic_speed_case "$ETH_NOLINK_STALE"
+check "没插线但驱动留了陈旧速率 -> 仍然 SKIP，不许判成「万兆口只跑了 10Mb/s」" \
+      "SKIP" "$LAST_STATUS"
+
+nic_speed_case "$ETH_NOLINK" "$ETH_NOLINK_STALE" "$ETH_10G_OK"
+check "混合时只判已接网线那个 -> PASS" "PASS" "$LAST_STATUS"
+
+nic_speed_case "$ETH_NOLINK" "$ETH_10G_SLOW"
+check "混合时只判已接网线那个 -> WARN" "WARN" "$LAST_STATUS"
+
+unset -f net_phys_ifaces
+# shellcheck source=/dev/null
+source "$LIB/network.sh"      # 把被替身掉的 net_phys_ifaces 还原回来
+
+# ================================================================
+echo
+echo "=== 阵列卡：坏到不枚举 vs 本来就没装 ==="
+# 现场实证：同一台机器连测两次，第一次卡在 lspci 里还看得见（判 WARN），
+# 第二次卡坏到 PCI 枚举都过不去、lspci 里整个消失，判 SKIP「未安装阵列卡」，
+# 两次整机结论都是 PASS。单看一次运行这两种情况分不开，所以不能判 FAIL
+# （无卡机型会被误杀），但 BMC 明明预留了 RAID/HBA 传感器却一条读数都没有时，
+# 抬成 WARN 提示人工确认。
+RAID_BMC_SILENT=1
+check "BMC 预留了 RAID 传感器却全无读数 -> WARN" "WARN" "$(raid_absent_status)"
+RAID_BMC_SILENT=0
+check "BMC 上压根没有 RAID 相关传感器 -> SKIP（就是没装卡）" "SKIP" "$(raid_absent_status)"
+
+RAW_DIR="$TMP"; RUN_DIR="$TMP"
+
+# ================================================================
+echo
+echo "=== dm 设备枚举（Ventoy 下报告能不能落盘就靠它）==="
+# shellcheck source=/dev/null
+source "$LIB/storage.sh"
+# 现场实证：Ventoy 用 dm-mapper 把 exFAT 分区包了一层，**能挂上的是 dm 映射**
+# （历史数据里 data_partition 一直是 /dev/dm-1 / /dev/dm-2），底下的真实分区
+# 被 device-mapper 独占持有，挂只会得到 "Can't open blockdev"。
+# 而 Ventoy 禁掉了 udev 规则，/dev/dm-N 有时压根不会被创建，
+# 于是靠 blkid 枚举的候选列表里，唯一能挂的那个凭空消失 —— 报告落 /tmp，关机就没。
+# 这组用假的 sysfs 树锁住"不管 /dev 下有没有节点，都要能枚举出来"。
+FAKESYS="$TMP/fakesys"; FAKEDEV="$TMP/fakedev"
+mkdir -p "$FAKESYS/block/dm-0" "$FAKESYS/block/dm-3" "$FAKESYS/block/sda" "$FAKEDEV"
+echo "252:0" > "$FAKESYS/block/dm-0/dev"
+echo "252:3" > "$FAKESYS/block/dm-3/dev"
+echo "8:0"   > "$FAKESYS/block/sda/dev"
+
+# 纯枚举那一层不需要 root，也不碰 /dev —— 这是逻辑本身，必须任何环境都能测
+got="$(dm_device_list "$FAKESYS" | sort | tr '\n' '|')"
+check "/dev 下一个 dm 节点都没有时，仍要从 sysfs 枚举出全部 dm 设备及其设备号" \
+      "dm-0 252:0|dm-3 252:3|" "$got"
+check "不能把普通块设备（sda）当成 dm 设备" \
+      "0" "$(printf '%s' "$got" | grep -c 'sda' || true)"
+
+# 没有任何 dm 设备时必须安静地输出空，不能报错、不能吐垃圾
+mkdir -p "$TMP/nodm/block"
+check "机器上没有 dm 设备时输出为空（Rufus 场景）" \
+      "" "$(dm_device_list "$TMP/nodm")"
+
+# 残缺条目要跳过，不能吐半截垃圾出去。两种残缺法都要挡住，
+# 而且要分别用样本盖到——只造其中一种的话，另一道守卫删掉了也没人发现
+# （变异测试就是这么逼出这条的）。
+mkdir -p "$FAKESYS/block/dm-9"        # 情况一：只有目录，没有 dev 文件
+mkdir -p "$FAKESYS/block/dm-8"
+printf 'garbage\n' > "$FAKESYS/block/dm-8/dev"   # 情况二：有 dev 文件但内容不是设备号
+check "sysfs 条目残缺（没有 dev 文件）时跳过它，不影响其余设备" \
+      "dm-0 252:0|dm-3 252:3|" "$(dm_device_list "$FAKESYS" | sort | tr '\n' '|')"
+check "dev 文件内容不是合法设备号时也要跳过（不能把 garbage 当设备号用）" \
+      "0" "$(dm_device_list "$FAKESYS" | grep -c 'garbage' || true)"
+
+# 补建节点那一层要 root（mknod），没 root 就跳过——环境问题，不是逻辑问题
+if [[ "$(id -u)" == "0" ]]; then
+  nodes="$(dm_device_nodes "$FAKESYS" "$FAKEDEV" | sort | tr '\n' ' ')"
+  check "缺失的设备节点要被自动补建并列出来" \
+        "$FAKEDEV/dm-0 $FAKEDEV/dm-3 " "$nodes"
+  check "补建出来的确实是块设备节点" "b" \
+        "$(if [[ -b "$FAKEDEV/dm-0" ]]; then echo b; else echo no; fi)"
+else
+  echo "  (非 root，mknod 那一层跳过——环境问题，不是用例问题)"
+fi
+
+# 候选顺序：dm 必须排在 blkid 那几路前面，否则先去试那个永远挂不上的真实分区
+chain="$(declare -f mount_data_partition)"
+check "dm 候选必须排在 blkid 枚举之前（先试挂不上的真实分区纯属白等）" \
+      "yes" \
+      "$(if [[ "$(grep -n 'dm_device_nodes' <<<"$chain" | head -1 | cut -d: -f1)" \
+               -lt "$(grep -n 'blkid -t' <<<"$chain" | head -1 | cut -d: -f1)" ]]; \
+         then echo yes; else echo no; fi)"
+check "dm 候选必须用 blkid -p 低层探测（刚 mknod 的设备不在 blkid 缓存里）" \
+      "yes" "$(grep -q 'blkid -p' <<<"$chain" && echo yes || echo no)"
+
+# ================================================================
+echo
+echo "=== 阵列卡文案：报告是给客户看的，不能出现开发者指令 ==="
+RAW_DIR="$TMP/raidtxt"; RUN_DIR="$TMP/raidtxt"
+rm -rf "$RAW_DIR"; mkdir -p "$RAW_DIR"
+cat > "$RAW_DIR/lspci.txt" <<'EOF'
+01:00.0 Ethernet controller [0200]: Broadcom Inc. and subsidiaries BCM57416 NetXtreme-E Dual-Media 10G RDMA Ethernet Controller [14e4:16d8] (rev 01)
+a1:00.0 RAID bus controller [0104]: Broadcom / LSI MegaRAID SAS-3 3108 [Invader] [1000:005d] (rev 02)
+EOF
+KLB_TOOLS="$TMP/no-such-tools"      # 盘内没有 storcli64
+IPMI_OK=0
+LAST_STATUS=""; LAST_DETAIL=""
+collect_raid
+check "有卡但盘内没有管理工具 -> SKIP（只采集不压测，不该算告警）" "SKIP" "$LAST_STATUS"
+check "文案里要报出卡的型号" "1" \
+      "$(printf '%s' "$LAST_DETAIL" | grep -c 'MegaRAID SAS-3 3108')"
+for forbidden in "storcli" "vendor/" "重新出盘" "构建目录" "README"; do
+  check "客户可见文案里不许出现「${forbidden}」" "0" \
+        "$(printf '%s' "$LAST_DETAIL" | grep -c "$forbidden" || true)"
+done
+
+RAW_DIR="$TMP"; RUN_DIR="$TMP"
+
+# ================================================================
+echo
+echo "=== 客户可见文案里不许出现内部/开发用语（全局扫描）==="
+# report.html 是**交付给客户**的东西，ISO 和工程目录只留在我们内部。
+# 所以凡是会进报告的中文文本 —— result_add 的 detail、报告生成器里的
+# 界面字符串 —— 一律不许提测试盘怎么做的、缺哪个工具、去哪儿补、源码在哪。
+# 客户看到"本测试盘为精简版""把 storcli64 放进 vendor/"只会觉得机器有毛病。
+#
+# 这条守卫是全局正则扫描，不针对具体某一句 —— 以后新写的文案自动受它约束。
+# 屏幕输出（英文）和代码注释不在此列，所以要排掉注释行和纯 ASCII 的行。
+RT="$(cd "$LIB/.." && pwd)"
+FORBIDDEN='测试盘|盘内|精简版|构建目录|重新出盘|vendor/|storcli|README|源码|commit|ISO 里|打包进|未正确安装'
+
+# 只看 result_add 的 detail（第 4 个参数）和报告生成器里的中文串
+offenders="$(
+  {
+    grep -rhoE 'result_add [^\n]*' "$RT"/lib/*.sh "$RT"/factory-test.sh 2>/dev/null
+    grep -rhoE '"[^"]*[一-龥][^"]*"' "$RT"/report/generate_report.py 2>/dev/null
+  } | grep -vE '^\s*#' | grep -E "$FORBIDDEN" || true
+)"
+check "会进报告的中文文案里不许出现内部/开发用语" "0" \
+      "$(printf '%s' "$offenders" | grep -c . || true)"
+if [[ -n "$offenders" ]]; then
+  printf '     命中的行：\n'
+  printf '%s\n' "$offenders" | head -6 | sed 's/^/       /'
+fi
+
+# 注：「报告里不许出现 git hash」那条放在 tests/test-report-render.sh 里 ——
+# 那边会真的生成一份 HTML 再去查，比在源码里 grep 靠谱得多
+# （在源码里 grep 会被注释里提到的变量名绊倒，第一版就是这么红的）。
+
+# ================================================================
+echo
 echo "=== 汇总入口的调用链不能少人（少一个 = 那项结论从报告里消失）==="
 # 这组是变异测试逼出来的：把 verify_disk_temp 从 verify_all 里删掉，
 # 上面所有用例照样全绿 —— 因为它们都是直接调函数，没人管它到底有没有被跑。
@@ -548,9 +913,9 @@ for fn in collect_smart verify_smart verify_disk_temp verify_dmesg verify_sel; d
         "yes" "$(declare -f verify_all | grep -q "\b${fn}\b" && echo yes || echo no)"
 done
 
-for fn in collect_system check_memory_capacity collect_sensors collect_smart \
-          net_link_up_all collect_nic net_test collect_ipmi collect_raid \
-          check_psu gpu_detect; do
+for fn in collect_system check_memory_capacity check_pcie_link collect_sensors collect_smart \
+          net_link_up_all collect_nic check_nic_speed net_test collect_ipmi collect_raid \
+          check_psu gpu_detect collect_deep verify_dmesg_boot; do
   check "collect_all 必须调用 $fn" \
         "yes" "$(declare -f collect_all | grep -q "\b${fn}\b" && echo yes || echo no)"
 done
@@ -571,6 +936,22 @@ check "collect_ipmi 必须排在 collect_raid 之前（阵列卡要和 BMC 传�
       "yes" \
       "$(if [[ "$(grep -n 'collect_ipmi' <<<"$chain" | head -1 | cut -d: -f1)" \
                -lt "$(grep -n 'collect_raid' <<<"$chain" | head -1 | cut -d: -f1)" ]]; \
+         then echo yes; else echo no; fi)"
+check "collect_system 必须排在 check_pcie_link 之前（PCIe 判定读的是它落下的 lspci-vv.txt）" \
+      "yes" \
+      "$(if [[ "$(grep -n 'collect_system' <<<"$chain" | head -1 | cut -d: -f1)" \
+               -lt "$(grep -n 'check_pcie_link' <<<"$chain" | head -1 | cut -d: -f1)" ]]; \
+         then echo yes; else echo no; fi)"
+check "collect_nic 必须排在 check_nic_speed 之前（速率判定读的是它落下的 ethtool 输出）" \
+      "yes" \
+      "$(if [[ "$(grep -n 'collect_nic' <<<"$chain" | head -1 | cut -d: -f1)" \
+               -lt "$(grep -n 'check_nic_speed' <<<"$chain" | head -1 | cut -d: -f1)" ]]; \
+         then echo yes; else echo no; fi)"
+# verify_dmesg_boot 扫的就是 dmesg-pre.txt，排在它前面等于扫了个空文件 -> 每台机器都 SKIP
+check "dmesg-pre.txt 的采集必须排在 verify_dmesg_boot 之前" \
+      "yes" \
+      "$(if [[ "$(grep -n 'dmesg-pre.txt' <<<"$chain" | head -1 | cut -d: -f1)" \
+               -lt "$(grep -n 'verify_dmesg_boot' <<<"$chain" | head -1 | cut -d: -f1)" ]]; \
          then echo yes; else echo no; fi)"
 
 # ================================================================
