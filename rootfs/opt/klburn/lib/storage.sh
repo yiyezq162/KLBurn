@@ -134,6 +134,64 @@ live_media_disks() {
   } | sort -u | grep -v '^$'
 }
 
+# ---------------------------------------------------------------- dm 设备枚举
+# 列出所有 device-mapper 设备的 /dev 路径，缺设备节点就补建。
+#
+# ⚠️ 这是 0.6.0 现场翻车的根因。
+#
+# Ventoy 用 dm-mapper 把 ISO 和 exFAT 分区各包一层，**能挂上的是 dm 映射**
+# （历史数据里 data_partition 一直是 /dev/dm-1 或 /dev/dm-2），底下那个真实分区
+# sdb1 被 device-mapper 以 FMODE_EXCL 独占持有，直接挂只会得到
+#     /dev/sdb1: Can't open blockdev
+#
+# 而候选列表原先全靠 blkid 枚举 —— blkid 只扫 /dev 下**真实存在**的节点，
+# 可 Ventoy 禁掉了 udev 规则，/dev/mapper 下只有 control，有时连 /dev/dm-N
+# 都不会被创建。于是唯一能挂的那个候选凭空消失，只剩挂不上的 sdb1，
+# 报告落 /tmp，关机就没了。
+#
+# /sys/block/dm-* 不受 udev 影响：任何活着的 dm 设备都必然在那里。
+#
+# 拆成两层：
+#   dm_device_list  纯函数，只读 sysfs，输出 "dm-N 主:次"，不碰 /dev、不需要 root
+#                   -> 能脱机做回归测试
+#   dm_device_nodes 在它基础上补建缺失的设备节点，输出可用的 /dev 路径
+# 参数 sysroot/devroot 只为测试用，现场永远走默认的 /sys 和 /dev。
+
+# dm_device_list [sysfs根] -> 每行 "dm-N 主:次"
+dm_device_list() {
+  local sysroot="${1:-/sys}"
+  local d name devno maj min
+  for d in "$sysroot"/block/dm-*; do
+    [[ -d "$d" ]] || continue
+    name="$(basename "$d")"
+    [[ -r "$d/dev" ]] || continue
+    devno="$(<"$d/dev")"
+    IFS=: read -r maj min <<<"$devno"
+    [[ "$maj" =~ ^[0-9]+$ && "$min" =~ ^[0-9]+$ ]] || continue
+    printf '%s %s:%s\n' "$name" "$maj" "$min"
+  done
+}
+
+# dm_device_nodes [sysfs根] [dev根] -> 每行一个可用的 /dev 路径
+dm_device_nodes() {
+  local sysroot="${1:-/sys}" devroot="${2:-/dev}"
+  local name devno maj min
+  while read -r name devno; do
+    [[ -n "$name" ]] || continue
+    if [[ ! -b "$devroot/$name" ]]; then
+      IFS=: read -r maj min <<<"$devno"
+      # 节点不存在就自己造一个。设备号是从 sysfs 读出来的，不会造错。
+      # 造不出来（没权限）就跳过——反正也用不了。
+      mknod "$devroot/$name" b "$maj" "$min" 2>/dev/null || {
+        dbg "cannot create $devroot/$name ($devno), skipping"
+        continue
+      }
+      dbg "created missing device node $devroot/$name ($devno)"
+    fi
+    printf '%s\n' "$devroot/$name"
+  done < <(dm_device_list "$sysroot")
+}
+
 # ---------------------------------------------------------------- 数据分区
 # 成功: DATA_OK=1, RESULT_ROOT 指向 U 盘目录
 # 失败: DATA_OK=0, RESULT_ROOT=/tmp/klburn-reports
@@ -156,6 +214,21 @@ mount_data_partition() {
   # 而真实分区被 device-mapper 以 FMODE_EXCL 独占持有，直接挂会报
   # "Can't open blockdev"，只有挂 dm 映射才行。Rufus 场景下则相反。
   # 所以：把所有候选收集起来，逐个真去挂，谁能挂上且可写就用谁。
+
+  # 来源 0：所有 dm 设备里文件系统是 exfat 的（Ventoy 唯一挂得上的那一个）。
+  #
+  # 必须排在最前面：Ventoy 下 sdb1 被 dm 独占，永远挂不上，先试它只是白等；
+  # Rufus 场景下压根没有 dm 设备，这一轮直接是空的，不影响。
+  #
+  # 用 blkid -p（低层探测）而不是普通 blkid：普通模式走 /etc/blkid.tab 缓存，
+  # 而这些 dm 设备刚被 mknod 出来、缓存里根本没有它们。
+  while read -r dev; do
+    [[ -n "$dev" ]] || continue
+    if [[ "$(blkid -p -s TYPE -o value "$dev" 2>/dev/null)" == "exfat" ]]; then
+      cands+=("$dev")
+      dbg "dm candidate: $dev (exfat)"
+    fi
+  done < <(dm_device_nodes)
 
   # 来源 1：卷标就叫 KLBURN
   while read -r dev; do
@@ -195,7 +268,34 @@ mount_data_partition() {
   done
 
   warn "Found exFAT partition(s) [${tried# }] but none could be mounted read-write."
+  # 一次都挂不上的时候，把现场原样记下来。0.6.0 那次现场只留下一张照片，
+  # 光看 "Can't open blockdev" 猜不出到底有哪些块设备、dm 层长什么样。
+  _dump_storage_diag
   return 1
+}
+
+# 把和"报告落哪"有关的现场信息全部倒进日志。只在挂载失败时调用。
+_dump_storage_diag() {
+  dbg "--- storage diagnostics begin ---"
+  local line
+  while read -r line; do dbg "  lsblk: $line"; done \
+    < <(lsblk -o NAME,MAJ:MIN,SIZE,TYPE,FSTYPE,LABEL,MOUNTPOINT 2>/dev/null)
+  while read -r line; do dbg "  blkid: $line"; done < <(blkid 2>/dev/null)
+  while read -r line; do dbg "  /sys/block: $line"; done \
+    < <(for d in /sys/block/*; do
+          [[ -r "$d/dev" ]] && printf '%s %s\n' "$(basename "$d")" "$(cat "$d/dev")"
+        done 2>/dev/null)
+  while read -r line; do dbg "  dm slaves: $line"; done \
+    < <(for d in /sys/block/dm-*; do
+          [[ -d "$d" ]] || continue
+          printf '%s -> %s\n' "$(basename "$d")" "$(ls "$d/slaves" 2>/dev/null | tr '\n' ' ')"
+        done 2>/dev/null)
+  while read -r line; do dbg "  /dev/mapper: $line"; done < <(ls -la /dev/mapper 2>/dev/null)
+  while read -r line; do dbg "  dm probe: $line"; done \
+    < <(for d in $(dm_device_nodes); do
+          printf '%s type=%s\n' "$d" "$(blkid -p -s TYPE -o value "$d" 2>/dev/null || echo '?')"
+        done 2>/dev/null)
+  dbg "--- storage diagnostics end ---"
 }
 
 # 试挂一个候选，成功且可写才算数
