@@ -125,6 +125,9 @@ COMPANY_NAME="${COMPANY_NAME}"
 BUILD_DATE="$(date '+%Y-%m-%d %H:%M:%S')"
 BASE_OS="Ubuntu Server ${UBUNTU_POINT}"
 INCLUDE_NVIDIA="${INCLUDE_NVIDIA:-0}"
+# 源码的 git commit（由 build-iso.sh 追加进暂存的 config.sh 后传到这里）。
+# 版本号靠人记得 bump，commit hash 是构建脚本自己取的，骗不了人。
+GIT_COMMIT="${GIT_COMMIT:-unknown}"
 EOF
 
 # ---------------------------------------------------------------- vendor: storcli
@@ -168,16 +171,52 @@ if [[ "${INCLUDE_NVIDIA:-0}" == "1" ]]; then
 
   say "静默安装 $(basename "$RUNFILE")"
   chmod +x "$RUNFILE"
+  # -M=open 必须显式写死，不能靠默认值。
+  #
+  # NVIDIA 官方说明：proprietary 内核模块只支持到 Turing / Ampere / Ada / Hopper，
+  # **Blackwell 及以后只有 open 模块支持**。也就是说用 proprietary 装完，
+  # RTX 5090 / RTX PRO 6000 上 nvidia-smi 一张卡都认不到 —— 而按 gpu.sh 的判定
+  # 那会被记成 FAIL「驱动加载失败，显卡/供电/插槽异常」，把好卡判成坏卡。
+  # 595 系列的默认值恰好就是 open，但默认值是会变的，不能拿它当保证。
   "$RUNFILE" --silent --no-questions --accept-license \
              --kernel-name="$KVER" --no-drm --no-nvidia-modprobe \
+             -M=open \
              --install-libglvnd --no-backup --no-check-for-alternate-installs \
     || fail "NVIDIA 驱动安装失败，看 /var/log/nvidia-installer.log"
 
+  # 确认装出来的真是 open 模块：license 字段 open 是 "Dual MIT/GPL"，
+  # proprietary 是 "NVIDIA"。装错了在 Blackwell 上就是全盘认不到卡。
+  NVMOD="$(find "/lib/modules/$KVER" -name 'nvidia.ko*' | head -1)"
+  if [[ -n "$NVMOD" ]]; then
+    NVLIC="$(modinfo -F license "$NVMOD" 2>/dev/null || true)"
+    say "nvidia.ko license = ${NVLIC:-未知}"
+    case "$NVLIC" in
+      *MIT*|*GPL*) say "确认为 open 内核模块（Blackwell 可用）" ;;
+      *)           say "WARN: 装出来的不是 open 模块，RTX 5090 / RTX PRO 6000 将认不到卡" ;;
+    esac
+  fi
+
   if [[ -f "$STAGE/vendor/gpu_burn/gpu_burn" ]]; then
     install -m 0755 "$STAGE/vendor/gpu_burn/gpu_burn" /opt/klburn/tools/gpu_burn
-    [[ -f "$STAGE/vendor/gpu_burn/compare.ptx" ]] && \
-      install -m 0644 "$STAGE/vendor/gpu_burn/compare.ptx" /opt/klburn/tools/compare.ptx
-    say "gpu_burn 已安装"
+    # 上游从 compare.ptx 换成了 compare.fatbin，两个名字都认。
+    # 这个文件 gpu_burn 是在运行时按相对路径加载的，丢了会直接跑不起来。
+    GPUBURN_COMPARE=0
+    for c in compare.fatbin compare.ptx; do
+      if [[ -f "$STAGE/vendor/gpu_burn/$c" ]]; then
+        install -m 0644 "$STAGE/vendor/gpu_burn/$c" "/opt/klburn/tools/$c"
+        GPUBURN_COMPARE=1
+      fi
+    done
+    (( GPUBURN_COMPARE )) || fail "有 gpu_burn 但没有 compare.fatbin/compare.ptx，运行时会加载失败"
+
+    # gpu_burn 是静态链接的，除了驱动自带的 libcuda 不该再依赖任何 CUDA 库。
+    # 真依赖了就是构建机上没走静态链接那条路，出盘一跑就是
+    # "error while loading shared libraries"，然后被误判成显卡故障。
+    if ldd /opt/klburn/tools/gpu_burn 2>/dev/null | grep -qE 'libcublas|libcudart'; then
+      fail "gpu_burn 动态依赖 cuBLAS/cudart，盘内没有这些库，出盘必然跑不起来。
+     请重新执行 ./build/build-gpu-burn.sh（它会走静态链接）"
+    fi
+    say "gpu_burn 已安装（静态链接，自包含）"
   else
     # 别写"降级为 nvidia-smi 监控"——代码里没有这条降级路径。
     # 实际行为是 gpu_stress() 记一条 SKIP：显卡型号/显存/驱动版本照常进报告，
