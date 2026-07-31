@@ -1,11 +1,11 @@
 #!/usr/bin/env bash
 #
-# 在 WSL 里编译 gpu_burn，产物放进 vendor/gpu_burn/ 供 GPU 版 ISO 打包。
+# 在 WSL 里编译 gpu_burn，产物放进 vendor/gpu_burn/ 供构建 ISO 时打包。
 #
 #   ./build/build-gpu-burn.sh
 #
 # 不需要 root，也不需要机器上真有 N 卡（只编译，不运行）。
-# 需要先装好 CUDA，见 README「加入 GPU 模块」一节。
+# 需要先装好 CUDA（必须 ≥ 12.8），步骤见 vendor/README.md。
 #
 set -Eeuo pipefail
 
@@ -42,7 +42,7 @@ if [[ -z "$CUDAPATH" ]]; then
   done
 fi
 [[ -n "$CUDAPATH" && -x "$CUDAPATH/bin/nvcc" ]] \
-  || die "找不到 nvcc。请先装 CUDA（见 README），或手动指定:
+  || die "找不到 nvcc。请先装 CUDA（见 vendor/README.md），或手动指定:
      CUDAPATH=/usr/local/cuda-12.8 $0"
 
 NVCC_VER="$("$CUDAPATH/bin/nvcc" --version | sed -n 's/.*release \([0-9.]*\).*/\1/p')"

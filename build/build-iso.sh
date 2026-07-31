@@ -2,10 +2,10 @@
 #
 # KLBurn ISO 一键构建
 #
-#   sudo ./build/build-iso.sh                # 第一阶段：精简版（无 NVIDIA）
-#   sudo ./build/build-iso.sh --with-nvidia  # 第二阶段：带 NVIDIA 驱动 + gpu_burn
-#   sudo ./build/build-iso.sh --clean        # 清空工作区从头来
-#   sudo ./build/build-iso.sh --rebuild-fs   # 强制重新解 squashfs（换源 ISO 后用）
+#   sudo ./build/build-iso.sh                  # 常规构建（vendor/nvidia 里有驱动就自动带上）
+#   sudo ./build/build-iso.sh --without-nvidia # 强制出一张不含显卡驱动的盘
+#   sudo ./build/build-iso.sh --clean          # 清空工作区从头来
+#   sudo ./build/build-iso.sh --rebuild-fs     # 强制重新解 squashfs（换源 ISO 后用）
 #
 # 必须在 WSL 里执行，工作区在 WSL 原生文件系统（默认 ~/klburn-build）。
 #
@@ -18,6 +18,7 @@ PROJ_DIR="$(cd "$SCRIPT_DIR/.." && pwd)"
 OPT_CLEAN=0
 OPT_REBUILD_FS=0
 OPT_SKIP_DOWNLOAD=0
+OPT_NVIDIA_FORCED=0
 SRC_ISO_OVERRIDE=""
 
 while [[ $# -gt 0 ]]; do
@@ -25,7 +26,8 @@ while [[ $# -gt 0 ]]; do
     --clean)        OPT_CLEAN=1 ;;
     --rebuild-fs)   OPT_REBUILD_FS=1 ;;
     --skip-download) OPT_SKIP_DOWNLOAD=1 ;;
-    --with-nvidia)  export INCLUDE_NVIDIA=1 ;;
+    --with-nvidia)    export INCLUDE_NVIDIA=1; OPT_NVIDIA_FORCED=1 ;;
+    --without-nvidia) export INCLUDE_NVIDIA=0; OPT_NVIDIA_FORCED=1 ;;
     --iso)          SRC_ISO_OVERRIDE="$2"; shift ;;
     -h|--help)      sed -n '2,14p' "$0"; exit 0 ;;
     *) echo "未知参数: $1" >&2; exit 1 ;;
@@ -46,6 +48,33 @@ source "$SCRIPT_DIR/config.sh"
 
 require_root "$@"
 require_cmds xorriso mksquashfs unsquashfs rsync curl chroot md5sum numfmt find sed awk
+
+# ---------------------------------------------------------------- GPU 组件
+# config.sh 已经按 vendor/nvidia/ 里有没有驱动自动决定了 INCLUDE_NVIDIA。
+# 这里把结论落成一句人看得懂的日志，并且守住一条：**显式要求带驱动却没有驱动
+# 文件时直接停下**，绝不静默出一张"自称带驱动、其实没有"的盘。
+NVIDIA_RUNFILE="$(ls -1 "$PROJ_DIR"/vendor/nvidia/NVIDIA-Linux-x86_64-*.run 2>/dev/null | head -1 || true)"
+NVIDIA_VERSION=""
+if [[ -n "$NVIDIA_RUNFILE" ]]; then
+  NVIDIA_VERSION="$(basename "$NVIDIA_RUNFILE")"
+  NVIDIA_VERSION="${NVIDIA_VERSION#NVIDIA-Linux-x86_64-}"
+  NVIDIA_VERSION="${NVIDIA_VERSION%.run}"
+fi
+
+if ((INCLUDE_NVIDIA)); then
+  [[ -n "$NVIDIA_RUNFILE" ]] \
+    || die "要求构建带显卡驱动的盘，但 vendor/nvidia/ 下没有 NVIDIA-Linux-x86_64-*.run
+     放好驱动再重来，或者用 --without-nvidia 出一张不含显卡驱动的盘。"
+  log "显卡组件: NVIDIA 驱动 ${NVIDIA_VERSION} + gpu_burn"
+  [[ -f "$PROJ_DIR/vendor/gpu_burn/gpu_burn" ]] \
+    || warn "vendor/gpu_burn/gpu_burn 不存在：显卡信息照常采集，但不做满载压测"
+else
+  if (( OPT_NVIDIA_FORCED )); then
+    log "显卡组件: 按 --without-nvidia 跳过"
+  else
+    log "显卡组件: vendor/nvidia/ 下没有驱动，本次不含显卡驱动"
+  fi
+fi
 
 # ---------------------------------------------------------------- 路径
 CACHE_DIR="$WORK_DIR/cache"
@@ -276,6 +305,9 @@ cat >> "$STAGE/config.sh" <<EOF
 
 # ---------- 以下由 build-iso.sh 在构建时追加，勿手改 ----------
 GIT_COMMIT="${GIT_COMMIT}${GIT_DIRTY}"
+# chroot 里没有 vendor/ 目录，自动检测得不出正确答案，这里钉死外面算好的结论
+INCLUDE_NVIDIA="${INCLUDE_NVIDIA}"
+NVIDIA_VERSION="${NVIDIA_VERSION}"
 EOF
 
 # rootfs 覆盖层（去 CRLF 后再拷）
@@ -348,7 +380,7 @@ for cfg in "$ISO_DIR/boot/grub/grub.cfg" "$ISO_DIR/boot/grub/loopback.cfg"; do
   python3 "$SCRIPT_DIR/lib/patch-grub.py" \
     --cfg "$cfg" \
     --args "$KERNEL_ARGS" \
-    --title "KLBurn 出厂测试 v${KLBURN_VERSION}" \
+    --title "${PRODUCT_NAME} Factory Test v${KLBURN_VERSION}" \
     --drop "HWE kernel" \
     --timeout 5
 done
@@ -358,8 +390,8 @@ rm -f "$ISO_DIR/autoinstall.yaml" "$ISO_DIR/user-data" "$ISO_DIR/meta-data" 2>/d
 
 # .disk/info 标识我们的构建
 mkdir -p "$ISO_DIR/.disk"
-printf 'KLBurn Factory Test %s (based on Ubuntu Server %s) - %s\n' \
-  "$KLBURN_VERSION" "$UBUNTU_POINT" "$(date '+%Y-%m-%d %H:%M')" > "$ISO_DIR/.disk/info"
+printf '%s Factory Test %s (based on Ubuntu Server %s) - %s\n' \
+  "$PRODUCT_NAME" "$KLBURN_VERSION" "$UBUNTU_POINT" "$(date '+%Y-%m-%d %H:%M')" > "$ISO_DIR/.disk/info"
 
 # ================================================================ 7. md5sum.txt
 step "7/9 重算 md5sum.txt"
@@ -418,7 +450,9 @@ printf '\n%s========================================%s\n' "$C_GRN$C_BLD" "$C_RST
 printf '%s 构建完成%s\n' "$C_GRN$C_BLD" "$C_RST"
 printf '  ISO      : out/%s\n' "$OUT_ISO_NAME"
 printf '  体积     : %s\n' "$(human "$ISO_SIZE")"
-printf '  NVIDIA   : %s\n' "$( ((INCLUDE_NVIDIA)) && echo '已包含' || echo '未包含（第一阶段）')"
+printf '  抬头     : %s\n' "$COMPANY_NAME"
+printf '  显卡驱动 : %s\n' \
+  "$( ((INCLUDE_NVIDIA)) && echo "已包含 NVIDIA ${NVIDIA_VERSION}" || echo '未包含')"
 printf '  sha256   : %s\n' "$(cat "$PROJ_DIR/out/$OUT_ISO_NAME.sha256")"
 printf '\n  下一步：用 Rufus 写盘，见 docs/usb-rufus.md\n'
 printf '%s========================================%s\n\n' "$C_GRN$C_BLD" "$C_RST"

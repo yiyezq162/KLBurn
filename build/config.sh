@@ -3,7 +3,7 @@
 # 这个文件被 build-iso.sh source，也被 chroot-setup.sh source。
 # 只放变量，不要放逻辑。
 
-# ---------- 版本与抬头 ----------
+# ---------- 版本 ----------
 # 每次改完脚本/报告生成器就把这个小版本号往上加一格（0.1.0 -> 0.2.0），
 # 不要指望靠 build_date 的日期去区分版本——日期一眼看不出改了什么、改了多少，
 # 版本号才是人能记住、能对话里引用的东西。
@@ -11,15 +11,35 @@
 # ⚠️ 改完脚本要「先 bump 再构建」。0.3.0 就栽过一次：ISO 构建完之后又改了
 # core.sh/collect.sh 却没动版本号，于是现场那根盘自称 0.3.0、跑的却是修复前的
 # 代码（lshw 卡满 90s、屏幕上冒 Killed），对着仓库怎么看都对不上。
-KLBURN_VERSION="0.8.0"
+KLBURN_VERSION="1.1.0"
 
-# 报告抬头显示的公司名（改这里 → 重新构建即可生效）
-# 可以写中文，report.html 里显示正常。
+# ================================================================
+# 品牌抬头
+# ================================================================
+# 这一整块决定"这张盘和它出的报告属于谁"。**在构建时钉死进 ISO**，
+# 现场运行时绝不会询问操作员 —— 一根盘做出来是谁的抬头就是谁的。
+#
+# 换一家公司只要改这几行再重新构建；也可以完全不碰这个文件，
+# 用构建期环境变量覆盖（适合同一份源码出多个抬头的盘）：
+#
+#     KLBURN_COMPANY_NAME="XX科技有限公司" sudo -E ./build/build-iso.sh
+#
+# 这些值经 chroot-setup.sh 写进 /opt/klburn/klburn.conf，再进 meta.json 和报告抬头。
+
+# 报告抬头显示的公司名。可以写中文，report.html 里显示正常。
 # 注意：开机那个 banner 是 Linux 文本控制台，显示不了中文，
 #      所以公司名含中文时 banner 上不显示它（只在报告里出现），这是正常的。
-COMPANY_NAME="广州市鲲林科技有限公司"
+COMPANY_NAME="${KLBURN_COMPANY_NAME:-广州市鲲林科技有限公司}"
+
+# 报告大标题（客户报告和内部报告共用这一个主标题）
+REPORT_TITLE="${KLBURN_REPORT_TITLE:-服务器出厂老化测试报告}"
+
+# 产品名：开机 banner、GRUB 菜单项、.disk/info 用它。
+# 只能是 ASCII —— 这三个地方都在文本控制台/引导器里，中文显示不出来。
+PRODUCT_NAME="${KLBURN_PRODUCT_NAME:-KLBurn}"
+
 # 可选 logo：把 png 放到 vendor/logo.png，留空则报告不显示 logo
-COMPANY_LOGO_FILE="logo.png"
+COMPANY_LOGO_FILE="${KLBURN_LOGO_FILE:-logo.png}"
 
 # ---------- 源 ISO ----------
 UBUNTU_RELEASE="24.04"
@@ -60,18 +80,34 @@ APT_MIRROR="https://mirrors.tuna.tsinghua.edu.cn/ubuntu/"
 # 不设时区的话报告目录名和时间戳会比北京时间早 8 小时，和现场对不上。
 TIMEZONE="Asia/Shanghai"
 
-# ---------- 阶段开关 ----------
-# 0 = 第一阶段精简版（不含 NVIDIA 驱动 / gpu_burn）
-# 1 = 第二阶段（需要 vendor/nvidia/NVIDIA-Linux-x86_64-*.run）
-INCLUDE_NVIDIA="${INCLUDE_NVIDIA:-0}"
+# ---------- GPU 组件开关 ----------
+# 完整的盘是带 NVIDIA 驱动 + gpu_burn 的，所以这里**默认自动检测**：
+# vendor/nvidia/ 下放了驱动就带上，没放就出一张不含显卡驱动的盘。
+#
+# 想手工指定：
+#   sudo ./build/build-iso.sh --with-nvidia      强制带（缺驱动会直接报错，不会静默出一张残盘）
+#   sudo ./build/build-iso.sh --without-nvidia   强制不带
+#
+# ⚠️ 这个判断在 chroot 里也会被 source 一次，而 chroot 里没有 vendor/ 目录。
+# 所以 build-iso.sh 会在传进 chroot 的那份 config.sh 末尾追加一行确定的
+# INCLUDE_NVIDIA=...，覆盖这里的自动检测结果。别把这里写成会在 chroot 里
+# 算出不同答案的形式。
+if [[ -z "${INCLUDE_NVIDIA:-}" ]]; then
+  if compgen -G "$(dirname "${BASH_SOURCE[0]}")/../vendor/nvidia/NVIDIA-Linux-x86_64-*.run" >/dev/null 2>&1; then
+    INCLUDE_NVIDIA=1
+  else
+    INCLUDE_NVIDIA=0
+  fi
+fi
 
 # ---------- squashfs 层裁剪 ----------
-# 24.04.4 的 live server ISO 有 5 层 squashfs，依赖链靠文件名里的点表示：
-#   ubuntu-server-minimal.squashfs                          621M  基础系统
-#   ...ubuntu-server.squashfs                              1.1G  server 软件集
+# 24.04.4 的 live server ISO 有 5 层 squashfs，依赖链靠文件名里的点表示
+# （下面是压缩后的体积，解开约 3~4 倍）：
+#   ubuntu-server-minimal.squashfs                          159M  基础系统
+#   ...ubuntu-server.squashfs                               142M  server 软件集
 #   ...installer.squashfs                                   671M  subiquity 安装器  <- 丢
-#   ...installer.generic.squashfs                           696M  内核 + 驱动模块 + firmware  <- 必须留！
-#   ...installer.generic-hwe.squashfs                             第二套 HWE 内核    <- 丢
+#   ...installer.generic.squashfs                           256M  内核 + 驱动模块 + firmware  <- 必须留！
+#   ...installer.generic-hwe.squashfs                       267M  第二套 HWE 内核    <- 丢
 # 注意：内核模块（exfat / megaraid_sas / mpt3sas ...）全在 installer.generic 层，
 # 丢掉它会得到一个没有任何驱动的系统。
 LAYER_EXCLUDE_PATTERNS=(
@@ -107,7 +143,7 @@ PKGS_MISC=(
   exfatprogs dosfstools ntfs-3g xz-utils zstd pciutils
 )
 
-# 第二阶段编译 NVIDIA 内核模块需要的包（INCLUDE_NVIDIA=1 时才装）
+# 编译 NVIDIA 内核模块需要的包（INCLUDE_NVIDIA=1 时才装，装完就删）
 PKGS_NVIDIA_BUILD=(
   build-essential dkms libglvnd-dev pkg-config
 )

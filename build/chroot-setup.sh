@@ -117,14 +117,18 @@ systemctl enable klburn.service >/dev/null 2>&1 \
   || fail "klburn.service 没有真正 enable 成功，做出来的盘开机不会自动跑测试"
 say "klburn.service 已设为开机自启"
 
-# 构建期常量写进配置文件，运行时脚本读它
+# 构建期常量写进配置文件，运行时脚本读它。
+# 抬头（公司名 / 报告标题 / 产品名）就是在这里钉死进盘里的 —— 现场不会再问任何人。
 cat > /opt/klburn/klburn.conf <<EOF
 # 由 build/chroot-setup.sh 在构建时生成，勿手改
 KLBURN_VERSION="${KLBURN_VERSION}"
 COMPANY_NAME="${COMPANY_NAME}"
+REPORT_TITLE="${REPORT_TITLE:-服务器出厂老化测试报告}"
+PRODUCT_NAME="${PRODUCT_NAME:-KLBurn}"
 BUILD_DATE="$(date '+%Y-%m-%d %H:%M:%S')"
 BASE_OS="Ubuntu Server ${UBUNTU_POINT}"
 INCLUDE_NVIDIA="${INCLUDE_NVIDIA:-0}"
+NVIDIA_VERSION="${NVIDIA_VERSION:-}"
 # 源码的 git commit（由 build-iso.sh 追加进暂存的 config.sh 后传到这里）。
 # 版本号靠人记得 bump，commit hash 是构建脚本自己取的，骗不了人。
 GIT_COMMIT="${GIT_COMMIT:-unknown}"
@@ -159,9 +163,9 @@ if [[ -n "${COMPANY_LOGO_FILE:-}" && -f "$STAGE/vendor/${COMPANY_LOGO_FILE}" ]];
   say "报告 logo 已安装"
 fi
 
-# ---------------------------------------------------------------- NVIDIA（第二阶段）
+# ---------------------------------------------------------------- NVIDIA 驱动 + gpu_burn
 if [[ "${INCLUDE_NVIDIA:-0}" == "1" ]]; then
-  say "=== NVIDIA 阶段 ==="
+  say "=== 安装 NVIDIA 驱动与 gpu_burn ==="
   RUNFILE="$(ls -1 "$STAGE"/vendor/nvidia/NVIDIA-Linux-x86_64-*.run 2>/dev/null | head -1 || true)"
   [[ -n "$RUNFILE" ]] || fail "INCLUDE_NVIDIA=1 但 vendor/nvidia/ 下没有 .run 文件"
 
