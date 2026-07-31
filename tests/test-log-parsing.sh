@@ -164,5 +164,70 @@ check "OOM 分支必须判 WARN，不许判 FAIL" \
 
 # ================================================================
 echo
+echo "=== 显卡驱动与显卡不匹配：绝不能判成「卡坏了」==="
+# 这是把好卡说成坏卡的最短路径：驱动版本旧了认不到新卡，nvidia-smi 一张都读不到，
+# 而老代码只看"读不到 = FAIL（显卡/供电/插槽异常）"。NVRM 其实在内核日志里
+# 明说了是驱动不支持 —— 判据就在这几行原话里。样本是 NVIDIA 驱动源码里的固定串。
+
+cat > "$TMP/nvrm-unsupported.txt" <<'EOF'
+[   12.001] nvidia: loading out-of-tree module taints kernel.
+[   12.334] NVRM: The NVIDIA GPU 0000:c9:00.0 (PCI ID: 10de:2bb1)
+[   12.334] NVRM: installed in this system is not supported by the NVIDIA
+[   12.334] NVRM: 550.54.14 driver release.
+[   12.335] NVRM: Please see 'Supported NVIDIA GPU Products' in this release's README
+[   12.401] NVRM: The NVIDIA probe routine was not called for 1 device(s).
+EOF
+
+cat > "$TMP/nvrm-open-unsupported.txt" <<'EOF'
+[   10.100] NVRM: The NVIDIA GPU 0000:01:00.0 (PCI ID: 10de:1b06)
+[   10.100] NVRM: installed in this system is not supported by open nvidia.ko.
+EOF
+
+cat > "$TMP/nvrm-none.txt" <<'EOF'
+[   11.000] NVRM: No NVIDIA GPU found.
+EOF
+
+# 负样本：卡是真的挂了 —— 驱动加载正常，只是设备掉了/供电不上。
+# 这份日志里一条"不支持"都没有，必须继续判 FAIL。
+cat > "$TMP/nvrm-dead-card.txt" <<'EOF'
+[   12.001] nvidia: loading out-of-tree module taints kernel.
+[   13.552] NVRM: GPU 0000:c9:00.0: RmInitAdapter failed! (0x26:0xffff:1479)
+[   13.552] NVRM: GPU 0000:c9:00.0: rm_init_adapter failed, device minor number 0
+[   14.010] pcieport 0000:c8:00.0: AER: Uncorrected (Fatal) error received
+EOF
+
+check "驱动版本不支持这张卡 -> 认出是不匹配" "1" \
+      "$(gpu_scan_driver_mismatch "$TMP/nvrm-unsupported.txt" | grep -c 'not supported by the NVIDIA')"
+check "open 模块不支持这张卡 -> 也算不匹配" "1" \
+      "$(gpu_scan_driver_mismatch "$TMP/nvrm-open-unsupported.txt" | grep -c 'not supported by open')"
+check "NVRM 报 No NVIDIA GPU found -> 算不匹配" "1" \
+      "$(gpu_scan_driver_mismatch "$TMP/nvrm-none.txt" | grep -c 'No NVIDIA GPU found')"
+check "卡真挂了的日志里一条不匹配证据都不许有（否则会漏判故障卡）" "0" \
+      "$(gpu_scan_driver_mismatch "$TMP/nvrm-dead-card.txt" | grep -c . || true)"
+check "干净日志不误报" "0" \
+      "$(gpu_scan_driver_mismatch "$TMP/sat-pass.log" | grep -c . || true)"
+check "文件不存在时不崩、也不误报" "0" \
+      "$(gpu_scan_driver_mismatch "$TMP/no-such-file.txt" | grep -c . || true)"
+
+# 逐卡 PCI 地址要抠得出来：认不到的卡数能不能被"不支持"解释掉，全靠这个数
+check "从 NVRM 原话里抠出不受支持的卡的 PCI 地址" "0000:c9:00.0" \
+      "$(gpu_mismatch_devices "$TMP/nvrm-unsupported.txt")"
+check "同一张卡刷屏多次也只算一张" "1" \
+      "$(gpu_mismatch_devices "$TMP/nvrm-unsupported.txt" | grep -c .)"
+
+# 判定分支本身：不匹配走 SKIP，没有证据才走 FAIL
+gd_chain="$(declare -f gpu_detect)"
+check "gpu_detect 必须在判 FAIL 之前先查一次不匹配" "yes" \
+      "$(if [[ "$(grep -n 'gpu_scan_driver_mismatch' <<<"$gd_chain" | head -1 | cut -d: -f1)" \
+               -lt "$(grep -n 'ST_FAIL' <<<"$gd_chain" | head -1 | cut -d: -f1)" ]]; \
+         then echo yes; else echo no; fi)"
+check "不匹配那条分支判的必须是 SKIP" "yes" \
+      "$(if grep -A6 'GPU_MISMATCH=1' <<<"$gd_chain" | grep -q 'ST_SKIP'; \
+         then echo yes; else echo no; fi)"
+check "不匹配的文案里不许把原因说成硬件异常" "0" \
+      "$(grep -A8 'GPU_MISMATCH=1' <<<"$gd_chain" | grep -cE '故障|异常|损坏' || true)"
+
+# ================================================================
+echo
 printf '通过 %d 项，失败 %d 项\n' "$PASS" "$FAIL"
 exit $(( FAIL > 0 ? 1 : 0 ))

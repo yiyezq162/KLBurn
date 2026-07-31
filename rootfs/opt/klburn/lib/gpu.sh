@@ -1,17 +1,24 @@
 #!/usr/bin/env bash
 # KLBurn GPU 模块
 #
-# 三种情况必须严格区分，不能混：
+# 四种情况必须严格区分，不能混：
 #   A. lspci 里没有 NVIDIA 设备      -> SKIP「未安装独立显卡」，不是故障
 #   B. 有设备且驱动正常              -> 加载驱动并压测，逐卡出数据
-#   C. 有设备但驱动加载不起来        -> FAIL（卡坏了 或 驱动/供电/插槽有问题）
+#   C. 有设备，驱动也在，但**驱动版本不支持这张卡**
+#                                    -> SKIP「驱动与显卡不匹配」，不是故障
+#   D. 有设备、驱动认不到、又没有不匹配的证据
+#                                    -> FAIL（卡坏了 或 供电/插槽有问题）
 #
-# 另外还有一种：精简版 ISO 压根没打包驱动 —— 这是构建选择，不是硬件问题，
-# 所以标 SKIP 并写明原因，不能算 FAIL。
+# C 和 D 的区别是这个模块最要紧的一件事。判据是内核里 NVRM 自己打的原话
+# （见 gpu_mismatch_pattern）：驱动明确说"这张卡我不支持"，那是**我们这边**
+# 带的驱动版本旧了，跟客户的卡好不好毫无关系 —— 判 FAIL 就是把好卡说成坏卡。
+#
+# 还有一种：这张盘构建时没有打包显卡驱动 —— 同样是我们环境的限制，标 SKIP。
 
 GPU_PRESENT=0        # lspci 看到的 NVIDIA 显卡数量
 GPU_USABLE=0         # nvidia-smi 能正常读到的数量
 GPU_PCI_LIST=""
+GPU_MISMATCH=0       # 驱动版本与显卡不匹配（内部报告要用）
 
 # ---------------------------------------------------------------- 日志判读
 # gpu_burn 日志 -> "<FAULTY卡数> <累计计算错误数>"
@@ -37,6 +44,51 @@ gpu_parse_burn_log() {
   printf '%s %s' "$faulty" "$err_sum"
 }
 
+# ---------------------------------------------------------------- 驱动/显卡不匹配
+# 驱动装了、模块也加载了，但这张卡它不认 —— NVRM 会在内核日志里明说。
+# 官方驱动源码里的固定字符串，几代驱动都没变过：
+#
+#   NVRM: The NVIDIA GPU 0000:01:00.0 (PCI ID: 10de:2b85) installed in this system
+#   NVRM: is not supported by the NVIDIA 550.54.14 driver release.
+#   NVRM: The NVIDIA GPU 0000:01:00.0 (PCI ID: 10de:1b06) installed in this system
+#   NVRM: is not supported by open nvidia.ko.
+#   NVRM: No NVIDIA GPU found.
+#   NVRM: The NVIDIA probe routine was not called for 1 device(s).
+#
+# 注意长消息在 dmesg 里是折行的，每一折行都带 "NVRM:" 前缀，所以按行匹配
+# "NVRM: 这一行里出现关键短语" 是可靠的，不需要跨行拼。
+#
+# 抽成纯函数以便脱机回归测试，见 tests/test-log-parsing.sh
+gpu_mismatch_pattern() {
+  printf '%s' 'NVRM:.*not supported by|NVRM:.*No NVIDIA GPU found|NVRM:.*probe routine was not called|NVRM:.*minimum required driver version'
+}
+
+# gpu_scan_driver_mismatch <内核日志文件> -> 命中的 NVRM 原话，最多 5 行；没有则空
+gpu_scan_driver_mismatch() {
+  local f="${1:-}"
+  [[ -f "$f" ]] || return 0
+  grep -aE "$(gpu_mismatch_pattern)" "$f" 2>/dev/null | tail -5 || true
+}
+
+# gpu_mismatch_devices <内核日志文件> -> 被驱动判为"不支持"的显卡 PCI 地址，去重
+# 用来核对"认不到的卡数"能不能被不匹配全部解释掉 —— 解释不掉的部分仍然判 FAIL，
+# 不能让一张真坏的卡混在不匹配里蒙混过关。
+#
+# ⚠️ 地址不在"not supported by"那一行上。NVRM 的长消息是折行打的，
+# 卡的地址在**前一行**：
+#     NVRM: The NVIDIA GPU 0000:c9:00.0 (PCI ID: 10de:2bb1)
+#     NVRM: installed in this system is not supported by the NVIDIA
+# 所以要认的是 "The NVIDIA GPU <地址>" 这一行。它正好也能把真故障的日志区分开——
+# 卡挂了时 NVRM 打的是 "NVRM: GPU 0000:c9:00.0: RmInitAdapter failed"，
+# 没有 "The NVIDIA" 三个词。
+gpu_mismatch_devices() {
+  local f="${1:-}"
+  [[ -f "$f" ]] || return 0
+  grep -aE 'NVRM:.*The NVIDIA GPU [0-9a-fA-F]{4}:' "$f" 2>/dev/null \
+    | grep -aoE '[0-9a-fA-F]{4}:[0-9a-fA-F]{2}:[0-9a-fA-F]{2}\.[0-9a-fA-F]' \
+    | sort -u || true
+}
+
 gpu_detect() {
   info "Detecting NVIDIA GPUs ..."
 
@@ -57,8 +109,8 @@ gpu_detect() {
   info "Found $GPU_PRESENT NVIDIA GPU(s) on the PCI bus"
 
   # ---------- 测试环境未包含显卡驱动 ----------
-  # 文案给客户看：只说"本次测试环境未包含显卡驱动"，不提测试盘/精简版/构建选择——
-  # 那是我们内部怎么打包的事，客户看到只会以为机器缺东西。
+  # 文案给客户看：只说"本次测试环境未包含显卡驱动"，不提这张盘是怎么打包的——
+  # 那是我们内部的事，客户看到只会以为机器缺东西。
   if [[ "${INCLUDE_NVIDIA:-0}" != "1" ]]; then
     result_add "gpu_detect" "GPU" "$ST_SKIP" \
       "检测到 ${GPU_PRESENT} 张 NVIDIA 显卡（型号见硬件清单）。\
@@ -84,19 +136,53 @@ gpu_detect() {
 
   capture "gpu-smi-query.txt" nvidia-smi
   capture "gpu-smi-full.txt"  nvidia-smi -q
+  # 驱动自身的版本/license，nvidia-smi 起不来时这是唯一还能问出版本号的地方。
+  # 只进工程数据，不进客户报告。
+  capture "gpu-driver-modinfo.txt" modinfo nvidia
 
   GPU_USABLE="$(nvidia-smi --query-gpu=index --format=csv,noheader 2>/dev/null | grep -c . || true)"
 
-  # ---------- 情况 C：有卡但驱动起不来 ----------
-  if (( GPU_USABLE == 0 )); then
+  # 认不全的时候先问一句内核：是卡的问题，还是我们带的驱动不认这张卡？
+  local missing=$(( GPU_PRESENT - GPU_USABLE ))
+  local mism="" mism_n=0
+  if (( missing > 0 )); then
     capture "gpu-modprobe-error.txt" dmesg -T
+    mism="$(gpu_scan_driver_mismatch "$RAW_DIR/gpu-modprobe-error.txt")"
+    if [[ -n "$mism" ]]; then
+      printf '%s\n' "$mism" > "$RAW_DIR/gpu-driver-mismatch.txt"
+      mism_n="$(gpu_mismatch_devices "$RAW_DIR/gpu-modprobe-error.txt" | grep -c . || true)"
+      [[ "$mism_n" =~ ^[0-9]+$ ]] || mism_n=0
+    fi
+  fi
+
+  # ---------- 情况 C：驱动版本不支持这张卡 ----------
+  # 一张卡都认不到时，只要有 NVRM 的不匹配原话就足够定性（那种情况下
+  # NVRM 往往打的是 "No NVIDIA GPU found"，没有逐卡的 PCI 地址可数）。
+  # 认到一部分时则要求"不支持的卡数"能盖住"少认的卡数"，盖不住说明
+  # 还有卡是因为别的原因没起来 —— 那部分仍然要判 FAIL。
+  if [[ -n "$mism" ]] && (( GPU_USABLE == 0 || mism_n >= missing )); then
+    GPU_MISMATCH=1
+    warn "[GPU] Driver does not support $missing of $GPU_PRESENT card(s) - not a hardware fault."
+    local rest=""
+    (( GPU_USABLE > 0 )) && rest="其余 ${GPU_USABLE} 张已正常识别并参与测试。"
+    result_add "gpu_detect" "GPU" "$ST_SKIP" \
+      "检测到 ${GPU_PRESENT} 张 NVIDIA 显卡（型号见硬件清单）。\
+本次测试环境的显卡驱动版本与其中 ${missing} 张不匹配，这 ${missing} 张未做显卡测试。\
+${rest}此项不影响整机结论。" \
+      "raw/gpu-lspci.txt"
+    (( GPU_USABLE == 0 )) && return 1
+    return 0
+  fi
+
+  # ---------- 情况 D：有卡但驱动起不来，且没有不匹配的证据 ----------
+  if (( GPU_USABLE == 0 )); then
     result_add "gpu_detect" "GPU" "$ST_FAIL" \
       "PCI 上能看到 ${GPU_PRESENT} 张 NVIDIA 显卡，但驱动加载失败 / nvidia-smi 读不到任何设备（显卡、供电或插槽异常）" \
       "raw/gpu-smi-query.txt"
     return 1
   fi
 
-  # ---------- 情况 C 变体：认到的卡比 PCI 上少 ----------
+  # ---------- 情况 D 变体：认到的卡比 PCI 上少 ----------
   if (( GPU_USABLE < GPU_PRESENT )); then
     result_add "gpu_detect" "GPU" "$ST_FAIL" \
       "PCI 上有 ${GPU_PRESENT} 张显卡，驱动只认到 ${GPU_USABLE} 张（有卡异常）" \
