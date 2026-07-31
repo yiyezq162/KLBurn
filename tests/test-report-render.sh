@@ -243,6 +243,50 @@ else
 fi
 
 echo
+echo "=== 阵列卡后端的物理盘要进硬盘清单 ==="
+# 阵列卡跑 RAID 模式时物理盘没有 /dev 节点，按 lsblk 那一圈根本扫不到 ——
+# 但客户买的正是这些盘，清单里少了它们，报告就等于没写硬盘。
+RDPD="$TMP/run-pd"
+mkdir -p "$RDPD/raw/smart-pre" "$RDPD/raw/smart-post"
+cp "$RD/meta.json" "$RDPD/meta.json"
+cp "$RD/results.jsonl" "$RDPD/results.jsonl" 2>/dev/null || true
+cat > "$RDPD/raw/lsblk.json" <<'EOF'
+{"blockdevices":[
+ {"name":"sda","path":"/dev/sda","size":7681501126656,"type":"disk","rota":false,
+  "tran":"sas","model":"AVAGO MR9361-8i","serial":"00d1e2f3","rm":false,"hotplug":false}
+]}
+EOF
+# 逻辑盘自己（阵列卡的 VD，通常读不到有意义的 SMART）
+printf '{"model":"AVAGO MR9361-8i","serial":"00d1e2f3","smart_passed":null}\n' \
+  > "$RDPD/raw/smart-pre/sda.norm.json"
+cp "$RDPD/raw/smart-pre/sda.norm.json" "$RDPD/raw/smart-post/sda.norm.json"
+# 卡后面两块真盘，透传读到的
+for n in 8 9; do
+  cat > "$RDPD/raw/smart-pre/sda-pd${n}.norm.json" <<EOF
+{"model":"ST8000NM017B","serial":"WKD0A${n}9X","firmware":"SN04",
+ "capacity_bytes":8001563222016,"rotation_rate":7200,"power_on_hours":260,
+ "power_cycles":9,"temperature_c":33,"smart_passed":true,
+ "realloc_sectors":0,"pending_sectors":0,"uncorrectable":0,"crc_errors":0}
+EOF
+  sed 's/"temperature_c":33/"temperature_c":41/' \
+    "$RDPD/raw/smart-pre/sda-pd${n}.norm.json" > "$RDPD/raw/smart-post/sda-pd${n}.norm.json"
+done
+OUTPD="$TMP/report-pd.html"
+if python3 "$GEN" --run-dir "$RDPD" --out "$OUTPD" >/dev/null 2>"$TMP/errpd"; then
+  has "$OUTPD" "阵列卡 PD8"     "卡后面的第一块物理盘"
+  has "$OUTPD" "阵列卡 PD9"     "第二块"
+  has "$OUTPD" "ST8000NM017B"   "物理盘的型号（逻辑盘上读不到）"
+  has "$OUTPD" "WKD0A89X"       "物理盘的序列号"
+  has "$OUTPD" "41°C"           "物理盘的测后温度"
+  has "$OUTPD" "机械盘"          "rotation_rate 7200 要判成机械盘"
+  has "$OUTPD" "通过阵列卡逐块读取" "要有一句说明这几行是怎么来的"
+  has_no "$OUTPD" "通电时间"     "物理盘同样不列寿命类字段"
+  has_no "$OUTPD" "megaraid"     "透传参数是内部实现，不该出现在交付报告里"
+else
+  bad "带阵列卡的报告没能生成：$(cat "$TMP/errpd")"
+fi
+
+echo
 echo "=== 硬盘：寿命类字段不进这份报告 ==="
 has_no "$OUT" "通电时间"        "不参与判定，留在工程数据里"
 has_no "$OUT" "通电次数"        "同上"

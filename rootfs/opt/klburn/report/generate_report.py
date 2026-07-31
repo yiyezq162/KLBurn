@@ -391,6 +391,22 @@ class Data(object):
         return out
 
     # ---------- 硬盘 ----------
+    def raid_pd_keys(self):
+        """阵列卡后端物理盘的 SMART key -> [(逻辑盘名, 设备号), ...]
+
+        阵列卡跑 RAID 模式时物理盘没有 /dev 节点，它们的 SMART 是通过阵列卡
+        透传读的（`smartctl -d megaraid,N`），落盘文件名形如 sda-pd8.norm.json。
+        """
+        d = self.rawpath("smart-pre")
+        out = []
+        if not os.path.isdir(d):
+            return out
+        for f in sorted(os.listdir(d)):
+            m = re.match(r"^(.+)-pd(\d+)\.norm\.json$", f)
+            if m:
+                out.append((m.group(1), m.group(2)))
+        return out
+
     def disks(self):
         lsblk = read_json(self.rawpath("lsblk.json"), {"blockdevices": []})
 
@@ -441,6 +457,30 @@ class Data(object):
                 ("SMART健康", "正常" if sm.get("smart_passed") is True
                     else ("异常" if sm.get("smart_passed") is False else None)),
                 ("本次压测", "是" if path in tested else "否"),
+            ]))
+
+        # 阵列卡后端的物理盘。它们没有自己的 /dev 节点，所以上面按 lsblk 那一圈
+        # 扫不到 —— 但客户买的正是这些盘，报告里必须有。
+        for vd, n in self.raid_pd_keys():
+            sm = read_json(self.rawpath("smart-pre", "%s-pd%s.norm.json" % (vd, n)), {})
+            smp = read_json(self.rawpath("smart-post", "%s-pd%s.norm.json" % (vd, n)), {})
+            if not sm:
+                continue
+            rota = sm.get("rotation_rate")
+            out.append(OrderedDict([
+                ("设备", "阵列卡 PD%s" % n),
+                ("型号", clean(sm.get("model"))),
+                ("序列号", clean(sm.get("serial"))),
+                ("固件", clean(sm.get("firmware"))),
+                ("容量", human_bytes(sm.get("capacity_bytes"))),
+                ("接口", "阵列卡"),
+                ("介质", "固态盘" if rota in (0, None) else "机械盘"),
+                ("当前温度", ("%s°C" % smp.get("temperature_c"))
+                    if smp.get("temperature_c") is not None else
+                    (("%s°C" % sm.get("temperature_c")) if sm.get("temperature_c") is not None else None)),
+                ("SMART健康", "正常" if sm.get("smart_passed") is True
+                    else ("异常" if sm.get("smart_passed") is False else None)),
+                ("本次压测", "—"),
             ]))
         return out
 
@@ -873,6 +913,9 @@ def build_html(data):
     if disks:
         A('<p class="sub">下表为本机硬盘的型号 / 序列号 / 固件 / 容量与 SMART 健康状态。'
           "坏道类计数在压测前后的变化见下方「硬盘 SMART 复查」。</p>")
+        if data.raid_pd_keys():
+            A('<p class="sub">标注为「阵列卡 PD<i>n</i>」的是接在阵列卡后面的物理盘 —— '
+              "它们在操作系统里看不到独立的盘符，这里的信息是通过阵列卡逐块读取的。</p>")
     A(table(disks, "未检测到本机硬盘"))
 
     A("<h3>1.5 阵列卡</h3>")

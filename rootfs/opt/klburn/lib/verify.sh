@@ -23,17 +23,22 @@ smart_field() {
 verify_smart() {
   info "Comparing pre/post SMART data ..."
 
-  if (( ${#DISK_SMART[@]} == 0 )); then
+  # 逐项走 smart_target_keys（定义在 collect.sh）而不是 DISK_SMART：
+  # 阵列卡后面的物理盘没有自己的 /dev 节点，只有一个 key（sda-pd8），
+  # 按设备路径遍历的话它们一块都对比不到。
+  local keys=()
+  while read -r base; do [[ -n "$base" ]] && keys+=("$base"); done < <(smart_target_keys)
+
+  if (( ${#keys[@]} == 0 )); then
     result_add "verify_smart" "硬盘 SMART 复查" "$ST_SKIP" "无本机硬盘" ""
     return
   fi
 
-  local bad=() warned=() dev base
+  local bad=() warned=() base
   local fields=(realloc_sectors pending_sectors uncorrectable crc_errors media_errors)
   local fieldnames=("重分配扇区" "待处理扇区" "不可修正错误" "接口CRC错误" "NVMe介质错误")
 
-  for dev in "${DISK_SMART[@]}"; do
-    base="$(basename "$dev")"
+  for base in "${keys[@]}"; do
 
     # SMART 总体健康状态
     local passed; passed="$(smart_field post "$base" smart_passed)"
@@ -72,7 +77,7 @@ verify_smart() {
       "$(printf '%s；' "${warned[@]}")" "raw/smart-post/"
   else
     result_add "verify_smart" "硬盘 SMART 复查" "$ST_PASS" \
-      "${#DISK_SMART[@]} 块盘压测前后无新增坏道/错误计数" "raw/smart-post/"
+      "${#keys[@]} 块盘压测前后无新增坏道/错误计数" "raw/smart-post/"
   fi
 }
 
@@ -81,17 +86,19 @@ verify_smart() {
 # 盘本身没坏、SMART 也干净，但机箱风道或盘位散热不行，装到客户机房里就变成
 # "这盘怎么越跑越慢"（NVMe 到点会自己降速）。
 #
-# 只认真读到的数字：SMART 不上报温度的盘（部分 SATA 盘、阵列卡后面的盘）
+# 只认真读到的数字：不上报温度的盘（部分 SATA 盘、部分阵列卡固件）
 # 直接不参与判定，不能因为读不到就当成有问题。
 verify_disk_temp() {
-  if (( ${#DISK_SMART[@]} == 0 )); then
+  local keys=()
+  while read -r base; do [[ -n "$base" ]] && keys+=("$base"); done < <(smart_target_keys)
+
+  if (( ${#keys[@]} == 0 )); then
     result_add "verify_disk_temp" "硬盘温度" "$ST_SKIP" "无本机硬盘" ""
     return
   fi
 
-  local hot=() over=() seen=0 dev base t
-  for dev in "${DISK_SMART[@]}"; do
-    base="$(basename "$dev")"
+  local hot=() over=() seen=0 base t
+  for base in "${keys[@]}"; do
     # 测后读数才有意义（测前是冷的）；测后取不到就退回测前，聊胜于无
     t="$(smart_field post "$base" temperature_c)"
     [[ "$t" =~ ^[0-9]+$ ]] || t="$(smart_field pre "$base" temperature_c)"

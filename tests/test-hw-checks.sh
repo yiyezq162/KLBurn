@@ -960,6 +960,147 @@ check "守卫本身必须抓得住违规文案（否则上一条是摆设）" "1
 
 # ================================================================
 echo
+echo "=== 阵列卡后端物理盘：SMART 透传 ==="
+# 阵列卡跑 RAID 模式时 /dev/sdX 是逻辑盘，物理盘不在 /dev 下 ——
+# 直接 smartctl 读到的是逻辑盘，没有 SMART 属性，于是"测前测后对比"整项空跑。
+# 这组用假的 sysfs 树验证：认不认得出 megaraid_sas、候选设备号取得对不对、
+# **没有阵列卡的机器一分钱开销都不花**（这条最重要，别为了这个功能拖慢所有机器）。
+
+SYSFAKE="$TMP/sysfake"
+# 照着真 sysfs 的形状搭：
+#   /sys/class/scsi_device/<H:C:T:L>  ->  .../<H:C:T:L>/scsi_device/<H:C:T:L>
+#   那个目录里有个 device 链接指回上层的 SCSI 设备目录，块设备挂在 device/block/ 下
+# 形状搭错的话测出来的是假绿 —— 所以这里不图省事，按真的来。
+mk_scsi_dev() {   # mk_scsi_dev <H:C:T:L> [块设备名]
+  # 分成两条 local：同一条 local 里后一个变量看不到前一个刚赋的值
+  # （bash 在调用 local 之前就把参数全展开完了），写成一行的话 $hctl 是空的。
+  local hctl="$1" blk="${2:-}"
+  local h="${hctl%%:*}" devdir="$SYSFAKE/devices/pci0/host${hctl%%:*}/$hctl"
+  mkdir -p "$devdir/scsi_device/$hctl" "$SYSFAKE/class/scsi_device"
+  ln -sfn "$devdir" "$devdir/scsi_device/$hctl/device"
+  ln -sfn "$devdir/scsi_device/$hctl" "$SYSFAKE/class/scsi_device/$hctl"
+  if [[ -n "$blk" ]]; then
+    mkdir -p "$devdir/block/$blk" "$SYSFAKE/block/$blk"
+    ln -sfn "$devdir" "$SYSFAKE/block/$blk/device"
+  fi
+}
+mk_host() {       # mk_host <host号> <驱动名>
+  mkdir -p "$SYSFAKE/class/scsi_host/host$1"
+  printf '%s\n' "$2" > "$SYSFAKE/class/scsi_host/host$1/proc_name"
+}
+
+# 一台典型的 MegaRAID 机器：host0 是阵列卡，
+# 0:2:0:0 是逻辑盘（有块设备 sda），0:0:8:0 / 0:0:9:0 是卡后面的物理盘（没有块设备）
+mk_host 0 megaraid_sas
+mk_scsi_dev "0:2:0:0" sda
+mk_scsi_dev "0:0:8:0"
+mk_scsi_dev "0:0:9:0"
+# host1 是普通 SATA 控制器，1:0:0:0 -> sdb
+mk_host 1 ahci
+mk_scsi_dev "1:0:0:0" sdb
+
+check "从块设备反查 SCSI host 号" "0" "$(disk_scsi_host sda "$SYSFAKE")"
+check "普通 SATA 盘的 host 号"     "1" "$(disk_scsi_host sdb "$SYSFAKE")"
+check "不存在的块设备返回空"       ""  "$(disk_scsi_host nosuchdev "$SYSFAKE")"
+check "认得出阵列卡驱动" "megaraid_sas" "$(scsi_host_driver 0 "$SYSFAKE")"
+check "认得出普通控制器" "ahci"         "$(scsi_host_driver 1 "$SYSFAKE")"
+
+check "候选设备号 = 没有块设备的那几个 target id" "8 9" \
+      "$(megaraid_pd_candidates 0 "$SYSFAKE" | tr '\n' ' ' | sed 's/ $//')"
+check "逻辑盘自己（有块设备）不能被当成物理盘" "0" \
+      "$(megaraid_pd_candidates 0 "$SYSFAKE" | grep -c '^0$' || true)"
+check "普通控制器下没有候选" "0" \
+      "$(megaraid_pd_candidates 1 "$SYSFAKE" | grep -c . || true)"
+
+# 下面几组要走 megaraid_pd_ids 的完整分支。它开头有一句 `have smartctl || return 0`，
+# 而跑测试的 WSL 上通常没装 smartctl —— 不把 have 顶掉的话，
+# 后面每一条都会因为提前返回而"通过"，又是一组永远不会红的测试。
+have() { return 0; }
+
+# 没有阵列卡的机器：megaraid_pd_ids 必须直接返回，一次 smartctl 都不许跑。
+# 拿一个会计数的替身 probe 来证明这一点。
+PROBE_COUNT="$TMP/probe.count"; : > "$PROBE_COUNT"
+megaraid_pd_probe() { echo x >> "$PROBE_COUNT"; return 1; }
+disk_scsi_host() { printf '1'; }              # 假装这块盘挂在 host1
+scsi_host_driver() { printf 'ahci'; }         # 普通控制器
+check "普通控制器上不做任何试探（不能拖慢没有阵列卡的机器）" "0" \
+      "$(megaraid_pd_ids /dev/sdb >/dev/null 2>&1; grep -c . "$PROBE_COUNT" || true)"
+
+# 阵列卡 + sysfs 给出候选：只试候选那几个，不做全范围扫描
+: > "$PROBE_COUNT"
+disk_scsi_host() { printf '0'; }
+scsi_host_driver() { printf 'megaraid_sas'; }
+megaraid_pd_candidates() { printf '8\n9\n'; }
+megaraid_pd_probe() { echo x >> "$PROBE_COUNT"; [[ "$2" == "8" ]]; }
+check "sysfs 给了候选就只试候选" "8" "$(megaraid_pd_ids /dev/sda)"
+check "试探次数 = 候选个数（没有退回全范围扫描）" "2" "$(grep -c . "$PROBE_COUNT" || true)"
+
+# sysfs 没给候选 -> 有界试探，且连续失败到上限就收工
+: > "$PROBE_COUNT"
+megaraid_pd_candidates() { :; }
+megaraid_pd_probe() { echo x >> "$PROBE_COUNT"; return 1; }
+MEGARAID_SCAN_MAX=32 MEGARAID_SCAN_MISS=12
+megaraid_pd_ids /dev/sda >/dev/null
+check "一个都读不到时最多试 MEGARAID_SCAN_MISS 次就停" "12" \
+      "$(grep -c . "$PROBE_COUNT" || true)"
+
+# 设备号从 8 开始（很常见）也要能扫到 —— 这就是 MISS 不能定太小的原因
+: > "$PROBE_COUNT"
+megaraid_pd_probe() { echo x >> "$PROBE_COUNT"; [[ "$2" == "8" || "$2" == "9" ]]; }
+check "设备号从 8 开始也扫得到" "8 9" \
+      "$(megaraid_pd_ids /dev/sda | tr '\n' ' ' | sed 's/ $//')"
+
+# smart_targets_build：逻辑盘 + 它后面的物理盘，各一条
+megaraid_pd_ids() { printf '8\n9\n'; }
+DISK_SMART=(/dev/sda)
+smart_targets_build
+check "采集目标 = 1 块逻辑盘 + 2 块物理盘" "3" "${#SMART_TARGETS[@]}"
+check "逻辑盘那条不带 -d 类型" "sda|/dev/sda|" "${SMART_TARGETS[0]}"
+check "物理盘那条要走 megaraid 透传" "sda-pd8|/dev/sda|megaraid,8" "${SMART_TARGETS[1]}"
+check "key 列表要把物理盘也带上" "sda sda-pd8 sda-pd9" \
+      "$(smart_target_keys | tr '\n' ' ' | sed 's/ $//')"
+
+# 最要紧的一条：物理盘的坏道增长必须能被 verify_smart 抓到。
+# 以前按 /dev 路径遍历，这几块盘一块都对比不到 —— 整项空跑还报 PASS。
+if command -v jq >/dev/null 2>&1; then
+  RAW_DIR="$TMP/pd"; RUN_DIR="$TMP/pd"
+  mkdir -p "$RAW_DIR/smart-pre" "$RAW_DIR/smart-post"
+  LAST_STATUS=""; LAST_DETAIL=""
+  result_add() { LAST_STATUS="$3"; LAST_DETAIL="$4"; }
+  metric_add() { :; }
+
+  for k in sda sda-pd8 sda-pd9; do
+    printf '{"smart_passed":true,"realloc_sectors":0,"pending_sectors":0}\n' \
+      > "$RAW_DIR/smart-pre/$k.norm.json"
+    cp "$RAW_DIR/smart-pre/$k.norm.json" "$RAW_DIR/smart-post/$k.norm.json"
+  done
+  verify_smart
+  check "三块盘都干净 -> PASS" "PASS" "$LAST_STATUS"
+  check "结论里要数上物理盘（3 块，不是 1 块）" "1" \
+        "$(printf '%s' "$LAST_DETAIL" | grep -c '3 块盘' || true)"
+
+  # 只有阵列卡后面那块盘长了坏道
+  printf '{"smart_passed":true,"realloc_sectors":0,"pending_sectors":16}\n' \
+    > "$RAW_DIR/smart-post/sda-pd9.norm.json"
+  verify_smart
+  check "物理盘压测后新增坏道 -> FAIL（这正是以前漏掉的）" "FAIL" "$LAST_STATUS"
+  check "文案里要点名是哪块物理盘" "1" \
+        "$(printf '%s' "$LAST_DETAIL" | grep -c 'sda-pd9' || true)"
+
+  RAW_DIR="$TMP"; RUN_DIR="$TMP"
+fi
+unset -f megaraid_pd_ids megaraid_pd_probe megaraid_pd_candidates disk_scsi_host scsi_host_driver
+SMART_TARGETS=()
+DISK_SMART=()
+# 把顶掉的 have() 还原成 core.sh 里的定义。
+# ⚠️ 不能图省事 `source "$LIB/core.sh"` —— core.sh 里也有个 ok()，
+# 一 source 就会把**本测试脚本自己的 ok()** 顶掉，而那个才是给 PASS 计数的。
+# 之后所有断言照常打勾、却一条都不再计入总数（实测少了 40 条），
+# 屏幕上还是全绿，看不出任何异常。
+have() { command -v "$1" >/dev/null 2>&1; }
+
+# ================================================================
+echo
 echo "=== 时长档位：菜单里有几档，报告就得认得几档 ==="
 # 屏幕上是英文 key（meta.json 里存的也是它），报告里显示中文名。
 # 加档位时只改了菜单、忘了加中文名的话，客户报告上会直接出现 "ENDURANCE"
@@ -1048,6 +1189,12 @@ check "dmesg-pre.txt 的采集必须排在 verify_dmesg_boot 之前" \
          then echo yes; else echo no; fi)"
 
 # ================================================================
+# 收尾自检：这个脚本会 source 被测的 lib，而 lib 里也有 ok()。
+# 万一哪次改动把本脚本的 ok() 顶掉了，后面的断言会照常打勾却不再计数 ——
+# 屏幕全绿、总数悄悄少一截，比直接报错难发现得多（已经发生过一次）。
+check "ok() 必须还是本脚本自己的那个（否则断言会停止计数）" "yes" \
+      "$(declare -f ok | grep -q 'PASS=' && echo yes || echo no)"
+
 echo
 printf '通过 %d 项，失败 %d 项\n' "$PASS" "$FAIL"
 exit $(( FAIL > 0 ? 1 : 0 ))

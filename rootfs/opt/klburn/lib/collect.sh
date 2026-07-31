@@ -131,29 +131,188 @@ check_memory_capacity() {
   fi
 }
 
+# ---------------------------------------------------------------- 阵列卡后端的物理盘
+#
+# 阵列卡工作在 RAID 模式时，/dev/sdX 是**逻辑盘**，物理盘根本不在 /dev 下。
+# 直接 `smartctl -a /dev/sda` 读到的是逻辑盘，没有任何 SMART 属性 ——
+# 于是"测前测后 SMART 对比"这一项在带阵列卡的机器上是**空跑**的：
+# 报告里写着 PASS，实际一块物理盘都没查过。这台机器最可能坏的那几块盘，
+# 恰恰一块都没被覆盖到。
+#
+# smartctl 提供了透传：`smartctl -a -d megaraid,<设备号> /dev/sda`。
+# 难点只在"设备号是多少"。两条路，先走便宜的：
+#   1. sysfs：megaraid_sas 会把物理盘也注册进 SCSI 层，只是不给它们块设备。
+#      同一个 host 下"有 SCSI 设备、但没有 block 目录"的那些，target id 就是设备号。
+#   2. 有界试探：sysfs 什么都没给出来时（不同固件行为不一样）从 0 开始试，
+#      连续失败若干次就收工 —— 现场不能为了扫一圈设备号白等几分钟。
+#
+# 两条路都只在确认了 host 驱动是 megaraid_sas 之后才走，
+# **没有阵列卡的机器一分钱开销都没有**。
+#
+# 抽成一组小的纯函数（sysfs 根目录可传参）以便脱机回归测试，
+# 见 tests/test-hw-checks.sh 里「阵列卡后端物理盘」那组。
+: "${MEGARAID_SCAN_MAX:=32}"     # 有界试探的上限
+: "${MEGARAID_SCAN_MISS:=12}"    # 连续失败多少次就收工（设备号常见从 8 开始，别定太小）
+
+# disk_scsi_host <块设备名> [sysfs根] -> SCSI host 号
+disk_scsi_host() {
+  local base="${1:-}" sysroot="${2:-/sys}" hctl
+  [[ -n "$base" ]] || return 0
+  hctl="$(basename "$(readlink -f "$sysroot/block/$base/device" 2>/dev/null)" 2>/dev/null)"
+  [[ "$hctl" =~ ^([0-9]+):[0-9]+:[0-9]+:[0-9]+$ ]] || return 0
+  printf '%s' "${BASH_REMATCH[1]}"
+}
+
+# scsi_host_driver <host号> [sysfs根] -> 驱动名（megaraid_sas / mpt3sas / ahci ...）
+scsi_host_driver() {
+  local h="${1:-}" sysroot="${2:-/sys}"
+  [[ -n "$h" ]] || return 0
+  cat "$sysroot/class/scsi_host/host${h}/proc_name" 2>/dev/null
+}
+
+# megaraid_pd_candidates <host号> [sysfs根] -> sysfs 里看到的候选设备号
+megaraid_pd_candidates() {
+  local h="${1:-}" sysroot="${2:-/sys}" d name t
+  [[ -n "$h" ]] || return 0
+  for d in "$sysroot"/class/scsi_device/"${h}":*; do
+    [[ -d "$d" ]] || continue
+    name="$(basename "$d")"
+    # 有块设备的是逻辑盘本身，不是卡后面的物理盘
+    [[ -d "$d/device/block" ]] && continue
+    t="$(cut -d: -f3 <<<"$name")"
+    [[ "$t" =~ ^[0-9]+$ ]] && printf '%s\n' "$t"
+  done | sort -un
+}
+
+# megaraid_pd_probe <设备> <设备号> -> 0 = 这个设备号真的能读到一块盘
+# 光有候选还不够：sysfs 的 target id 和阵列卡的设备号不是所有固件都一一对应，
+# 必须真读一次才算数。
+megaraid_pd_probe() {
+  local dev="$1" n="$2" out
+  out="$(timeout 10 smartctl -i -d "megaraid,$n" "$dev" 2>/dev/null)" || true
+  grep -qiE '^(Device Model|Model Number|Product|Serial Number|Vendor):' <<<"$out"
+}
+
+# megaraid_pd_ids <块设备> -> 确认可读的物理盘设备号，每行一个
+megaraid_pd_ids() {
+  local dev="${1:-}" base h drv n miss=0 cands=()
+  [[ -n "$dev" ]] || return 0
+  have smartctl || return 0
+
+  base="$(basename "$dev")"
+  h="$(disk_scsi_host "$base")"
+  [[ -n "$h" ]] || return 0
+  [[ "$(scsi_host_driver "$h")" == "megaraid_sas" ]] || return 0
+
+  while read -r n; do [[ -n "$n" ]] && cands+=("$n"); done < <(megaraid_pd_candidates "$h")
+
+  if (( ${#cands[@]} > 0 )); then
+    dbg "megaraid: sysfs candidates for $dev: ${cands[*]}"
+    for n in "${cands[@]}"; do
+      megaraid_pd_probe "$dev" "$n" && printf '%s\n' "$n"
+    done
+    return 0
+  fi
+
+  dbg "megaraid: no sysfs candidates for $dev, falling back to bounded scan"
+  for (( n = 0; n < MEGARAID_SCAN_MAX; n++ )); do
+    if megaraid_pd_probe "$dev" "$n"; then
+      printf '%s\n' "$n"
+      miss=0
+    else
+      miss=$(( miss + 1 ))
+      (( miss >= MEGARAID_SCAN_MISS )) && break
+    fi
+  done
+  return 0
+}
+
 # ---------------------------------------------------------------- 硬盘 SMART
+# 要采 SMART 的对象。每项格式： <文件名key>|<smartctl 目标设备>|<-d 类型，空=自动>
+#   sda|/dev/sda|                 普通盘 / 逻辑盘
+#   sda-pd8|/dev/sda|megaraid,8   阵列卡后面那块物理盘
+SMART_TARGETS=()
+
+smart_targets_build() {
+  SMART_TARGETS=()
+  local dev base n
+  for dev in "${DISK_SMART[@]:-}"; do
+    [[ -n "$dev" ]] || continue
+    base="$(basename "$dev")"
+    SMART_TARGETS+=("${base}|${dev}|")
+    while read -r n; do
+      [[ -n "$n" ]] || continue
+      info "  physical disk behind RAID controller: $dev -> megaraid,$n"
+      SMART_TARGETS+=("${base}-pd${n}|${dev}|megaraid,${n}")
+    done < <(megaraid_pd_ids "$dev")
+  done
+}
+
+# 采集目标的 key 列表。verify.sh 用它做前后对比，别再各自去 basename。
+smart_target_keys() {
+  local item dev
+  # ⚠️ 不能写 ${#SMART_TARGETS[@]:-0} —— 取长度和 :- 默认值不能连用，
+  # bash 直接报 "bad substitution"，而这条路径上的报错会被吞掉，
+  # 表现成"所有盘的 SMART 复查都变 SKIP"。数组在文件顶部已经声明过，直接取长度。
+  if (( ${#SMART_TARGETS[@]} > 0 )); then
+    for item in "${SMART_TARGETS[@]}"; do
+      [[ -n "$item" ]] && printf '%s\n' "${item%%|*}"
+    done
+    return 0
+  fi
+  # 兜底：SMART_TARGETS 还没建立时（单元测试直接塞 DISK_SMART 的场景）
+  for dev in "${DISK_SMART[@]:-}"; do
+    [[ -n "$dev" ]] && basename "$dev"
+  done
+}
+
 # collect_smart <phase>   phase = pre | post
 collect_smart() {
   local phase="$1"
   local dir="smart-$phase"
-  info "Collecting SMART data ($phase-test) for ${#DISK_SMART[@]} disk(s) ..."
 
-  local dev base rc
-  for dev in "${DISK_SMART[@]}"; do
-    base="$(basename "$dev")"
-    # 先按默认方式读；读不到再试 SAT 透传（常见于阵列卡直通 / USB 桥接）
-    capture "$dir/${base}.txt"  smartctl -a "$dev"; rc=$?
-    if (( rc & 2 )); then
-      capture "$dir/${base}.txt" smartctl -a -d sat "$dev" || true
-      capture "$dir/${base}.json" smartctl -a -j -d sat "$dev" || true
+  # 采集目标只在测前建立一次，测后原样复用：前后必须**逐项对齐**，
+  # 否则"压测前后对比"就成了拿不同的盘互相比。
+  if [[ "$phase" == "pre" ]] || (( ${#SMART_TARGETS[@]} == 0 )); then
+    smart_targets_build
+  fi
+
+  info "Collecting SMART data ($phase-test) for ${#SMART_TARGETS[@]} device(s) ..."
+
+  local item key dev dtype rc types t
+  for item in "${SMART_TARGETS[@]:-}"; do
+    [[ -n "$item" ]] || continue
+    IFS='|' read -r key dev dtype <<< "$item"
+
+    # 依次试几种设备类型，第一个读得通的就用它：
+    #   普通盘     先自动识别，不行再试 SAT（阵列卡直通 / USB 桥接常见）
+    #   阵列卡后端 先 megaraid 透传，SATA 盘还要再套一层 sat
+    if [[ -n "$dtype" ]]; then
+      types=("$dtype" "sat+$dtype")
     else
-      capture "$dir/${base}.json" smartctl -a -j "$dev" || true
+      types=("" "sat")
     fi
+
+    for t in "${types[@]}"; do
+      if [[ -n "$t" ]]; then
+        capture "$dir/${key}.txt" smartctl -a -d "$t" "$dev"; rc=$?
+      else
+        capture "$dir/${key}.txt" smartctl -a "$dev"; rc=$?
+      fi
+      (( rc & 2 )) || break      # bit1 = 设备打不开，换下一种类型再试
+    done
+
+    if [[ -n "$t" ]]; then
+      capture "$dir/${key}.json" smartctl -a -j -d "$t" "$dev" || true
+    else
+      capture "$dir/${key}.json" smartctl -a -j "$dev" || true
+    fi
+
     # 归一化成固定字段，后面 verify.sh / 报告生成器直接读这个，
     # 免得每取一个字段都重跑一遍 smart.jq
-    jq -f "$KLB_LIB/smart.jq" "$RAW_DIR/$dir/${base}.json" \
-       > "$RAW_DIR/$dir/${base}.norm.json" 2>/dev/null \
-       || echo '{}' > "$RAW_DIR/$dir/${base}.norm.json"
+    jq -f "$KLB_LIB/smart.jq" "$RAW_DIR/$dir/${key}.json" \
+       > "$RAW_DIR/$dir/${key}.norm.json" 2>/dev/null \
+       || echo '{}' > "$RAW_DIR/$dir/${key}.norm.json"
   done
 
   if [[ "$phase" == "pre" ]]; then
@@ -161,12 +320,21 @@ collect_smart() {
     capture "nvme-list.txt"  nvme list
     capture "lsblk.txt"      lsblk -o NAME,PATH,SIZE,TYPE,TRAN,ROTA,MODEL,SERIAL,FSTYPE,MOUNTPOINT
 
-    if (( ${#DISK_SMART[@]} == 0 )); then
+    local n_pd=0
+    for item in "${SMART_TARGETS[@]:-}"; do
+      [[ "$item" == *"|megaraid,"* ]] && n_pd=$(( n_pd + 1 ))
+    done
+
+    if (( ${#SMART_TARGETS[@]} == 0 )); then
       result_add "collect_disk" "硬盘信息采集" "$ST_WARN" \
         "本机未安装硬盘（未检测到任何内置存储设备）" ""
+    elif (( n_pd > 0 )); then
+      result_add "collect_disk" "硬盘信息采集" "$ST_PASS" \
+        "共 ${#SMART_TARGETS[@]} 块盘，其中 ${n_pd} 块为阵列卡后端的物理盘（已通过阵列卡读取其 SMART）；\
+已采集型号/序列号/固件/容量与 SMART 健康状态" "raw/smart-pre/"
     else
       result_add "collect_disk" "硬盘信息采集" "$ST_PASS" \
-        "共 ${#DISK_SMART[@]} 块盘，已采集型号/序列号/固件/容量与 SMART 健康状态" "raw/smart-pre/"
+        "共 ${#SMART_TARGETS[@]} 块盘，已采集型号/序列号/固件/容量与 SMART 健康状态" "raw/smart-pre/"
     fi
   fi
 }
@@ -624,15 +792,21 @@ collect_deep() {
   capture -t 30 "deep/sensors-raw.txt"     sensors -u
 
   # ---- 存储：扩展 SMART / NVMe 控制器细节 ----
-  local dev base
-  for dev in "${DISK_SMART[@]:-}"; do
-    [[ -n "$dev" ]] || continue
-    base="$(basename "$dev")"
-    capture -t 60 "deep/smart-x-${base}.txt" smartctl -x "$dev"
-    if [[ "$base" == nvme* ]]; then
-      capture -t 30 "deep/nvme-id-ctrl-${base}.txt"   nvme id-ctrl "$dev"
-      capture -t 30 "deep/nvme-smart-log-${base}.txt" nvme smart-log "$dev"
-      capture -t 30 "deep/nvme-error-log-${base}.txt" nvme error-log "$dev"
+  # 走 SMART_TARGETS 而不是 DISK_SMART：阵列卡后面的物理盘也要留一份 -x，
+  # 那上面才有完整的属性表和自检日志，事后回查最值钱的就是它。
+  local item key dev dtype
+  for item in "${SMART_TARGETS[@]:-}"; do
+    [[ -n "$item" ]] || continue
+    IFS='|' read -r key dev dtype <<< "$item"
+    if [[ -n "$dtype" ]]; then
+      capture -t 60 "deep/smart-x-${key}.txt" smartctl -x -d "$dtype" "$dev"
+    else
+      capture -t 60 "deep/smart-x-${key}.txt" smartctl -x "$dev"
+    fi
+    if [[ "$key" == nvme* ]]; then
+      capture -t 30 "deep/nvme-id-ctrl-${key}.txt"   nvme id-ctrl "$dev"
+      capture -t 30 "deep/nvme-smart-log-${key}.txt" nvme smart-log "$dev"
+      capture -t 30 "deep/nvme-error-log-${key}.txt" nvme error-log "$dev"
     fi
   done
   capture -t 30 "deep/lsblk-all.txt" lsblk -O
