@@ -81,22 +81,28 @@ monitor_start() {
   local csv="$RUN_DIR/sys_metrics.csv"
   # 新增的列一律往**末尾**加：报告生成器用 csv.DictReader 按列名取值，
   # 中间插一列会让老数据的列名和值错位。
+  #
+  # cpu_pkg_temps 是逐颗物理 CPU 的封装温度，分号分隔（"52;78"）——
+  # 逗号是 CSV 的分隔符，不能用。加这一列是因为"双路机器一颗 52°C、
+  # 另一颗 78°C"是典型的散热器没装好/风道偏，而这个信息以前只在屏幕上
+  # 一闪而过，落不进任何文件，事后想查都查不到。只有内部工程报告读它。
   if [[ ! -f "$csv" ]]; then
-    echo "time,phase,cpu_temp_c,cpu_freq_mhz,load1,mem_used_mb,mem_total_mb,cpu_power_w" > "$csv"
+    echo "time,phase,cpu_temp_c,cpu_freq_mhz,load1,mem_used_mb,mem_total_mb,cpu_power_w,cpu_pkg_temps" > "$csv"
   fi
   (
     # RAPL 是累计能量计数器，要两次采样求差。先在子 shell 里打一次基准，
     # 否则第一个采样点的功耗永远是空的。
     cpu_power_w >/dev/null 2>&1 || true
     while :; do
-      local t f l used total p
+      local t f l used total p pk
       t="$(cpu_temp_max_c)"
       f="$(cpu_freq_avg_mhz)"
       p="$(cpu_power_w)"
+      pk="$(cpu_temp_per_pkg | awk '{printf "%s%s", (NR>1 ? ";" : ""), $2}')"
       l="$(awk '{print $1}' /proc/loadavg 2>/dev/null)"
       read -r total used < <(awk '/MemTotal/{tot=$2} /MemAvailable/{av=$2} END{printf "%d %d", tot/1024, (tot-av)/1024}' /proc/meminfo)
-      printf '%s,%s,%s,%s,%s,%s,%s,%s\n' \
-        "$(date '+%H:%M:%S')" "$phase" "${t:-}" "${f:-}" "${l:-}" "${used:-}" "${total:-}" "${p:-}" >> "$csv"
+      printf '%s,%s,%s,%s,%s,%s,%s,%s,%s\n' \
+        "$(date '+%H:%M:%S')" "$phase" "${t:-}" "${f:-}" "${l:-}" "${used:-}" "${total:-}" "${p:-}" "${pk:-}" >> "$csv"
       sleep 5
     done
   ) &

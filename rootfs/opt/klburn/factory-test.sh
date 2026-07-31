@@ -87,7 +87,7 @@ EOF
 fi
 
 # ---------------------------------------------------------------- 联网校时
-# 必须在算 RUN_STAMP 之前做：库存/二手机常见纽扣电池没电，BIOS RTC 回退到
+# 必须在算 RUN_STAMP 之前做：长期存放的机器常见纽扣电池没电，BIOS RTC 回退到
 # 乱七八糟的日期，等目录名、meta.json 时间戳都写死了才发现就晚了。
 # 连不上网（现场大多数情况本来就是离线的）就放弃，继续用现有 RTC 时间。
 section "NETWORK TIME SYNC (best-effort)"
@@ -142,8 +142,8 @@ fi
 # 时钟没网络对时，写进报告让人知道时间可能不准。
 #
 # 只判"年份早于 2024"抓不到实际遇到的情况：现场机器 RTC 停在 2025-11，
-# 测试盘是 2026-07 构建的，报告抬头就写了个八个月前的日期，客户一眼就看出不对。
-# 测试时间比测试盘的构建时间还早，一定是 RTC 不准 —— 这条判据比写死年份可靠。
+# 而这张介质是 2026-07 构建的，报告抬头就写了个八个月前的日期，一眼就看出不对。
+# 测试时间比介质的构建时间还早，一定是 RTC 不准 —— 这条判据比写死年份可靠。
 CLOCK_SUSPECT=0
 if [[ "$(date +%Y)" -lt 2024 ]]; then
   CLOCK_SUSPECT=1
@@ -258,9 +258,17 @@ cat > "$RUN_DIR/meta.json" <<EOF
   "klburn_version": "${KLBURN_VERSION:-}",
   "git_commit":     "${GIT_COMMIT:-unknown}",
   "company_name":   "${COMPANY_NAME:-}",
+  "report_title":   "${REPORT_TITLE:-服务器出厂老化测试报告}",
+  "product_name":   "${PRODUCT_NAME:-KLBurn}",
   "base_os":        "${BASE_OS:-}",
   "build_date":     "${BUILD_DATE:-}",
   "include_nvidia": "${INCLUDE_NVIDIA:-0}",
+  "nvidia_version": "${NVIDIA_VERSION:-}",
+  "gpu_present":    ${GPU_PRESENT:-0},
+  "gpu_usable":     ${GPU_USABLE:-0},
+  "gpu_mismatch":   ${GPU_MISMATCH:-0},
+  "storcli_present": $( [[ -x "$KLB_TOOLS/storcli64" ]] && echo 1 || echo 0 ),
+  "gpu_burn_present": $( [[ -x "$KLB_TOOLS/gpu_burn" ]] && echo 1 || echo 0 ),
   "serial":         "${SERIAL}",
   "run_stamp":      "${RUN_STAMP}",
   "machine_tag":    "${MACHINE_TAG}",
@@ -298,6 +306,21 @@ else
   fail "Report generator failed - raw logs are still in $RUN_DIR/raw/"
 fi
 
+# 内部工程报告：落在 raw/ 里，**不交付**。
+# 它比上面那份详细得多（硬盘通电时间、逐颗 CPU 温差、我们这轮采集的缺口、
+# 源码 commit……），是我们自己复盘和日后追溯用的。
+#
+# 放 raw/ 里是防手滑：客户要的是那个和目录同名的 .html，raw/ 整个目录不外发。
+#
+# 它失败了绝不能影响上面已经生成好的客户报告，所以单独一条、只警告不中断。
+INTERNAL_HTML="$RAW_DIR/INTERNAL_${MACHINE_TAG}.html"
+if python3 "$KLB_ROOT/report/generate_internal.py" \
+     --run-dir "$RUN_DIR" --out "$INTERNAL_HTML" 2>&1 | tee -a "$MAIN_LOG"; then
+  ok "Internal engineering report: $INTERNAL_HTML"
+else
+  warn "Internal engineering report failed (customer report is unaffected)."
+fi
+
 sync
 
 # ---------------------------------------------------------------- 总结
@@ -313,6 +336,9 @@ printf '  Serial      : %s\n' "$SERIAL"
 printf '  Profile     : %s (%s)\n' "$DURATION_PROFILE" "$(fmt_dur "$TEST_ELAPSED")"
 printf '  Report      : %s\n' "$REPORT_HTML"
 printf '  Raw data    : %s/\n' "$RUN_DIR"
+# 屏幕上明确区分这两份，免得现场把内部那份一起发出去
+printf '  %sInternal    : raw/INTERNAL_%s.html  (engineering copy - do NOT send out)%s\n' \
+  "$C_YEL" "$MACHINE_TAG" "$C_RST"
 if [[ "${DATA_OK:-0}" == "1" ]]; then
   printf '  Storage     : %sUSB stick, folder  out\\  - safe to power off%s\n' "$C_GRN" "$C_RST"
 else
