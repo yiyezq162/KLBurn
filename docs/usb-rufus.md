@@ -162,9 +162,15 @@ Ventoy 可以一劳永逸：
 ```
 <Ventoy分区>\out\
     20260730_143052_2x-Intel-Xeon-Gold-6430_512GB\
-        20260730_143052_2x-Intel-Xeon-Gold-6430_512GB.html   ← 双击看报告
-        klburn.log  results.jsonl  meta.json  sys_metrics.csv  raw\...
+        20260730_143052_2x-Intel-Xeon-Gold-6430_512GB.html   ← 双击看报告，交给客户的也是它
+        klburn.log  results.jsonl  meta.json  sys_metrics.csv
+        raw\
+            INTERNAL_20260730_143052_....html                ← 内部工程报告，🔒 别发出去
+            ...
 ```
+
+> ⚠️ **交付时发那个和文件夹同名的 `.html`。** `raw\` 里那份 `INTERNAL_*.html`
+> 是工程数据版，内容更细也更零碎，留在内部做复盘和追溯用。
 
 插回 Windows 就能看到，和 ISO 文件在同一个盘符下，不用手工拷贝。
 **卷标保持 Ventoy 默认的 `Ventoy` 就行，不需要改名**——程序会自动认。
@@ -207,3 +213,4 @@ Ventoy 1.1.17 + exFAT 主分区（默认 `Ventoy` 卷标）在 QEMU 里完整验
 - 里面每次测试一个文件夹，名字是 `日期_时间_CPU型号_内存容量`
 - 文件夹里那个**同名的 `.html`** 双击用浏览器打开就是完整报告，
   旁边的 `klburn.log` / `raw\` 是全部原始日志
+- `raw\INTERNAL_*.html` 是工程数据版报告，内容更细，留内部复盘用
