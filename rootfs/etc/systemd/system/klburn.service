@@ -1,0 +1,35 @@
+[Unit]
+Description=KLBurn Factory Burn-in Test
+# 等 udev 把盘和 PCI 设备枚举完，否则采集会漏设备
+After=systemd-user-sessions.service systemd-udev-settle.service local-fs.target
+Wants=systemd-udev-settle.service
+# tty1 归我们独占（chroot-setup.sh 里同时 mask 了 getty@tty1）
+Conflicts=getty@tty1.service
+Before=getty.target
+
+[Service]
+Type=idle
+ExecStart=/opt/klburn/factory-test.sh
+WorkingDirectory=/root
+
+# 直接接管 tty1，现场开机即见
+StandardInput=tty-force
+StandardOutput=tty
+StandardError=tty
+TTYPath=/dev/tty1
+TTYReset=yes
+TTYVHangup=yes
+TTYVTDisallocate=no
+
+Environment=TERM=linux
+Environment=HOME=/root
+Environment=KLBURN_ON_TTY=1
+
+# 压测子进程可能很多，别让 systemd 误杀
+KillMode=process
+Restart=no
+TimeoutStartSec=infinity
+TimeoutStopSec=60
+
+[Install]
+WantedBy=multi-user.target

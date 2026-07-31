@@ -1,0 +1,13 @@
+# 构建产物
+out/
+
+# 离线包：体积大、有授权限制，不进版本库（说明见 vendor/README.md）
+vendor/*
+!vendor/README.md
+
+# 编辑器 / 系统
+*.swp
+.DS_Store
+Thumbs.db
+__pycache__/
+*.pyc
