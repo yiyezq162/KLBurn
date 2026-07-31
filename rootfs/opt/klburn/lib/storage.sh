@@ -390,7 +390,7 @@ confirm_disk_write() {
   fi
 
   section "DISK STRESS TEST  (OPTIONAL, DESTRUCTIVE)"
-  printf '  Disk %sinventory%s (model / capacity / serial / SMART / power-on hours)\n' "$C_GRN" "$C_RST"
+  printf '  Disk %sinventory%s (model / capacity / serial / firmware / SMART health)\n' "$C_GRN" "$C_RST"
   printf '  has %salready been collected%s and will appear in the report either way.\n\n' "$C_GRN" "$C_RST"
   printf '%s' "$C_RED$C_BLD"
   printf '  The optional STRESS test makes fio write RANDOM DATA directly to the\n'

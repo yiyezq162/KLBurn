@@ -14,7 +14,7 @@ def attr($id):
   capacity_bytes:   (.user_capacity.bytes // .nvme_total_capacity // 0),
   rotation_rate:    (.rotation_rate // null),
 
-  # 通电时间：证明是新盘的关键证据
+  # 寿命类字段：不参与判定，供设备台账和日后回查用
   power_on_hours:   (.power_on_time.hours
                      // .nvme_smart_health_information_log.power_on_hours // null),
   power_cycles:     (.power_cycle_count

@@ -88,6 +88,24 @@ def human_bytes(n):
     return "—"
 
 
+# 时长档位的中文名。报告里显示中文，meta.json 里存的仍是英文 key
+# （屏幕上是英文，两边靠这张表对上）。认不出来的档位原样显示，不吞掉。
+PROFILE_TEXT = {
+    "QUICK":     "快速",
+    "STANDARD":  "标准",
+    "EXTENDED":  "加长",
+    "LONG":      "长测",
+    "SOAK":      "深度",
+    "ENDURANCE": "耐久",
+}
+
+
+def profile_text(p):
+    if not p:
+        return None
+    return PROFILE_TEXT.get(str(p).upper(), p)
+
+
 def fmt_dur(sec):
     try:
         sec = int(sec)
@@ -406,8 +424,8 @@ class Data(object):
                 continue
             sm = read_json(self.rawpath("smart-pre", "%s.norm.json" % name), {})
             smp = read_json(self.rawpath("smart-post", "%s.norm.json" % name), {})
-            # 通电时间 / 通电次数 / 累计读写量一律不进报告：我们会用拆机盘，
-            # 这些数字对客户没有判定意义，只会引起不必要的疑问。
+            # 这张表只列参与判定的字段。寿命类（通电时间/通电次数/累计读写量）
+            # 不参与判定，完整数值在工程数据和内部报告里。
             # 盘好不好，看的是 SMART 健康状态和坏道计数压测前后有没有变化。
             out.append(OrderedDict([
                 ("设备", path),
@@ -712,16 +730,28 @@ def collapsible(title, content, is_pre=True):
     return "<details><summary>%s</summary><div>%s</div></details>" % (E(title), body)
 
 
+# 采集失败时 capture() 会往文件里写这两种标记。它们是**我们这边环境**的记录
+# （某个工具没带、某条命令超时），对客户没有任何意义，而且直接暴露了内部工具名 ——
+# 比如 storcli-show.txt 里可能只有一行 "(command not found: storcli64)"。
+# 这类行一律从交付的报告里剔掉；完整原文仍然留在 raw/ 和内部工程报告里。
+CAPTURE_NOISE = re.compile(r"^\s*\((?:command not found:|TIMEOUT after)[^)]*\)\s*$", re.M)
+
+
 def raw_file_block(data, title, relpath, limit=200000):
     p = data.rawpath(relpath)
     if not os.path.exists(p):
         return ""
-    txt = read_text(p)
+    txt = CAPTURE_NOISE.sub("", read_text(p))
     if not txt.strip():
+        # 整个文件只有采集失败的标记 —— 这一块整个不出现，
+        # 而不是给客户看一个空的、或者写着某某工具没找到的折叠块。
         return ""
     if len(txt) > limit:
-        txt = txt[:limit] + "\n...（内容过长已截断，完整数据见 raw/%s）" % relpath
-    return collapsible("%s  [raw/%s]" % (title, relpath), txt)
+        txt = txt[:limit] + "\n...（内容过长已截断，完整数据见报告目录）"
+    # ⚠️ 标题里不要带 raw/ 下的文件名。文件名里常常就是工具名
+    # （storcli-show.txt / gpu-smi-full.txt），等于把内部实现直接印给客户看。
+    # 上面那句"完整文件保存在报告目录的 raw/ 子目录下"已经说清去哪儿找了。
+    return collapsible(title, txt)
 
 
 def build_html(data):
@@ -756,13 +786,16 @@ def build_html(data):
     A('<div class="wrap"><header>')
     A(logo_html)
     A('<div class="company">%s</div>' % E(meta.get("company_name")))
-    A("<h1>服务器出厂老化测试报告</h1>")
+    # 抬头和标题都取自 meta.json（构建时钉进盘里的），不写死在代码里 ——
+    # 换一家公司出盘时只改 build/config.sh，这里一行都不用动。
+    A("<h1>%s</h1>" % E(meta.get("report_title") or "服务器出厂老化测试报告"))
     A('<div class="sub">整机序列号 <b>%s</b> ｜ 测试时间 %s ~ %s ｜ '
       "测试模式 %s ｜ 实际耗时 %s</div>"
       % (E(serial), E(meta.get("start_time")), E(meta.get("end_time")),
-         E(meta.get("profile")), E(fmt_dur(meta.get("elapsed_secs")))))
-    A('<div class="sub">测试工具 KLBurn v%s（%s，构建于 %s）</div>'
-      % (E(meta.get("klburn_version")), E(meta.get("base_os")), E(meta.get("build_date"))))
+         E(profile_text(meta.get("profile"))), E(fmt_dur(meta.get("elapsed_secs")))))
+    A('<div class="sub">测试工具 %s v%s（%s，构建于 %s）</div>'
+      % (E(meta.get("product_name") or "KLBurn"), E(meta.get("klburn_version")),
+         E(meta.get("base_os")), E(meta.get("build_date"))))
     A("</header>")
 
     # ---------------- 总结论 ----------------
@@ -826,7 +859,7 @@ def build_html(data):
     installed_mb, visible_mb = data.mem_capacity()
     if dimms:
         A('<p class="sub">已装 %d 条，主板共 %d 个内存插槽。'
-          "每条的厂商 / 颗粒型号 / 序列号如下，可用于核对是否为原厂新条。</p>"
+          "每条的厂商 / 颗粒型号 / 序列号如下，可逐条核对品牌与规格是否一致。</p>"
           % (len(dimms), data.dimm_slots_total()))
     if installed_mb and visible_mb:
         A(kv_block(OrderedDict([
@@ -867,7 +900,7 @@ def build_html(data):
 
     budget = meta.get("budget") or {}
     A(kv_block(OrderedDict([
-        ("测试模式", meta.get("profile")),
+        ("测试模式", profile_text(meta.get("profile"))),
         ("计划总时长", fmt_dur(meta.get("planned_secs"))),
         ("实际总耗时", fmt_dur(meta.get("elapsed_secs"))),
         ("CPU 压测时长", fmt_dur(budget.get("cpu_secs"))),
@@ -970,9 +1003,9 @@ def build_html(data):
     A("<h2>三、原始日志</h2>")
     A('<p class="sub">以下为采集到的原始输出，完整文件保存在报告目录的 raw/ 子目录下。</p>')
 
-    # 这里故意不嵌 smartctl 的原始输出（raw/smart-pre|post/ 里仍然完整保留）：
-    # 它带着通电时间、通电次数、累计读写量，而我们会用拆机盘，
-    # 这些数字放进客户报告只会引起误解。硬盘的结论看 1.4 表格和 SMART 复查那一项。
+    # 这里不嵌 smartctl 的原始输出（raw/smart-pre|post/ 里完整保留）：
+    # 一块盘几百行属性，绝大部分和判定无关，嵌进来只会把报告撑成一堆看不懂的数字。
+    # 硬盘的结论看 1.4 表格和 SMART 复查那一项。
     for title, rel in [
         ("dmidecode 全量输出", "dmidecode.txt"),
         ("CPU 详细信息", "lscpu.txt"),
@@ -999,8 +1032,8 @@ def build_html(data):
         A(raw_file_block(data, title, rel))
 
     A("<footer>")
-    A("本报告由 KLBurn v%s 自动生成，所有数据来自被测机器实测采集，未经人工修改。<br>"
-      % E(meta.get("klburn_version")))
+    A("本报告由 %s v%s 自动生成，所有数据来自被测机器实测采集，未经人工修改。<br>"
+      % (E(meta.get("product_name") or "KLBurn"), E(meta.get("klburn_version"))))
     # ⚠️ 这份 HTML 是**交付给客户**的，页脚绝不能出现 git commit hash、
     # 源码版本、构建目录这类只有我们内部才用得上的东西。
     # 版本可追溯性靠 meta.json 里的 git_commit —— 那个文件留在内部的工程目录里，
