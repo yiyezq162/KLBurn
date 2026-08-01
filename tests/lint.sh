@@ -26,6 +26,12 @@ PASS=0; FAIL=0
 ok()  { printf '  \033[32mOK\033[0m   %s\n' "$1"; PASS=$((PASS+1)); }
 bad() { printf '  \033[31mFAIL\033[0m %s\n' "$1"; FAIL=$((FAIL+1)); }
 
+# 断言函数名打错不能静悄悄地过去（§11-13"断言悄悄停止计数"的同款病）
+command_not_found_handle() {
+  bad "调用了不存在的命令 '$1'（多半是断言函数名打错，这条断言根本没跑）" "已定义的函数" "$1"
+  return 127
+}
+
 if ! command -v shellcheck >/dev/null 2>&1; then
   printf '  \033[0;33m跳过：本机没装 shellcheck（apt-get install shellcheck）\033[0m\n'
   printf '通过 %d 项，失败 %d 项\n' 0 0
