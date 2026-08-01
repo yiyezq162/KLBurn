@@ -11,7 +11,7 @@
 # ⚠️ 改完脚本要「先 bump 再构建」。0.3.0 就栽过一次：ISO 构建完之后又改了
 # core.sh/collect.sh 却没动版本号，于是现场那根盘自称 0.3.0、跑的却是修复前的
 # 代码（lshw 卡满 90s、屏幕上冒 Killed），对着仓库怎么看都对不上。
-KLBURN_VERSION="1.3.0"
+KLBURN_VERSION="1.4.0"
 
 # ================================================================
 # 品牌抬头
@@ -46,8 +46,18 @@ UBUNTU_RELEASE="24.04"
 UBUNTU_POINT="24.04.4"
 SRC_ISO_NAME="ubuntu-${UBUNTU_POINT}-live-server-amd64.iso"
 SRC_ISO_URL="https://mirrors.tuna.tsinghua.edu.cn/ubuntu-releases/${UBUNTU_RELEASE}/${SRC_ISO_NAME}"
-# 留空 = 跳过校验；填上 sha256 则强制校验
-SRC_ISO_SHA256=""
+# 留空 = 跳过校验；填上 sha256 则强制校验。
+#
+# 取自 Ubuntu 官方 https://releases.ubuntu.com/24.04/SHA256SUMS（不是拿本地那份
+# 自己算的 —— 那样只能证明"和我下的那次一致"，证明不了下对了东西）。
+# 本地缓存的那份已核对过，一致。
+#
+# 之前一直留空，等于 3.4GB 从镜像站拉下来完全不验：镜像同步到一半、
+# 断点续传接错、磁盘悄悄坏一个扇区，都会安安静静做出一张有问题的盘，
+# 而且要等装到服务器上才发现。
+#
+# 换 UBUNTU_POINT 时**必须同时换这个值**，否则每次构建都会在校验那一步停下。
+SRC_ISO_SHA256="e907d92eeec9df64163a7e454cbc8d7755e8ddc7ed42f99dbc80c40f1a138433"
 
 # ---------- 构建路径 ----------
 # 必须在 WSL 原生文件系统上，不能在 /mnt/c 下（squashfs 打包性能会崩）
