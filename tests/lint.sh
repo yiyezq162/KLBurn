@@ -28,7 +28,13 @@ bad() { printf '  \033[31mFAIL\033[0m %s\n' "$1"; FAIL=$((FAIL+1)); }
 
 # 断言函数名打错不能静悄悄地过去（§11-13"断言悄悄停止计数"的同款病）
 command_not_found_handle() {
-  bad "调用了不存在的命令 '$1'（多半是断言函数名打错，这条断言根本没跑）" "已定义的函数" "$1"
+  # ⚠️ 这里**不能**写 FAIL=$((FAIL+1))。bash 是在 fork 出来的子进程里执行这个
+  #    handler 的，加了也加不到父进程头上 —— 屏幕上红一条，最后那行汇总却还是
+  #    "失败 0 项"，正好是本项目最恨的那种"屏幕全绿"。（实测踩过。）
+  #    所以直接把整个套件干掉，让退出码非零、run-all 能看见。
+  printf "  \033[31mFAIL\033[0m 调用了不存在的命令 %s —— 多半是断言函数名打错了，\n" "$1"
+  printf "       这条断言根本没跑。中止本套件。\n"
+  kill -TERM $$
   return 127
 }
 
@@ -107,6 +113,39 @@ check_count "build/ 的豁免不超过 1 类" 1 \
             "$(printf '%s' "$EXCLUDE_BUILD"   | tr ',' '\n' | grep -c .)"
 check_count "runtime 的豁免不超过 3 类" 3 \
             "$(printf '%s' "$EXCLUDE_RUNTIME" | tr ',' '\n' | grep -c .)"
+
+# ================================================================
+# 字节层面的两个坑：BOM 和 CRLF
+# ================================================================
+# 源码在 Windows 上编辑、在 WSL 里构建、最终跑在 Linux 服务器上，所以这两样
+# 都是真会发生的 —— 而且都**不会有像样的报错**：
+#
+#   CRLF  ->  "bad interpreter: /usr/bin/env bash^M: no such file"
+#   BOM   ->  shebang 不在第 0 字节了；被 source 时 BOM 会粘进第一个 token
+#
+# CRLF 那半边 .gitattributes 已经从源头钉住了（* text=auto eol=lf）。
+# **BOM 没人管** —— 而它太容易混进来了：PowerShell 的 Set-Content -Encoding UTF8、
+# Out-File、记事本另存为，默认全都加 BOM。（实测：拿 PowerShell 改一次
+# config.sh 的版本号就加上了，而那个文件是被 source 的。）
+bom_files=""
+crlf_files=""
+while IFS= read -r f; do
+  [[ -f "$f" ]] || continue
+  [[ "$(head -c 3 "$f" | od -An -tx1 | tr -d ' \n')" == "efbbbf" ]] && bom_files="$bom_files $f"
+done < <(find . -path ./.git -prune -o -type f \
+              \( -name '*.sh' -o -name '*.py' -o -name '*.jq' -o -name '*.md' \
+                 -o -name '*.conf' -o -name '*.service' \) -print)
+while IFS= read -r f; do
+  [[ -f "$f" ]] || continue
+  grep -qU $'\r$' "$f" 2>/dev/null && crlf_files="$crlf_files $f"
+done < <(find . -path ./.git -prune -o -type f \
+              \( -name '*.sh' -o -name '*.py' -o -name '*.jq' \
+                 -o -name '*.conf' -o -name '*.service' \) -print)
+
+[[ -z "$bom_files" ]]  && ok "没有文件带 UTF-8 BOM（会顶掉 shebang、粘进被 source 的第一个 token）" \
+                       || bad "这些文件带 BOM：$bom_files"
+[[ -z "$crlf_files" ]] && ok "没有脚本带 CRLF（.gitattributes 从源头钉的，这里复核一次）" \
+                       || bad "这些脚本带 CRLF：$crlf_files"
 
 # ================================================================
 printf '\n'

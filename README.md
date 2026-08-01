@@ -198,7 +198,7 @@ CUDA 运行时库不在显卡驱动里，直接打包动态链接的版本一跑
 `error while loading shared libraries`，然后被判成"显卡故障"。
 用 `nvprune` 裁剪静态库再静态链接，330MB 出头，装完还用 `ldd` 自检。
 
-**⑨ 361 项回归测试，全都不需要真实硬件**
+**⑨ 372 项回归测试，全都不需要真实硬件**
 跑全套的同时还会过一遍 shellcheck。
 
 ```bash
@@ -455,6 +455,7 @@ KLBurn/
 ├── docs/
 │   ├── architecture.md      ★   开发文档（怎么改）
 │   ├── report-policy.md     ★   报告文案规范（哪些东西不能给客户看）
+│   ├── first-run-checklist.md   拿到真机时照着过（QEMU 盖不到的那些）
 │   └── usb-rufus.md             Rufus 写盘 + 建 exFAT 分区详细步骤
 ├── build/
 │   ├── config.sh            ★   抬头、版本、包列表、层裁剪规则
