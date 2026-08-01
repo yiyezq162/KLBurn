@@ -981,6 +981,77 @@ for forbidden in "storcli" "vendor/" "重新出盘" "构建目录" "README"; do
         "$(printf '%s' "$LAST_DETAIL" | grep -c "$forbidden" || true)"
 done
 
+# ---------------------------------------------------------------- 多厂商管理工具
+# 一张阵列卡只有对得上的那个厂商工具认得：Dell PERC 要 perccli、
+# HPE Smart Array 要 ssacli、Adaptec 要 arcconf、IT 模式的 LSI HBA 要 sas3ircu。
+# 盘里带哪几个由 vendor/ 决定，一个都不带也是常态。
+#
+# ⚠️ **这几个二进制我们手上没有，下面全是桩。** 桩能验的是"代码路径对不对"
+#    ——挨个试、命中即用、都不命中就 SKIP——**验不了真工具的输出格式**。
+#    所以这里一条断言都不要写成"我们验证过 arcconf 能读某某卡"。
+FAKE_TOOLS="$TMP/faketools"
+rm -rf "$FAKE_TOOLS"; mkdir -p "$FAKE_TOOLS"
+KLB_TOOLS="$FAKE_TOOLS"
+
+# capture 在上面 dmesg 那一节被打成 `:` 了，raid_tool_run 拿它落原始输出，
+# 所以这里换一个"真的会写文件"的桩，内容由 FAKE_TOOL_OUT 控制。
+FAKE_TOOL_OUT=""
+capture() {
+  while [[ "${1:-}" == "-t" ]]; do shift 2; done
+  local out="$RAW_DIR/$1"
+  mkdir -p "$(dirname "$out")"
+  printf '%s\n' "$FAKE_TOOL_OUT" > "$out"
+}
+
+run_raid() {          # 结果落在 LAST_STATUS / LAST_DETAIL 上，不能进 $( )
+  LAST_STATUS=""; LAST_DETAIL=""
+  collect_raid >/dev/null 2>&1
+}
+
+# 一个工具都没带（vendor/ 空着）—— 最常见的情况
+FAKE_TOOL_OUT="(command not found)"
+run_raid
+check "一个厂商工具都没带 -> SKIP（不是 FAIL：少带工具不是机器的毛病）" \
+      "SKIP" "$LAST_STATUS"
+
+# 带了 ssacli，而且它认到了卡
+printf '#!/bin/sh\nexit 0\n' > "$FAKE_TOOLS/ssacli"; chmod +x "$FAKE_TOOLS/ssacli"
+FAKE_TOOL_OUT="Smart Array P408i-a SR Gen10 in Slot 12"
+run_raid
+check "带了对得上的工具、它认到卡 -> PASS" "PASS" "$LAST_STATUS"
+check "PASS 的文案里要说读到了固件版本和逻辑盘状态" "1" \
+      "$(printf '%s' "$LAST_DETAIL" | grep -c '固件版本与逻辑盘状态')"
+for forbidden in "ssacli" "arcconf" "perccli" "sas3ircu" "storcli" "vendor/"; do
+  check "命中之后的文案里也不许出现工具名「${forbidden}」" "0" \
+        "$(printf '%s' "$LAST_DETAIL" | grep -c "$forbidden" || true)"
+done
+
+# 带了工具，但它认不了这张卡（换个牌子的卡就是这样）——**照样 SKIP，不许 FAIL**
+FAKE_TOOL_OUT="Error: No controllers detected."
+run_raid
+check "带了工具但认不了这张卡 -> 仍然 SKIP（不是 FAIL）" "SKIP" "$LAST_STATUS"
+check "认不了的时候文案还是要报出 PCI 反查到的型号" "1" \
+      "$(printf '%s' "$LAST_DETAIL" | grep -c 'MegaRAID SAS-3 3108')"
+
+# 顺序：storcli 先试，它命中了就不该再去试别家（raw/ 文件名是报告生成器认的）
+chain="$(declare -f collect_raid)"
+check "storcli 必须排在 RAID_TOOL_ORDER 之前（它的 raw/ 文件名报告生成器认死了）" \
+      "yes" \
+      "$(if [[ "$(grep -n 'storcli-show.txt' <<<"$chain" | head -1 | cut -d: -f1)" \
+               -lt "$(grep -n 'RAID_TOOL_ORDER' <<<"$chain" | head -1 | cut -d: -f1)" ]]; \
+         then echo yes; else echo no; fi)"
+check "每个列进 RAID_TOOL_ORDER 的工具都要在 raid_tool_run 里有对应分支" "0" \
+      "$(missing=0
+         body="$(declare -f raid_tool_run)"
+         for t in "${RAID_TOOL_ORDER[@]}"; do
+           grep -qF "$t)" <<<"$body" || missing=$(( missing + 1 ))
+         done
+         printf '%s' "$missing")"
+
+unset -f capture run_raid
+capture() { :; }                    # 还原成上面 dmesg 那一节用的那个桩
+KLB_TOOLS="$TMP/no-such-tools"
+
 RAW_DIR="$TMP"; RUN_DIR="$TMP"
 
 # ================================================================

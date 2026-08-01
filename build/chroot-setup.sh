@@ -192,27 +192,64 @@ NVIDIA_VERSION="${NVIDIA_VERSION:-}"
 GIT_COMMIT="${GIT_COMMIT:-unknown}"
 EOF
 
-# ---------------------------------------------------------------- vendor: storcli
-STORCLI=""
-for cand in "$STAGE/vendor/storcli/storcli64" "$STAGE/vendor/storcli/storcli"; do
-  if [[ -f "$cand" ]]; then STORCLI="$cand"; break; fi
-done
-# Broadcom 发的是 zip（里面还套 rpm），解出来是 Unified_storcli_all_os/Linux/storcli64
-# 这种一层套一层的目录。允许把整个解压结果原样丢进 vendor/storcli/，这里自己往下找，
-# 省得每次出盘都要手工翻目录把那个文件捞出来。
+# ---------------------------------------------------------------- vendor: 阵列卡管理工具
+# 内核驱动 in-tree 全都有，缺的是读**阵列卡自己**的固件版本和逻辑盘状态的闭源 CLI。
+# 一家一个，谁也认不了别家的卡：
 #
-# 注意 `|| true`：本脚本是 -o pipefail，find 在目录不存在时返回 1，
-# 而 pipefail 会把这个 1 带出整条管道，一个赋值就能把整个 chroot 脚本静默弄死。
-if [[ -z "$STORCLI" && -d "$STAGE/vendor/storcli" ]]; then
-  STORCLI="$(find "$STAGE/vendor/storcli" -type f \( -name 'storcli64' -o -name 'storcli' \) \
-             2>/dev/null | head -1 || true)"
-fi
+#   storcli/storcli64   Broadcom / LSI MegaRAID
+#   perccli/perccli64   Dell PERC（storcli 换的皮，但版本对不上会认不到卡）
+#   arcconf             Microchip / Adaptec（smartpqi、aacraid）
+#   ssacli              HPE Smart Array
+#   sas3ircu            LSI/Broadcom HBA 的非 RAID（IT）模式
+#
+# 每一项：<vendor 子目录>|<装进盘里的名字>|<在子目录里递归找的候选文件名(空格分隔)>
+#
+# 厂商发的往往是 zip 里套 rpm、解出来一层套一层的目录（Broadcom 的
+# Unified_storcli_all_os/Linux/storcli64 就是），所以允许把整个解压结果原样丢进
+# vendor/<子目录>/，这里自己往下递归找，省得每次出盘都手工翻目录捞文件。
+#
+# 一个都不放也**完全正常**：collect_raid 会判 SKIP（只报 PCI 反查到的型号），
+# 绝不判 FAIL —— 那是我们这边少带工具，不是被测机器有问题。
+VENDOR_RAID_TOOLS=(
+  "storcli|storcli64|storcli64 storcli"
+  "perccli|perccli64|perccli64 perccli"
+  "arcconf|arcconf|arcconf"
+  "ssacli|ssacli|ssacli"
+  "sas3ircu|sas3ircu|sas3ircu"
+)
 
-if [[ -n "$STORCLI" ]]; then
-  install -m 0755 "$STORCLI" /opt/klburn/tools/storcli64
-  say "storcli64 已安装（来自 vendor/${STORCLI#"$STAGE/vendor/"}）"
+raid_tools_found=0
+for entry in "${VENDOR_RAID_TOOLS[@]}"; do
+  IFS='|' read -r vdir vname vcands <<< "$entry"
+  read -r -a cands <<< "$vcands"
+
+  found=""
+  for cand in "${cands[@]}"; do
+    if [[ -f "$STAGE/vendor/$vdir/$cand" ]]; then found="$STAGE/vendor/$vdir/$cand"; break; fi
+  done
+
+  # 没在顶层，就往下递归找。
+  # `|| true` 不是装饰：本脚本是 -o pipefail，find 在目录不存在时返回 1，
+  # 一个失败的赋值型命令替换就能把整个 chroot 脚本静默弄死（§11-9）。
+  if [[ -z "$found" && -d "$STAGE/vendor/$vdir" ]]; then
+    findargs=()
+    for cand in "${cands[@]}"; do
+      ((${#findargs[@]})) && findargs+=(-o)
+      findargs+=(-name "$cand")
+    done
+    found="$(find "$STAGE/vendor/$vdir" -type f \( "${findargs[@]}" \) 2>/dev/null | head -1 || true)"
+  fi
+
+  if [[ -n "$found" ]]; then
+    install -m 0755 "$found" "/opt/klburn/tools/$vname"
+    say "$vname 已安装（来自 vendor/${found#"$STAGE/vendor/"}）"
+    raid_tools_found=$(( raid_tools_found + 1 ))
+  fi
+done
+if (( raid_tools_found == 0 )); then
+  say "vendor/ 下一个阵列卡管理工具都没有 -> 阵列卡只能报 PCI 型号（见 vendor/README.md）"
 else
-  say "vendor/storcli/ 下没找到 storcli64 -> 阵列卡只能报 PCI 型号（见 vendor/README.md）"
+  say "阵列卡管理工具共装了 $raid_tools_found 个"
 fi
 
 # ---------------------------------------------------------------- vendor: logo

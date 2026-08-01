@@ -5,9 +5,11 @@
 > 用途：拿到第一台真服务器时，照着它一条条过。等真机到手再现想要看什么，
 > 一定会漏 —— 而机器通常只借得到半天。
 
-离线能做的验证已经做到头了：[`tests/run-all.sh`](../tests/run-all.sh) 361 项、
-[`tests/mutate.sh`](../tests/mutate.sh) 8 条变异、
-[`tests/e2e-qemu.sh`](../tests/e2e-qemu.sh) 把盘在 QEMU 里真开机跑完。
+离线能做的验证已经做到头了：[`tests/run-all.sh`](../tests/run-all.sh) 400+ 项、
+[`tests/mutate.sh`](../tests/mutate.sh) 11 条变异、
+[`tests/e2e-qemu.sh`](../tests/e2e-qemu.sh) 把盘在 QEMU 里真开机跑完
+（`--disk-stress` 还会真让 fio 写一次盘）、
+[`tests/check-firmware.sh`](../tests/check-firmware.sh) 对账盘里的网卡固件。
 **下面这些是 QEMU 结构上盖不到的**，只能上真机。
 
 ---
@@ -36,13 +38,24 @@
 | 6 | **CPU 温度来源** | QEMU 无 coretemp | `sys_metrics.csv` 的 `cpu_temp_c` 非空；空了不算故障，但要知道这台机器的驱动是哪个 |
 | 7 | **PCIe 链路降级** | 虚拟设备无 LnkCap/LnkSta | 有降级的机器上要**只报端点、不报桥**（§11-5） |
 | 8 | **网卡协商速率** | 虚拟网卡无 ethtool 速率 | 万兆口跑满时 PASS；**故意插千兆线**应判 WARN |
+| 9 | **非 Broadcom 阵列卡的管理工具** | `perccli64`/`arcconf`/`ssacli`/`sas3ircu` 这几个闭源二进制我们手上没有，测试里全是桩 | 放好对应工具后，`raw/raid/` 下要有**真的输出**（型号、固件版本、逻辑盘状态），不是一行报错。没放工具时那一项必须是 SKIP，**绝不能是 FAIL** |
+| 10 | **需要固件才能起来的网卡** | QEMU 里只有 virtio | 插 `bnx2x`（Broadcom 10G）或 `ice`（Intel E810）的机器上，`ip link` 要看得到物理口，`dmesg` 里不许有 `Direct firmware load ... failed`。1.5.0 之前这些卡在盘里根本起不来 |
 
 ---
 
-## 二、破坏性写盘：必须在真机上过一次
+## 二、破坏性写盘：QEMU 里过了，真机上还得再过一次
 
-`stress_disk`（fio 裸盘读写）在 QEMU 完整档里**始终是 SKIP** ——
-自动化里绝不能确认破坏性写入。所以这条路真机上一次都没走过。
+1.5.0 起 QEMU 里能真跑这条了：
+
+```bash
+sudo ./tests/e2e-qemu.sh --stage full --disk-stress
+```
+
+它会真让 fio 往两块虚拟盘上写满，然后验三件事：空白盘确实被写了、
+**开跑前预埋在「U 盘」里的上一轮报告一个字节没变**、`stress_disk` 判 PASS。
+
+**但 QEMU 里的 U 盘是一块 usb-storage 虚拟设备**，真机上是一根插在 xHCI 上的
+真 U 盘，中间隔着完全不同的枚举路径。所以真机还得再过一次：
 
 找一台**盘里没有任何要留的数据**的机器，专门跑一次：
 
@@ -52,8 +65,8 @@
 4. 跑完拔盘，插 Windows 电脑：**U 盘里的历史报告必须还在，分区必须还能读**
 
 > 这一步是整个项目最危险的一条路径（[§8.2](architecture.md#82-裸盘写入的排除规则storagesh)）。
-> `tests/test-disk-exclusion.sh` 用 loop + dm-linear 搭了同构设备链，
-> 但那终究是构造出来的。**真机上过一次之前，别把这个功能当成验证过了。**
+> **Ventoy 盘尤其要单独过一次**：排除有三层，而 Ventoy 场景下前两层
+> （`rm=1` / 有分区挂载）**同时**落空，只剩 `live_media_disks` 那一层。
 
 ---
 

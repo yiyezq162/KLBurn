@@ -22,6 +22,39 @@ git tag -l --sort=version:refname
 
 ---
 
+## 1.6.0
+
+- **阵列卡管理工具从只支持 storcli 扩到五个厂商。** 内核驱动 in-tree 全都有
+  （`megaraid_sas` / `mpt3sas` / `mpi3mr` / `smartpqi` / `aacraid` / `hpsa`），
+  盘认得到、SMART 也读得到；缺的是读**阵列卡自己**的固件版本和逻辑盘状态的
+  那个闭源 CLI —— 而一张卡只有对得上的那个工具认得：
+
+  | 放到 `vendor/` | 认哪些卡 |
+  |---|---|
+  | `storcli/storcli64` | Broadcom / LSI MegaRAID（原有） |
+  | `perccli/perccli64` | Dell PERC |
+  | `arcconf/arcconf` | Microchip / Adaptec（`smartpqi`、`aacraid`） |
+  | `ssacli/ssacli` | HPE Smart Array |
+  | `sas3ircu/sas3ircu` | LSI/Broadcom HBA 的非 RAID（IT）模式 |
+
+  以前盘里只带 `storcli64`，于是**所有非 Broadcom 的阵列卡都只能报一个 PCI 型号**。
+  现在采集时挨个试、命中即用；`chroot-setup.sh` 按同样的方式递归找并 `chmod`。
+
+  `storcli64` 仍然**单独先试**：报告生成器是按 `storcli-show.txt` 这个固定文件名
+  去读、去嵌进报告的，那条路径不能动。其余几家的原始输出落在 `raw/raid/`。
+
+  > 一个都不放也完全正常 —— 那一项判 **SKIP，绝不 FAIL**。少带工具是我们这边
+  > 环境的限制，跟被测机器好不好毫无关系（二号原则）。客户可见文案里也照旧
+  > 不出现任何工具名。
+
+  ⚠️ **这几个二进制我们手上没有，测试里全是桩。** 桩守住的是代码路径
+  （挨个试 / 命中即用 / 都不命中判 SKIP / 文案里不许有工具名），
+  **真工具的输出格式没人验过** —— 第一次拿到真卡时要核 `raw/raid/` 下的原始输出。
+
+  没做 `mstflint`：迈络思网卡的固件版本 `ethtool -i` 本来就给
+  （`firmware-version: 16.35.2000`），为同一个字段再引一个没法验证的闭源工具，
+  只会多一条没人走过的代码路径。
+
 ## 1.5.0
 
 - **装回 linux-firmware —— 之前有 8 类网卡/HBA 的驱动在盘里根本起不来。**

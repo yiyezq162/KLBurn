@@ -8,7 +8,15 @@
 ```
 vendor/
 ├── storcli/
-│   └── storcli64                      # Broadcom 阵列卡命令行工具
+│   └── storcli64                      # Broadcom / LSI 阵列卡命令行工具
+├── perccli/                           # 可选：Dell PERC
+│   └── perccli64
+├── arcconf/                           # 可选：Microchip / Adaptec
+│   └── arcconf
+├── ssacli/                            # 可选：HPE Smart Array
+│   └── ssacli
+├── sas3ircu/                          # 可选：LSI/Broadcom HBA（IT 模式）
+│   └── sas3ircu
 ├── nvidia/
 │   └── NVIDIA-Linux-x86_64-XXX.XX.run # NVIDIA 驱动离线包
 ├── gpu_burn/
@@ -24,6 +32,7 @@ vendor/
 | `nvidia/*.run` | 出一张不含显卡驱动的盘；有卡的机器 GPU 项记 SKIP，不算故障 |
 | `gpu_burn/` | 显卡型号/显存/驱动版本照常进报告，但不做满载压测，也就没有温度功耗曲线 |
 | `storcli/storcli64` | 阵列卡只能报 PCI 反查到的型号，读不到固件版本和逻辑盘状态（见下方说明：**卡后面物理盘的 SMART 不依赖它**） |
+| `perccli/` `arcconf/` `ssacli/` `sas3ircu/` | 同上，只是对应的是 Dell PERC / Adaptec / HPE Smart Array / IT 模式 HBA。一个都不放也正常，那一项判 SKIP 不判 FAIL |
 | `logo.png` | 报告抬头不显示 logo |
 
 ---
@@ -149,12 +158,44 @@ vendor/storcli/storcli64
 > 增长对比都照常有。storcli64 补上之后多出来的是**阵列卡自己**的信息：
 > 固件版本、逻辑盘（VD）状态、以及每块物理盘在卡上的槽位和状态。
 
-> 注：storcli64 只认 Broadcom / LSI 系阵列卡（MegaRAID SAS 那一系，
+> 注：storcli64 **只认 Broadcom / LSI 系**阵列卡（MegaRAID SAS 那一系，
 > 比如 SAS-3 3108 [Invader]、9361/9364、SAS-3.5 3508/3516 等）。
-> 别家阵列卡（Adaptec/微芯的 arcconf、Intel VROC）需要另外准备工具，目前没有集成，
-> 报告里会判 SKIP 并写「当前测试环境的管理工具不支持该型号」。
+> 别家的卡要用别家的工具，见下面 3b。
 >
 > **阵列卡始终只采集不压测**，所以这一项永远不会是 FAIL。
+
+---
+
+## 3b. 别家的阵列卡工具（可选，放几个算几个）
+
+一张阵列卡**只有对得上的那个厂商工具认得**。采集时是挨个试、命中即用，
+一个都没带也完全正常 —— 那一项判 SKIP，只报 PCI 反查到的型号，
+**永远不会因此判 FAIL**（少带工具是我们这边的事，不是被测机器的毛病）。
+
+| 放到 | 装进盘里的名字 | 认哪些卡 | 上哪儿拿 |
+|---|---|---|---|
+| `vendor/perccli/` | `perccli64` | **Dell PERC**（H7xx/H8xx…） | Dell 支持站按服务器型号搜 `PERCCLI`，或 Broadcom 站 "PercCLI" |
+| `vendor/arcconf/` | `arcconf` | **Microchip / Adaptec**（`smartpqi`、`aacraid`），HPE SR 系也常见 | Microchip 官网 Adaptec 支持页搜 `ARCCONF` |
+| `vendor/ssacli/` | `ssacli` | **HPE Smart Array**（P4xx/P8xx、Gen9~Gen10） | HPE 支持站 SPP 里的 `ssacli` rpm，`rpm2cpio ... \| cpio -idmv` 解出来 |
+| `vendor/sas3ircu/` | `sas3ircu` | **LSI/Broadcom HBA 的非 RAID（IT）模式**（9300/9400 系） | Broadcom 站搜 `SAS3IRCU` |
+
+和 storcli 一样：**可以直接把整个解压结果原样丢进对应目录**，
+构建脚本会往下递归找那个可执行文件，构建日志里会打出它最终用的是哪个路径
+（`[chroot] ssacli 已安装（来自 vendor/...）`），最后还会汇总一句
+`[chroot] 阵列卡管理工具共装了 N 个`。
+
+> ⚠️ `perccli64` 和 `storcli64` 是同一套东西换的皮，**子命令完全一样，
+> 但版本对不上会认不到卡**（storcli 认不了 PERC，反过来也一样）。
+> 所以两个都放着最省事，采集时会先试 storcli、不命中再试 perccli。
+
+> ⚠️ 这几个工具**没有在真卡上验证过** —— 我们手上没有对应的硬件和二进制。
+> 代码路径（挨个试、命中即用、都不命中判 SKIP、文案里不出现工具名）
+> 有回归测试用桩守着，但**真工具的输出格式没人验过**。
+> 第一次拿到真卡时照 [`../docs/first-run-checklist.md`](../docs/first-run-checklist.md)
+> 核一遍 `raw/raid/` 下的原始输出。
+
+**Intel VROC** 目前没有集成（它的 `mdadm`/`VROC CLI` 那条路和上面几个都不一样），
+遇到会判 SKIP 并写「当前测试环境的管理工具不支持该型号」。
 
 ---
 

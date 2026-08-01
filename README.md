@@ -198,7 +198,7 @@ CUDA 运行时库不在显卡驱动里，直接打包动态链接的版本一跑
 `error while loading shared libraries`，然后被判成"显卡故障"。
 用 `nvprune` 裁剪静态库再静态链接，330MB 出头，装完还用 `ldd` 自检。
 
-**⑨ 372 项回归测试，全都不需要真实硬件**
+**⑨ 405 项回归测试，全都不需要真实硬件**
 跑全套的同时还会过一遍 shellcheck。
 
 ```bash
@@ -285,6 +285,7 @@ sudo ./build/build-iso.sh --skip-download    # 源 ISO 不存在就报错，不�
 | `vendor/nvidia/NVIDIA-Linux-x86_64-*.run` | 出一张不含显卡驱动的盘 |
 | `vendor/gpu_burn/{gpu_burn,compare.fatbin}` | 显卡信息照常采集，但不做满载压测 |
 | `vendor/storcli/storcli64` | 阵列卡只能报 PCI 型号，读不到固件版本和逻辑盘状态（**卡后面物理盘的 SMART 不受影响**，那条路不依赖它） |
+| `vendor/{perccli,arcconf,ssacli,sas3ircu}/` | 同上，分别对应 Dell PERC / Adaptec / HPE Smart Array / IT 模式 HBA。一张卡只有对得上的那个工具认得，放几个算几个 |
 | `vendor/logo.png` | 报告抬头不显示 logo |
 
 详见 [`vendor/README.md`](vendor/README.md)。gpu_burn 需要自己编译一次：
@@ -432,9 +433,11 @@ journalctl -u klburn.service -b --no-pager
 只能退回 BIOS 的 RTC。ISO 的时区已设为 `Asia/Shanghai`；如果差了整 8 小时，
 说明这台机器的 RTC 存的是本地时间，去 BIOS 里把时间改成 UTC 即可。
 
-**阵列卡这项是 SKIP，只有型号没有固件版本** —— 这张盘里没带 `storcli64`。
-它是 Broadcom 的闭源工具，不在 Ubuntu 源里，只能手工下载后放进 `vendor/storcli/`
-再重新出盘，步骤见 [`vendor/README.md`](vendor/README.md)。
+**阵列卡这项是 SKIP，只有型号没有固件版本** —— 这张盘里没带对得上的管理工具。
+这类工具都是各家的闭源二进制，不在 Ubuntu 源里，只能手工下载后放进 `vendor/`
+再重新出盘：Broadcom/LSI 用 `storcli64`、Dell PERC 用 `perccli64`、
+HPE Smart Array 用 `ssacli`、Adaptec 用 `arcconf`、IT 模式的 HBA 用 `sas3ircu`。
+步骤见 [`vendor/README.md`](vendor/README.md)。
 **阵列卡始终只采集不压测**，所以这一项永远不会是 FAIL。
 
 **显卡这项是 SKIP，说"驱动与显卡不匹配"** —— 这张盘里的 NVIDIA 驱动版本不支持

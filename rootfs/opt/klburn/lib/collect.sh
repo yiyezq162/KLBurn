@@ -387,6 +387,57 @@ raid_absent_status() {
 }
 
 # ---------------------------------------------------------------- 阵列卡
+# 内核驱动 in-tree 全都有（megaraid_sas / mpt3sas / mpi3mr / smartpqi / aacraid /
+# hpsa），盘认得到、SMART 也读得到。缺的是**读阵列卡自己的固件版本和逻辑盘状态**
+# 的那个闭源 CLI —— 各家一个，都有授权限制，不进版本库，构建时从 vendor/ 拿。
+#
+# 一条铁律：**盘里没带工具、或者带了但认不了这张卡，一律 SKIP，绝不 FAIL。**
+# 那是我们这边环境的限制，跟被测机器好不好毫无关系（二号原则）。
+# 客户可见文案里也绝不许出现工具名 —— 那是内部实现细节，见 report-policy.md。
+#
+# 顺序就是试的顺序，命中即用。storcli64 不在这张表里，它在 collect_raid 里
+# **单独先试**：报告生成器是按 storcli-show.txt 这个固定文件名去读并嵌进报告的，
+# 那条路径不能动。
+RAID_TOOL_ORDER=(perccli64 arcconf ssacli sas3ircu)
+
+# raid_tool_run <工具名> -> 0 = 这张卡它认得（原始输出已落 raw/raid/）
+#
+# 判据只问一件事："它到底看没看到控制器"。看不到有两种可能——没装卡、
+# 或者这个牌子的工具认不了别家的卡——两种都不是机器的问题，都往 SKIP 走。
+raid_tool_run() {
+  local t="$1" bin="$KLB_TOOLS/$1"
+  [[ -x "$bin" ]] || return 1
+  case "$t" in
+    perccli64)
+      # Dell PERC。它就是 storcli 换的皮，子命令一模一样 —— 但**版本对不上会
+      # 认不到卡**（storcli 认不了 PERC、perccli 认不了原厂 MegaRAID），
+      # 所以两个都带、都试。
+      capture -t 90 "raid/${t}-show.txt"   "$bin" /call show all
+      capture -t 90 "raid/${t}-pdlist.txt" "$bin" /call/eall/sall show all
+      capture -t 90 "raid/${t}-vd.txt"     "$bin" /call/vall show all
+      grep -qiE 'Controller = [0-9]|Product Name' "$RAW_DIR/raid/${t}-show.txt" 2>/dev/null
+      ;;
+    arcconf)
+      # Microchip / Adaptec（smartpqi、aacraid）
+      capture -t 90 "raid/${t}-list.txt"   "$bin" LIST
+      capture -t 90 "raid/${t}-config.txt" "$bin" GETCONFIG 1
+      grep -qiE 'Controller [0-9]|Controllers found' "$RAW_DIR/raid/${t}-list.txt" 2>/dev/null
+      ;;
+    ssacli)
+      # HPE Smart Array
+      capture -t 90 "raid/${t}-ctrl.txt" "$bin" ctrl all show config detail
+      grep -qiE 'Smart Array|in Slot' "$RAW_DIR/raid/${t}-ctrl.txt" 2>/dev/null
+      ;;
+    sas3ircu)
+      # LSI/Broadcom HBA 的非 RAID（IT）模式 —— 这类卡 storcli 是不管的
+      capture -t 60 "raid/${t}-list.txt"    "$bin" LIST
+      capture -t 60 "raid/${t}-display.txt" "$bin" 0 DISPLAY
+      grep -qiE 'Controller Type|SAS[0-9]{4}' "$RAW_DIR/raid/${t}-list.txt" 2>/dev/null
+      ;;
+    *) return 1 ;;
+  esac
+}
+
 collect_raid() {
   info "Collecting RAID controller info ..."
 
@@ -400,45 +451,52 @@ collect_raid() {
   local hint; hint="$(raid_bmc_hint)"
   local absent_st; absent_st="$(raid_absent_status)"
 
+  # ---- 先试 storcli64 ----
+  # 它单独一段、raw/ 文件名写死不动：报告生成器是按 storcli-show.txt 这个名字
+  # 去读、去嵌进报告的，改名等于把那一块从报告里抹掉，而且不会有任何报错。
+  local hit=0 ref="raw/lspci.txt"
   if [[ -x "$KLB_TOOLS/storcli64" ]]; then
     capture -t 90 "storcli-show.txt"     "$KLB_TOOLS/storcli64" /call show all
     capture -t 90 "storcli-pdlist.txt"   "$KLB_TOOLS/storcli64" /call/eall/sall show all
     capture -t 90 "storcli-vd.txt"       "$KLB_TOOLS/storcli64" /call/vall show all
     capture -t 90 "storcli-events.txt"   "$KLB_TOOLS/storcli64" /call show events type=latest=50
-
     if grep -qiE 'Controller = [0-9]|Product Name' "$RAW_DIR/storcli-show.txt" 2>/dev/null; then
-      result_add "collect_raid" "阵列卡" "$ST_PASS" \
-        "已采集阵列卡型号、固件版本与逻辑盘状态。阵列卡不做压力测试。" "raw/storcli-show.txt"
-    elif [[ -n "$raid_pci" ]]; then
-      # 管理工具在盘里、但这张卡它认不了（型号不在支持列表内）。
-      # 同样是环境能力的限制，不是这台机器有问题 -> SKIP，且不提工具名。
-      local raid_model2
-      raid_model2="$(printf '%s' "$raid_pci" | head -1 | sed -E 's/^[0-9a-f:.]+ [^:]+: //; s/ \[[0-9a-f]{4}:[0-9a-f]{4}\].*$//')"
-      result_add "collect_raid" "阵列卡" "$ST_SKIP" \
-        "已识别阵列卡型号：${raid_model2:-见原始记录}。\
-本次仅采集型号信息，未读取固件版本与逻辑盘状态（当前测试环境的管理工具不支持该型号）。\
-阵列卡不做压力测试，此项不影响整机结论。" "raw/lspci.txt"
-    else
-      result_add "collect_raid" "阵列卡" "$absent_st" "未安装阵列卡${hint}" ""
+      hit=1; ref="raw/storcli-show.txt"
     fi
-  else
-    if [[ -n "$raid_pci" ]]; then
-      # 文案是给客户看的，不能出现"重新出盘""构建目录"这类只有开发者看得懂的话。
-      # 而且这一项**本来就只采集不压测**，读不到固件版本不代表机器有问题，
-      # 所以判 SKIP 而不是 WARN —— WARN 会在报告抬头单独列一块，
-      # 客户看到"告警"却发现只是少个管理工具，反而显得机器有毛病。
-      #
-      # 型号是从 PCI 反查的，一样准确，客户关心的"这台机器装了什么卡"照常有。
-      local raid_model
-      raid_model="$(printf '%s' "$raid_pci" | head -1 | sed -E 's/^[0-9a-f:.]+ [^:]+: //; s/ \[[0-9a-f]{4}:[0-9a-f]{4}\].*$//')"
-      result_add "collect_raid" "阵列卡" "$ST_SKIP" \
-        "已识别阵列卡型号：${raid_model:-见原始记录}。\
+  fi
+
+  # ---- storcli 没命中，再挨个试别家的 ----
+  # 场景很实在：Dell PERC 要 perccli、HPE Smart Array 要 ssacli、
+  # Adaptec/Microchip 要 arcconf、IT 模式的 LSI HBA 要 sas3ircu —— 一张卡只有
+  # 对得上的那个工具认得。以前盘里只带 storcli64，于是所有非 Broadcom 的阵列卡
+  # 都只能报一个 PCI 型号，固件版本和逻辑盘状态一概读不到。
+  if (( ! hit )); then
+    local t
+    for t in "${RAID_TOOL_ORDER[@]}"; do
+      if raid_tool_run "$t"; then hit=1; ref="raw/raid/"; break; fi
+    done
+  fi
+
+  if (( hit )); then
+    result_add "collect_raid" "阵列卡" "$ST_PASS" \
+      "已采集阵列卡型号、固件版本与逻辑盘状态。阵列卡不做压力测试。" "$ref"
+  elif [[ -n "$raid_pci" ]]; then
+    # 卡在机器里，但盘里没有对得上的管理工具（或者带了却认不了这个型号）。
+    # 文案是给客户看的，不能出现"重新出盘""构建目录"这类只有开发者看得懂的话。
+    # 而且这一项**本来就只采集不压测**，读不到固件版本不代表机器有问题，
+    # 所以判 SKIP 而不是 WARN —— WARN 会在报告抬头单独列一块，
+    # 客户看到"告警"却发现只是少个管理工具，反而显得机器有毛病。
+    #
+    # 型号是从 PCI 反查的，一样准确，客户关心的"这台机器装了什么卡"照常有。
+    local raid_model
+    raid_model="$(printf '%s' "$raid_pci" | head -1 | sed -E 's/^[0-9a-f:.]+ [^:]+: //; s/ \[[0-9a-f]{4}:[0-9a-f]{4}\].*$//')"
+    result_add "collect_raid" "阵列卡" "$ST_SKIP" \
+      "已识别阵列卡型号：${raid_model:-见原始记录}。\
 本次仅采集型号信息，未读取固件版本与逻辑盘状态（当前测试环境的管理工具不支持该型号）。\
 阵列卡不做压力测试，此项不影响整机结论。" \
-        "raw/lspci.txt"
-    else
-      result_add "collect_raid" "阵列卡" "$absent_st" "未安装阵列卡${hint}" ""
-    fi
+      "raw/lspci.txt"
+  else
+    result_add "collect_raid" "阵列卡" "$absent_st" "未安装阵列卡${hint}" ""
   fi
 }
 
