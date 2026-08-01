@@ -14,7 +14,15 @@
 : "${NET_PING_COUNT:=4}"        # 每个口 ping 网关的次数
 : "${NET_TIME_SYNC_TIMEOUT:=12}"  # 单次校时尝试的超时（chronyd 一次性模式）
 # 校时候选源：国内一个 + 一个全球通用的，两个都够快、都不依赖专门的账号/白名单
-NET_TIME_SERVERS=(ntp.aliyun.com cn.pool.ntp.org time.cloudflare.com)
+#
+# 必须写成"没定义过才给默认值"。klburn.conf 是在**本文件之前**被 source 的
+# （factory-test.sh 里 core.sh -> klburn.conf -> 其余 lib），上面那几个标量靠
+# `: "${VAR:=默认}"` 天然就让现场的覆盖生效了，唯独数组没有对应的写法 ——
+# 直接裸赋值的话，现场在 klburn.conf 里换内网 NTP 会被这一行原样顶掉，
+# 而且不会有任何报错。数组不能用 `${#arr[@]:-0}` 探测（bash 报 bad substitution，
+# 见 architecture.md §11-12），所以用 declare -p 判在不在。
+declare -p NET_TIME_SERVERS >/dev/null 2>&1 || \
+  NET_TIME_SERVERS=(ntp.aliyun.com cn.pool.ntp.org time.cloudflare.com)
 
 # ================================================================
 # 纯函数（不碰硬件，可脱机做回归测试）
