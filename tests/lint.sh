@@ -1,6 +1,10 @@
 #!/usr/bin/env bash
 #
-# shellcheck 静态检查。和其它 tests/ 里的脚本一样，不需要任何硬件：
+# 用 shellcheck 做静态检查。和其它 tests/ 里的脚本一样，不需要任何硬件：
+#
+# （这一行别写成以 "# shellcheck " 开头 —— 那是 shellcheck 的指令语法，
+#   它会试着把后面的中文当成指令去解析，然后报 SC1072/SC1073。
+#   本脚本会检查自己，所以这个坑是真踩得到的。）
 #
 #     ./tests/lint.sh
 #
@@ -57,6 +61,13 @@ EXCLUDE_RUNTIME="SC2034,SC2155,SC2120"
 run_group() {
   local label="$1" exclude="$2"; shift 2
   local out rc
+  # 一个文件都没收到时**绝不能报"干净"**：那不是没问题，是根本没检查。
+  # 这条守的是本脚本自己 —— 文件表出问题的时候，最坏的结果不是跑红，
+  # 是安安静静地绿，然后所有人以为 shellcheck 在盯着。
+  if (( $# == 0 )); then
+    bad "$label 一个文件都没找到 —— 这不是干净，是根本没检查"
+    return
+  fi
   out="$(shellcheck -x -S warning -e "$exclude" -f gcc "$@" 2>&1)"; rc=$?
   if (( rc == 0 )) && [[ -z "$out" ]]; then
     ok "$label（$# 个文件）干净"
@@ -66,8 +77,13 @@ run_group() {
   fi
 }
 
-mapfile -t BUILD_SH   < <(git ls-files 'build/*.sh')
-mapfile -t RUNTIME_SH < <(git ls-files 'rootfs/*.sh' 'tests/*.sh')
+# 用 find 而不是 git ls-files：后者在 linked worktree（git worktree add 出来的）
+# 里会失活 —— 那种目录下的 .git 是个文本文件、里面写着**宿主机格式**的绝对路径，
+# 在 WSL 里 git 直接 "fatal: not a git repository"，返回空表。
+# 空表配上原来的写法就是"0 个文件 -> 干净 -> 全绿"，比跑红危险得多。
+# 顺带这样也不再要求"必须在 git 仓库里"，导出的源码包照样能 lint。
+mapfile -t BUILD_SH   < <(find build          -name '*.sh' -type f | sort)
+mapfile -t RUNTIME_SH < <(find rootfs tests   -name '*.sh' -type f | sort)
 
 run_group "build/（set -Eeuo pipefail，以 root 跑）" "$EXCLUDE_BUILD"   "${BUILD_SH[@]}"
 run_group "rootfs/ + tests/（set -uo pipefail）"     "$EXCLUDE_RUNTIME" "${RUNTIME_SH[@]}"
