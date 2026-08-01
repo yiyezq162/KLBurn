@@ -59,13 +59,18 @@
 
 ## 三、引导方式
 
-QEMU 里只验了 BIOS(SeaBIOS) + USB。真机上补：
+QEMU 里 **BIOS 和 UEFI 两条都验过了**（`--firmware bios|uefi`），
+所以真机上主要是补环境相关的：
 
-- [ ] **UEFI 引导**（现在的服务器基本都是）
-- [ ] **BIOS/Legacy 引导**（老机器）
-- [ ] **Ventoy 方案**（见 [`usb-rufus.md`](usb-rufus.md) 末尾）——
-      它走的是四层回退里的**第 0 层**（dm 设备），和 Rufus 完全不同的路径
 - [ ] BIOS 启动菜单里能不能看到这根盘（有些机器要关 Secure Boot）
+- [ ] **Ventoy 方案**（见 [`usb-rufus.md`](usb-rufus.md) 末尾）——
+      走的是四层回退里的**第 0 层**（dm 设备），和 Rufus 完全不同的路径。
+      QEMU 里没法真装 Ventoy，只能真机验
+- [ ] 报告落盘位置那一行是**绿色**的（`Data partition: /dev/sdb2 -> ...`）。
+      黄色大框 = 没认出数据分区，报告只在 /tmp，关机就没了
+
+> 「U 盘上没有可用 exFAT 分区」这个场景 QEMU 里验过了
+> （`--no-data-partition`）：报告不会被写到不认识的分区上，流程也不卡死。
 
 ---
 

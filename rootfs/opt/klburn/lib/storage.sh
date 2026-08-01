@@ -355,7 +355,16 @@ scan_disks() {
     # 排除原因用英文：这些是要打在控制台上的，中文会显示成方块
     local why=""
     case "$name" in
-      loop*|ram*|zram*|sr*|fd*|dm-*|md*) why="virtual / software RAID device" ;;
+      # 理由要分开写。这块屏幕是操作员决定"要不要擦这些盘"时唯一的依据，
+      # 一条理由明显对不上（比如软驱被说成"software RAID device"），
+      # 他就会开始怀疑整张排除表 —— 而这张表恰恰是防止写穿启动盘的最后一道人工关。
+      # QEMU 端到端跑出来的截图里就是这么写的，一眼看出不对。
+      loop*)        why="loopback device" ;;
+      ram*|zram*)   why="RAM disk" ;;
+      sr*)          why="optical drive" ;;
+      fd*)          why="floppy drive" ;;
+      dm-*)         why="device-mapper device" ;;
+      md*)          why="software RAID device" ;;
     esac
     [[ -z "$why" && " $media_list " == *" $name "* ]] && why="the KLBurn USB stick itself"
     [[ -z "$why" && "$rm" == "1" ]]                   && why="removable device (USB)"

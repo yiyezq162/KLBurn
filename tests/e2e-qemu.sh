@@ -61,6 +61,8 @@ CPUS=4
 KEEP=0
 NET=0
 WORKDIR=""
+FIRMWARE="bios"
+NO_DATA=0
 
 usage() {
   cat <<'EOF'
@@ -68,6 +70,11 @@ usage() {
 
   --stage smoke|full   smoke=只验能不能起来并落盘（~3 分钟，默认）
                        full =完整跑一遍 QUICK 档（~20 分钟）
+  --firmware bios|uefi bios=SeaBIOS（默认）；uefi=OVMF。真服务器基本都是 UEFI，
+                       两条引导路径都得验
+  --no-data-partition  把第 4 个分区格成 ext4 而不是 exFAT，模拟"U 盘上没有
+                       可用数据分区"。验的是：报告不会被写到不该写的地方、
+                       而且流程照常跑完不卡死（现场应看到黄色大框警告）
   --iso PATH           用指定 ISO（默认取 out/ 里 mtime 最新的）
   --net                给虚拟机接一块网卡（默认不接，网卡项会判 SKIP）
   --keep               跑完保留磁盘镜像和截图，方便手工看
@@ -83,6 +90,8 @@ while (( $# )); do
     --iso)         ISO="$2";   shift 2 ;;
     --net)         NET=1;      shift ;;
     --keep)        KEEP=1;     shift ;;
+    --firmware)    FIRMWARE="$2"; shift 2 ;;
+    --no-data-partition) NO_DATA=1; shift ;;
     --workdir)     WORKDIR="$2"; shift 2 ;;
     --spare-disks) SPARE_N="$2"; shift 2 ;;
     -h|--help)     usage; exit 0 ;;
@@ -189,11 +198,18 @@ else
   printf '\n通过 %d 项，失败 %d 项\n' "$PASS" "$FAIL"; exit 1
 fi
 
-# 卷标必须是大写 KLBURN —— 四层回退的第 1 层就是按它找的
-mkfs.exfat -n KLBURN "${LOOP}p4" >/dev/null 2>&1
-lbl="$(blkid -s LABEL -o value "${LOOP}p4" 2>/dev/null)"
-[[ "$lbl" == "KLBURN" ]] && ok "数据分区格式化为 exFAT，卷标 KLBURN" \
-                         || bad "卷标不对：拿到 [$lbl]，要的是 KLBURN"
+if (( NO_DATA )); then
+  # 故意格成 ext4：四层回退找的全是 exFAT，所以一层都不会命中，
+  # KLBurn 应该退到 /tmp 并打黄色大框警告，**而不是**往这个分区上乱写。
+  mkfs.ext4 -q -F -L NOTKLBURN "${LOOP}p4" >/dev/null 2>&1
+  ok "数据分区故意格成 ext4（模拟 U 盘上没有可用的 exFAT 数据分区）"
+else
+  # 卷标必须是大写 KLBURN —— 四层回退的第 1 层就是按它找的
+  mkfs.exfat -n KLBURN "${LOOP}p4" >/dev/null 2>&1
+  lbl="$(blkid -s LABEL -o value "${LOOP}p4" 2>/dev/null)"
+  [[ "$lbl" == "KLBURN" ]] && ok "数据分区格式化为 exFAT，卷标 KLBURN" \
+                           || bad "卷标不对：拿到 [$lbl]，要的是 KLBURN"
+fi
 
 losetup -d "$LOOP"; LOOP=""
 
@@ -213,6 +229,26 @@ NET_ARGS=(-nic none)
 # shellcheck disable=SC2054  # 这里的逗号是 qemu 参数自己的语法，不是数组分隔符
 (( NET )) && NET_ARGS=(-nic "user,model=virtio-net-pci")
 
+# UEFI：真服务器基本都是 UEFI 启动，而 ISO 是 BIOS/UEFI 双引导的 —— 两条路
+# 走的是完全不同的引导链（SeaBIOS + isohybrid MBR  vs  OVMF + ESP 里的 grub），
+# 只验一条等于只验了一半。
+FW_ARGS=()
+if [[ "$FIRMWARE" == "uefi" ]]; then
+  OVMF_CODE=/usr/share/OVMF/OVMF_CODE_4M.fd
+  OVMF_VARS_SRC=/usr/share/OVMF/OVMF_VARS_4M.fd
+  [[ -f "$OVMF_CODE" ]] || die "缺 OVMF（apt-get install ovmf）：$OVMF_CODE"
+  # VARS 必须是可写副本，直接用系统那份会失败（而且不该污染它）
+  cp "$OVMF_VARS_SRC" "$WORK/OVMF_VARS.fd"
+  FW_ARGS=(
+    -machine q35
+    -drive "if=pflash,format=raw,unit=0,readonly=on,file=$OVMF_CODE"
+    -drive "if=pflash,format=raw,unit=1,file=$WORK/OVMF_VARS.fd"
+  )
+  info "固件：UEFI（OVMF，q35）"
+else
+  info "固件：BIOS（SeaBIOS，i440fx）"
+fi
+
 # U 盘走 USB 总线，和现场一致 —— storage.sh 里那套 removable/hotplug 判断
 # 和 live 介质反查都指望这个身份。用 virtio 挂的话就测不到那条路了。
 #
@@ -228,6 +264,7 @@ NET_ARGS=(-nic none)
 #    现场是工程师在 BIOS 菜单里手动选 U 盘，bootindex 就是在模拟这一下。
 qemu-system-x86_64 \
   "${KVM_ARGS[@]}" \
+  "${FW_ARGS[@]}" \
   -m "$MEM_MB" -smp "$CPUS" \
   -device qemu-xhci,id=xhci \
   -drive "file=$IMG,format=raw,if=none,id=usbstick" \
@@ -275,8 +312,12 @@ if [[ "$STAGE" == "smoke" ]]; then
   # KLBurn 一开机就 mount_data_partition + log_attach，klburn.log 会立刻落盘 ——
   # 所以根本不用等它跑完，看盘上有没有东西就够了。
   info "冒烟档：等 150 秒让它开机并建立报告目录"
+  # 15 秒这一张是专门为 --no-data-partition 留的：找不到数据分区时那个黄色大框
+  # 警告出现在 STEP 1、只停 8 秒，等到 30 秒就已经被后面的采集日志顶走了。
+  # 那条"有没有打警告"没法程序化断言，只能靠人看截图，所以至少得截到。
+  sleep 15; shot "15"
   for t in 30 60 90 120 150; do
-    sleep 30
+    sleep $(( t == 30 ? 15 : 30 ))
     kill -0 "$QEMU_PID" 2>/dev/null || { bad "虚拟机在第 ${t}s 意外退出了"; break; }
     shot "$t"
     printf '       ... %ss\n' "$t"
@@ -353,10 +394,45 @@ printf '\n\033[1m[4/4] 把"U 盘"挂起来看\033[0m\n'
 LOOP="$(losetup -P --find --show "$IMG")"
 sleep 1
 if mount -o ro "${LOOP}p4" "$MNT" 2>/dev/null; then
-  ok "数据分区能挂上（说明虚拟机里写完是干净卸载的）"
+  ok "第 4 个分区能挂上"
 else
-  bad "数据分区挂不上"
+  bad "第 4 个分区挂不上"
   printf '\n通过 %d 项，失败 %d 项\n' "$PASS" "$FAIL"; exit 1
+fi
+
+if (( NO_DATA )); then
+  # 没有可用数据分区时该发生什么：
+  #   - 报告退到 /tmp（关机就没了，这是已知且会在屏幕上打黄色大框警告的）
+  #   - **绝不能**往这个不认识的分区上乱写
+  #   - 流程照常跑完，不能卡死 —— 现场最怕的是"插上去没反应"
+  #
+  # 前两条这里能验；"打了黄框"只能靠截图人工看（shot-*.ppm 都留着）。
+  # ⚠️ 这里绝不能写 `grep -c . || echo 0`。§11-7：grep -c 在计数为 0 时
+  #    **既打印 "0" 又返回 1**，于是 `|| echo 0` 补出第二个 0，结果是两行的
+  #    "0\n0" —— 拿去比较就成了"期望 0、实际 0，却判不相等"。
+  #    而且它**只在健康路径上发作**（真没写东西的时候才会为 0），
+  #    第一次跑这个场景就撞上了。运行时脚本有 count_lines() 专治这个，
+  #    这里不 source core.sh，所以自己写一份同样形状的。
+  count_lines_() {
+    local n; n="$(grep -c . 2>/dev/null)"
+    [[ "$n" =~ ^[0-9]+$ ]] || n=0
+    printf '%s' "$n"
+  }
+  n_files="$(find "$MNT" -mindepth 1 2>/dev/null | count_lines_)"
+  # ext4 会有个 lost+found，那是 mkfs 建的，不算 KLBurn 写的
+  n_written="$(find "$MNT" -mindepth 1 -not -name 'lost+found' 2>/dev/null | count_lines_)"
+  check_eq() { [[ "$2" == "$3" ]] && ok "$1" || bad "$1（期望 $2，实际 $3）"; }
+  check_eq "认不出的分区上一个字节都没写（不是 exFAT 就不该碰它）" "0" "$n_written"
+  [[ -d "$MNT/out" ]] && bad "居然在非 exFAT 分区上建了 out/ 目录" \
+                      || ok "没有在非 exFAT 分区上建 out/"
+  info "分区里共 $n_files 个条目（lost+found 是 mkfs 建的）"
+  info "「屏幕上有没有黄色大框警告」只能人工看截图：$WORK/shot-*.ppm"
+
+  umount "$MNT" 2>/dev/null
+  losetup -d "$LOOP" 2>/dev/null; LOOP=""
+  printf '\n'
+  printf '通过 %d 项，失败 %d 项\n' "$PASS" "$FAIL"
+  exit $(( FAIL > 0 ? 1 : 0 ))
 fi
 
 # --- 报告目录 ---
@@ -381,9 +457,15 @@ TAG="$(basename "$RUNDIR")"
 
 if [[ "$STAGE" == "smoke" ]]; then
   # 冒烟到此为止：能开机、能认出数据分区、能建目录写日志，就算过。
-  grep -q "KLBurn v${EXPECT_VER}" "$RUNDIR/klburn.log" 2>/dev/null \
-    && ok "日志里的版本号是 $EXPECT_VER（盘里跑的确实是这次构建的代码）" \
-    || bad "日志里没找到 KLBurn v$EXPECT_VER —— 盘里可能是旧代码"
+  if grep -q "KLBurn v${EXPECT_VER}" "$RUNDIR/klburn.log" 2>/dev/null; then
+    ok "日志里的版本号是 $EXPECT_VER（盘里跑的确实是这次构建的代码）"
+  else
+    got_v="$(grep -oE 'KLBurn v[0-9.]+' "$RUNDIR/klburn.log" 2>/dev/null | head -1)"
+    bad "版本对不上：盘里是「${got_v:-?}」，源码是 $EXPECT_VER"
+    info "  = 你测的不是你以为的那份代码。改完代码要先重新构建："
+    info "    sudo KLBURN_WORK=/home/li/klburn-build ./build/build-iso.sh"
+    info "  （这条断言就是为了拦住"改完代码直接拿旧 ISO 跑 e2e"）"
+  fi
 else
   # --- 完整档：报告本体 ---
   [[ -s "$RUNDIR/$TAG.html" ]] && ok "交付报告 $TAG.html 生成了" \

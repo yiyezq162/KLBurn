@@ -22,6 +22,31 @@ git tag -l --sort=version:refname
 
 ---
 
+## 1.4.2
+
+- **裸盘排除表的理由分开写。** 原来 `loop*|ram*|zram*|sr*|fd*|dm-*|md*` 共用
+  一句 "virtual / software RAID device"，于是软驱 `/dev/fd0` 被标成
+  "software RAID device"。现在逐类写（loopback / RAM disk / optical drive /
+  floppy drive / device-mapper / software RAID）。
+
+  > 这块屏幕是操作员决定「要不要擦这些盘」时**唯一的依据**，一条理由明显
+  > 对不上，他就会开始怀疑整张排除表 —— 而这张表是防止写穿启动盘的最后一道
+  > 人工关。是 QEMU 端到端的截图看出来的。
+
+- **e2e 新增两个场景**：`--firmware uefi`（OVMF + q35）和
+  `--no-data-partition`（第 4 分区格成 ext4，四层回退一层都不命中）。
+  ISO 是双引导的，但 BIOS 和 UEFI 走的引导链完全不同，只验一条等于只验一半，
+  而真服务器基本都是 UEFI。三个场景实测：BIOS 9/0、UEFI 9/0、无数据分区 7/0。
+- e2e 冒烟档补一张 15 秒的截图 —— 找不到数据分区时那个黄色大框只停 8 秒，
+  等到 30 秒就被采集日志顶走了。
+- 修 e2e 自己踩的 §11-7：`grep -c . || echo 0` 在计数为 0 时会得到两行的
+  `"0\n0"`，表现成"期望 0、实际 0，却判不相等"，而且**只在健康路径上发作**。
+
+> **端到端仍然没覆盖破坏性 fio 真写盘**（验证 U 盘不被写穿）——
+> 那两个确认提示出现的时刻不固定，盲发按键难以稳定命中。
+> 详见 [`docs/architecture.md` §12](docs/architecture.md#十二测试地图)
+> 和 [`docs/first-run-checklist.md`](docs/first-run-checklist.md) 第二节。
+
 ## 1.4.1
 
 - **交付报告新增结构性快照断言**。原来的断言全是"某个字符串在不在"，

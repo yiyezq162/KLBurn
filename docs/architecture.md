@@ -747,11 +747,32 @@ check_fans() {
 | `mutate.sh` | 把已修好的 bug 逐个塞回代码，确认对应的用例真的会跑红。**逃掉 = 那条守卫是摆设** | 改了任何判定逻辑或守卫之后 |
 
 ```bash
-sudo ./tests/e2e-qemu.sh                 # 冒烟，约 3 分钟
-sudo ./tests/e2e-qemu.sh --stage full    # 完整跑一遍 QUICK 档，约 20 分钟
-./tests/mutate.sh                        # 全部变异，约 3~5 分钟
-./tests/mutate.sh --list                 # 看有哪些变异、各由谁守
+sudo ./tests/e2e-qemu.sh                          # BIOS 冒烟，约 3 分钟
+sudo ./tests/e2e-qemu.sh --firmware uefi          # UEFI（OVMF + q35）
+sudo ./tests/e2e-qemu.sh --no-data-partition      # U 盘上没有可用 exFAT 分区
+sudo ./tests/e2e-qemu.sh --stage full             # 完整跑一遍 QUICK 档，约 20 分钟
+./tests/mutate.sh                                 # 全部变异，约 3~5 分钟
+./tests/mutate.sh --list                          # 看有哪些变异、各由谁守
 ```
+
+**BIOS 和 UEFI 两条都要跑。** ISO 是双引导的，但两条走的引导链完全不同
+（SeaBIOS + isohybrid MBR vs OVMF + ESP 里的 grub），只验一条等于只验了一半 ——
+而真服务器基本都是 UEFI。
+
+`--no-data-partition` 把第 4 个分区格成 ext4，四层回退一层都不会命中。
+验的是**报告不会被写到不该写的地方、流程也不卡死**；
+"屏幕上有没有打黄色大框警告"程序断言不了，看 `shot-15.ppm`（那个框只停 8 秒）。
+
+### e2e 目前**没有**覆盖的两个场景
+
+| 场景 | 为什么没做 | 怎么补 |
+|---|---|---|
+| **破坏性 fio 真写盘** | 要 sendkey 打出 `yes`+回车再打 `y`，而这两个提示出现在 `collect_all` 之后、时刻不固定，盲发按键很难稳定命中。**这是最有价值的一条**（验证 U 盘不被写穿） | 先给 e2e 加一个"等某个提示出现"的机制（截图比对或让产品往数据分区写阶段标记），再补。真机上按 [`first-run-checklist.md` 第二节](first-run-checklist.md) 手工过一次 |
+| **Ventoy 的 dm 设备链** | QEMU 里没法真装 Ventoy；而反查逻辑 `test-disk-exclusion.sh` 已经用 loop + dm-linear 搭同构设备链覆盖了 | 真机上用 Ventoy 盘跑一次 |
+
+> 顺带：那张排除表的措辞是 e2e 截图看出问题的 —— 软驱 `/dev/fd0` 原来被标成
+> "virtual / software RAID device"。那块屏幕是操作员决定"要不要擦这些盘"时
+> 唯一的依据，一条理由明显对不上，他就会开始怀疑整张表。
 
 **`mutate.sh` 绝对不能挂进 `run-all.sh`** —— 它自己会去调各个测试套件，
 挂进去就成了递归。
