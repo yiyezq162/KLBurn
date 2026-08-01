@@ -175,8 +175,23 @@ dmesg_scan_hw_errors() {
   local in="$1" out="$2"
   : > "$out"
   [[ -f "$in" ]] || return 0
+  # 噪声豁免。每加一条都要说清楚"为什么它不代表被测机器有问题"。
+  #
+  # dev fd[0-9] = 软驱。内核探测一个不存在/没插盘的软驱，必然打
+  #   "I/O error, dev fd0, sector 0 op 0x0:(READ)"
+  # 而上面的模式里有 "I/O error"，于是整机判 FAIL，理由写着
+  # 「机器在上电初始化时就有硬件异常」—— 一台完全正常的服务器被拦在出货前。
+  #
+  # 这不是虚拟机才有的事：**BMC 的虚拟媒体（iDRAC/iLO）挂上虚拟软驱、
+  # 或 BIOS 开了软驱模拟，真服务器上一样会打这几行。**
+  # 而软驱从来不在我们的测试范围里 —— 它不是被测机器的一部分，
+  # 它的探测失败说明不了任何关于这台机器的事。豁免它不会掩盖任何真故障：
+  # 真盘是 sd*/nvme*/vd*，一个都不受影响（下面有断言逐条钉着）。
+  #
+  # 这条是 QEMU 端到端测试（tests/e2e-qemu.sh）跑出来的 —— 单元测试永远
+  # 造不出这个场景，因为没人会想到往样本里塞一行软驱日志。
   grep -EI "$(dmesg_hw_error_pattern)" "$in" 2>/dev/null \
-    | grep -viE 'thermal throttl.*not|nouveau' \
+    | grep -viE 'thermal throttl.*not|nouveau|dev fd[0-9]' \
     > "$out" || true
   return 0
 }

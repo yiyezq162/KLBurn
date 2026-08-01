@@ -33,6 +33,14 @@ ok()   { printf '  \033[32mOK\033[0m   %s\n' "$1"; PASS=$((PASS+1)); }
 bad()  { printf '  \033[31mFAIL\033[0m %s\n     期望 [%s] 实际 [%s]\n' "$1" "$2" "$3"; FAIL=$((FAIL+1)); }
 check(){ [[ "$2" == "$3" ]] && ok "$1" || bad "$1" "$2" "$3"; }
 
+# 断言函数名打错不能静悄悄地过去（§11-13"断言悄悄停止计数"的同款病）：
+# 本脚本不开 set -e，`xxx: command not found` 只往 stderr 打一行就没了，
+# PASS/FAIL 都不动 —— 屏幕照样"全部通过"，只是少跑了几条。实测踩到过一次。
+command_not_found_handle() {
+  bad "调用了不存在的命令 '$1'（多半是断言函数名打错，这条断言根本没跑）" "已定义的函数" "$1"
+  return 127
+}
+
 # ================================================================
 echo "=== 内存装机容量解析 ==="
 
@@ -378,6 +386,27 @@ echo "=== 联网校时（sync_clock_now）==="
 check "候选校时服务器列表不能是空的" \
       "over" "$( ((${#NET_TIME_SERVERS[@]} > 0)) && echo over || echo within )"
 
+# klburn.conf 里的覆盖必须真的生效。
+#
+# 加载顺序是 core.sh -> klburn.conf -> 其余 lib（factory-test.sh 里），
+# 所以后面这些 lib 里的默认值必须写成"没定义过才给"。标量靠
+# `: "${VAR:=默认}"` 天然成立，**数组没有对应写法**，一不小心就写成裸赋值 ——
+# 那样现场在 klburn.conf 里换内网 NTP 会被原样顶掉，而且不会有任何报错，
+# 表现是"配了内网源，校时还是走外网、还是失败"，离线机房里根本查不出原因。
+#
+# 这条断言是变异测试逼出来的：把 network.sh 改回裸赋值，整套测试当时全绿。
+cat > "$TMP/conf-override.sh" <<EOF
+RUN_DIR="$TMP"; RAW_DIR="$TMP"
+source "$LIB/core.sh" >/dev/null 2>&1
+# 下面两行模拟现场在 /opt/klburn/klburn.conf 里写的覆盖
+NET_TIME_SERVERS=(ntp.internal.lan)
+NET_PING_COUNT=9
+source "$LIB/network.sh" >/dev/null 2>&1
+printf '%s|%s' "\${NET_TIME_SERVERS[*]}" "\$NET_PING_COUNT"
+EOF
+check "klburn.conf 预设的值不许被 lib 顶掉（数组和标量都要）" \
+      "ntp.internal.lan|9" "$(bash "$TMP/conf-override.sh" 2>/dev/null)"
+
 if have chronyd; then
   # 中文引号是文案的一部分，不是打错的 shell 引号
   # shellcheck disable=SC1111
@@ -582,6 +611,8 @@ cat > "$DMESG_NOISE" <<'EOF'
 [Wed Nov 26 02:16:24 2025] EDAC MC0: Giving out device to module i10nm_edac controller Intel_10nm Socket#0 IMC#0: DEV 0000:7e:0c.0 (INTERRUPT)
 [Wed Nov 26 02:16:24 2025] EDAC MC: Ver: 3.0.0
 [Wed Nov 26 02:16:24 2025] EDAC i10nm: No hbm memory
+[Sat Aug  1 16:13:10 2026] I/O error, dev fd0, sector 0 op 0x0:(READ) flags 0x0 phys_seg 1 prio class 2
+[Sat Aug  1 16:13:10 2026] blk_update_request: I/O error, dev fd0, sector 0 op 0x0:(READ) flags 0x0 phys_seg 1 prio class 2
 EOF
 
 dmesg_scan_hw_errors "$DMESG_BAD" "$TMP/hits-bad.txt"
@@ -603,6 +634,31 @@ do
   printf '[Wed Nov 26 02:16:23 2025] %s\n' "$bad_line" > "$TMP/one.txt"
   dmesg_scan_hw_errors "$TMP/one.txt" "$TMP/one-hit.txt"
   check "不许命中: ${bad_line:0:60}" "0" "$(count_lines "$TMP/one-hit.txt")"
+done
+
+# ---- 软驱：豁免它，但绝不能顺手把真盘的 I/O error 一起豁免掉 ----
+#
+# 这一组是 tests/e2e-qemu.sh 跑出来的。虚拟机里内核探测那个不存在的软驱，
+# 打了三行 "I/O error, dev fd0"，verify_dmesg_boot 当场判 FAIL，结论写着
+# 「机器在上电初始化时就有硬件异常」—— 而那台"机器"什么毛病都没有。
+#
+# 真服务器上同样会遇到：BMC 虚拟媒体（iDRAC/iLO）挂了虚拟软驱、
+# 或者 BIOS 开了软驱模拟。软驱不在测试范围内，它探测失败说明不了任何事。
+#
+# 但豁免必须窄。下面成对断言：fd0 放过，sd/nvme/vd 一个都不许放过。
+printf '%s\n' \
+  '[Sat Aug  1 16:13:10 2026] I/O error, dev fd0, sector 0 op 0x0:(READ) flags 0x0 phys_seg 1 prio class 2' \
+  > "$TMP/fd0.txt"
+dmesg_scan_hw_errors "$TMP/fd0.txt" "$TMP/fd0-hit.txt"
+check "软驱探测的 I/O error 不算故障（虚拟媒体挂的软驱，真机上也有）" \
+      "0" "$(count_lines "$TMP/fd0-hit.txt")"
+
+for real_dev in sda nvme0n1 vdb sdak; do
+  printf '[Sat Aug  1 16:13:10 2026] I/O error, dev %s, sector 12345 op 0x0:(READ) flags 0x0 phys_seg 1 prio class 2\n' \
+    "$real_dev" > "$TMP/real.txt"
+  dmesg_scan_hw_errors "$TMP/real.txt" "$TMP/real-hit.txt"
+  check "真盘 $real_dev 的 I/O error 必须照常命中（豁免不许扩大化）" \
+        "1" "$(count_lines "$TMP/real-hit.txt")"
 done
 
 # 真正的 EDAC 报错格式必须还能抓住（收紧模式别把真错误也关在门外）
