@@ -34,6 +34,9 @@
 
 > **要改代码 / 想知道它内部怎么工作的，看 [`docs/architecture.md`](docs/architecture.md)。**
 > 那里面有完整的模块地图、判定规则总表、扩展点，和一份"改代码前必读"的不变量清单。
+>
+> **手里有一份旧报告、想知道那张盘当时会干什么**，看
+> [`CHANGELOG.md`](CHANGELOG.md)（报告里写着版本号）。
 
 ---
 
@@ -156,7 +159,8 @@
 **① 四态判定，绝不把"没有"说成"坏了"**
 所有项目的状态是 PASS / FAIL / SKIP / WARN 四态。没装阵列卡、没装显卡、没接网线
 一律 SKIP，不影响整机结论；**有卡但认不到**才是 FAIL。
-整机结论只看有没有 FAIL。
+整机结论只看有没有 FAIL —— 但**一条判定都没有也不算通过**：那说明这轮压根没跑成，
+报告会明确写「本次测试未产生任何判定结果，本报告无效」，而不是打一个绿色 PASS。
 
 **② 测试环境自己的问题，绝不算到客户机器头上**
 内存压测被 OOM killer 打死 → 判 WARN 并写明"这是测试环境的容量限制，不是内存故障"。
@@ -194,9 +198,9 @@ CUDA 运行时库不在显卡驱动里，直接打包动态链接的版本一跑
 `error while loading shared libraries`，然后被判成"显卡故障"。
 用 `nvprune` 裁剪静态库再静态链接，330MB 出头，装完还用 `ldd` 自检。
 
-**⑨ 334 项回归测试，全都不需要真实硬件**
+**⑨ 355 项回归测试，全都不需要真实硬件**
 而且做过**变异验证**：把每个已修复的 bug 逐个塞回代码里，确认对应的用例真的会跑红
-——一个从没红过的测试等于没写。
+——一个从没红过的测试等于没写。跑全套的同时还会过一遍 shellcheck。
 
 ```bash
 ./tests/run-all.sh
@@ -435,6 +439,7 @@ journalctl -u klburn.service -b --no-pager
 ```
 KLBurn/
 ├── README.md                    本文件（怎么用）
+├── CHANGELOG.md                 每个版本改了什么（拿旧报告回查那张盘的行为）
 ├── docs/
 │   ├── architecture.md      ★   开发文档（怎么改）
 │   ├── report-policy.md     ★   报告文案规范（哪些东西不能给客户看）
@@ -453,7 +458,8 @@ KLBurn/
 │       └── report/
 │           ├── generate_report.py    ★ 客户报告
 │           └── generate_internal.py  ★ 内部工程报告
-├── tests/                       7 个回归测试，全都不需要真实硬件
+├── tests/                       7 个回归测试 + 1 条 shellcheck，都不需要真实硬件
+│   ├── lint.sh                  shellcheck 静态检查（没装就跳过）
 │   └── run-all.sh               一次跑完
 ├── vendor/                      离线包（不进版本库，见 vendor/README.md）
 └── out/                         构建产物 ISO

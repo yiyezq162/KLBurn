@@ -1,7 +1,8 @@
 # CLAUDE.md
 
-给 Claude Code 的项目备忘。人看的文档在 [`README.md`](README.md)（怎么用）和
-[`docs/architecture.md`](docs/architecture.md)（怎么改）。
+给 Claude Code 的项目备忘。人看的文档在 [`README.md`](README.md)（怎么用）、
+[`docs/architecture.md`](docs/architecture.md)（怎么改）和
+[`CHANGELOG.md`](CHANGELOG.md)（哪个版本改了什么）。
 
 ## 这是什么
 
@@ -43,8 +44,10 @@ wsl -d Ubuntu-24.04 -u root -e bash -c "cd /mnt/c/Users/li/Desktop/project/KLBur
 ## 改完代码必做
 
 1. **先 bump `build/config.sh` 里的 `KLBURN_VERSION` 再构建**（先 bump 再构建，
-   0.3.0 栽过：盘自称一个版本、跑的是另一版代码）
-2. `./tests/run-all.sh` 全绿
+   0.3.0 栽过：盘自称一个版本、跑的是另一版代码），同时在
+   [`CHANGELOG.md`](CHANGELOG.md) 顶上加一节 —— 客户报告里只有版本号，
+   查不到那个版本干了什么就等于没有可追溯性
+2. `./tests/run-all.sh` 全绿（里面已经包含 `lint.sh` 的 shellcheck）
 3. 改了会进客户报告的文案 → 一定跑 `test-hw-checks.sh` + `test-report-render.sh`
 
 ## 三条最容易踩的红线

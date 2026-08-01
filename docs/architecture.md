@@ -63,6 +63,14 @@ KLBurn 是一根 U 盘：插上、开机、选个时长，剩下的全自动。�
 
 **整机结论只看有没有 FAIL。** 没装阵列卡、没装显卡、没接网线都不影响结论。
 
+**但"一条判定都没有"不算通过。** `results.jsonl` 为空 / 读不出来 / 解析不了
+（采集阶段就崩了、U 盘写满了、进程被收掉），1.3.0 之前会走进"没有 FAIL"那一支，
+屏幕和交付报告都打出绿色大字 —— 一台什么都没测过的机器看起来是合格的。
+现在这种情况判 FAIL，并明确写「本次测试未产生任何判定结果，本报告无效」。
+**措辞只说这轮没跑成，不往硬件头上扣帽子** —— 它不是"机器坏了"，是"这份报告作废、
+需要重测"。屏幕、交付报告、内部报告三处同一条规矩，
+`test-hw-checks.sh` / `test-report-render.sh` / `test-internal-report.sh` 各有断言锁着。
+
 WARN 不拉低结论但要在抬头单独列出来 —— 少一条内存、少接一路电源线这类事，
 最容易被漏看，又最该在出厂时拦住，不能只埋在下面的列表里等人翻。
 
@@ -314,10 +322,38 @@ rootfs/opt/klburn/
 
 默认值写在 [`../rootfs/opt/klburn/lib/core.sh`](../rootfs/opt/klburn/lib/core.sh)，
 形如 `: "${CPU_TEMP_WARN:=95}"`。现场想临时改：`Alt+F2` 进另一个控制台，
-在 `/opt/klburn/klburn.conf` 里写一行同名赋值即可覆盖（那个文件在 `core.sh` 之后被 source）。
+在 `/opt/klburn/klburn.conf` 里写一行同名赋值即可覆盖。
 
 **实际生效的阈值会写进 `meta.json` 的 `thresholds`，报告里显示的就是这一份** ——
 现场改了阈值，报告不会和判定对不上。
+
+### klburn.conf 能覆盖的全部变量
+
+`klburn.conf` 由 `chroot-setup.sh` 在构建时生成（里面是品牌抬头那几项），
+现场直接往后追加即可。加载顺序是
+`core.sh` → **`klburn.conf`** → `ui.sh` / `storage.sh` / `collect.sh` / `network.sh` /
+`gpu.sh` / `stress.sh` / `verify.sh`，所以两边的写法都能被覆盖：`core.sh` 的值先落地
+再被覆写，后面几个 lib 的 `: "${VAR:=默认}"` 看到已有值就不动。
+
+| 变量 | 默认 | 定义在 | 作用 |
+|---|---|---|---|
+| `CPU_TEMP_WARN` / `CPU_TEMP_FAIL` | 95 / 100 | `core.sh` | CPU 峰值温度告警 / 故障线（°C） |
+| `GPU_TEMP_WARN` / `GPU_TEMP_FAIL` | 83 / 90 | `core.sh` | 显卡峰值温度，逐卡判 |
+| `DISK_TEMP_WARN` / `DISK_TEMP_FAIL` | 70 / 80 | `core.sh` | 硬盘测后温度，逐盘判 |
+| `MEM_TEST_PERCENT` | 100 | `stress.sh` | 在算好的可用量之上再打个折。**不是"总内存的百分比"**，算法见上一节 |
+| `NET_CARRIER_WAIT` | 8 | `network.sh` | 拉起链路后等载波的秒数（PHY 协商要时间） |
+| `NET_DHCP_TIMEOUT` | 20 | `network.sh` | 单口 DHCP 超时 |
+| `NET_PING_COUNT` | 4 | `network.sh` | 每个口 ping 网关的次数 |
+| `NET_TIME_SYNC_TIMEOUT` | 12 | `network.sh` | 单次校时尝试的超时（chronyd 一次性模式） |
+| `NET_TIME_SERVERS` | 阿里 / cn.pool / cloudflare | `network.sh` | 校时候选源，**数组**：`NET_TIME_SERVERS=(ntp.内网.lan)` |
+| `MEGARAID_SCAN_MAX` | 32 | `collect.sh` | 阵列卡物理盘有界试探的设备号上限 |
+| `MEGARAID_SCAN_MISS` | 12 | `collect.sh` | 连续失败多少次收工。**别定小**：设备号从 8 开始是很常见的排法，定成 4 就永远扫不到 |
+
+> `NET_TIME_SERVERS` 是数组，没有 `: "${arr:=默认}"` 这种写法，所以 `network.sh` 里
+> 是用 `declare -p` 判"定义过没有"来兜的。**新增数组型可覆盖项时照这个写**，
+> 裸赋值会把现场的覆盖原样顶掉，而且不会有任何报错。
+
+只有阈值那六项会进 `meta.json` 和报告 —— 其余是采集行为参数，不参与判定。
 
 > CPU 那两档 0.6.0 起从 88/98 放宽到 95/100：服务器 CPU 满载跑到 80 多度是常态，
 > 88 告警太灵敏，现场每台机器都刷黄。Intel 服务器 CPU 的 Tjmax 一般在 100~105 °C，
@@ -605,6 +641,12 @@ check_fans() {
 1. **绝不用 `grep -q '关键字'` 判压测日志。** `stressapptest`/`stress-ng`/`gpu_burn`
    正常跑完的日志里本来就带 `Found 0 hardware incidents`、`errors: 0`、`failed: 0`。
    早期版本这么写，结果是**每一台好机器都被判 FAIL**。一律把数字抠出来做数值比较。
+
+   **这条也管 JSON。** 整机结论（`factory-test.sh` 里那个 PASS/FAIL 大字）曾经是
+   `grep -q '"status":"FAIL"' results.jsonl` 判的 —— 能用纯粹因为 `jq -cn` 的紧凑
+   输出恰好没有空格，格式一变就永远匹配不上，不会有任何报错，表现是**每台机器
+   都显示绿色 PASS**。1.3.0 改成 `jq` 解析，和报告生成器走同一条路。
+   判错方向是把坏机器放出厂，比误伤好机器更糟。
 2. **多卡 gpu_burn 的错误数写在同一行、用 ` - ` 分隔**（`errors: 0 - 14`），
    要取 `errors:` 到 `temps:` 之间的**全部**数字求和，只匹配第一个会漏掉后面几张卡。
 3. **退出码 137（OOM）必须排在"异常退出"判定之前**，并且判 WARN 不判 FAIL。
@@ -682,8 +724,9 @@ check_fans() {
 
 | 测试 | 锁住什么 | 改了谁就要跑 |
 |---|---|---|
+| `lint.sh` | shellcheck 静态检查。build/（开了 `set -Eeuo pipefail`、以 root 跑）和 rootfs+tests（不开 `-e`）两套豁免规则，**豁免类数本身也有断言守着**。没装 shellcheck 就跳过 | 任何 `.sh` |
 | `test-log-parsing.sh` | 压测日志判读、OOM 不判故障、**显卡驱动不匹配不判成坏卡** | `lib/stress.sh`、`lib/gpu.sh` |
-| `test-hw-checks.sh` | 内存核对、电源判定、网卡判读、阵列卡 BMC 交叉核对、硬盘温度、PCIe 链路、开机内核日志、dm 设备枚举、**客户文案不许有内部用语**、**计数不能算出 `0\n0`**、**汇总入口调用链不能少人** | `lib/collect.sh`、`lib/network.sh`、`lib/verify.sh`、`lib/core.sh`、`lib/storage.sh` |
+| `test-hw-checks.sh` | 内存核对、电源判定、网卡判读、阵列卡 BMC 交叉核对、硬盘温度、PCIe 链路、开机内核日志、dm 设备枚举、**客户文案不许有内部用语**、**计数不能算出 `0\n0`**、**汇总入口调用链不能少人**、**整机结论必须解析 JSON 而不是匹配文本** | `lib/collect.sh`、`lib/network.sh`、`lib/verify.sh`、`lib/core.sh`、`lib/storage.sh`、`factory-test.sh` |
 | `test-report-render.sh` | 客户报告渲染：不泄露通电时间/git hash/内部用语、`Unknown!` 归一化、二级编号不跳号、空 run-dir 不崩 | `report/generate_report.py` |
 | `test-internal-report.sh` | 内部报告**必须**含通电时间/commit/内部工具名；内部评估要抓得住温差/混插/磨损/不匹配/链路降级；**内部评估不改变整机结论**；老 run-dir 不崩 | `report/generate_internal.py` |
 | `test-capture.sh` | 采集超时不把 bash 的 `Killed` 漏到屏幕上，且要留下 TIMEOUT 记录 | `lib/core.sh` |
