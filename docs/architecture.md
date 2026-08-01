@@ -528,6 +528,60 @@ Ubuntu 24.04.4 的 live server ISO 有 5 层 squashfs（下面是压缩后体积
 `unsquashfs -f` 直接往上叠（层里带硬链接时目标已存在会 FATAL），
 所以是"解到独立目录 → 处理 overlayfs 删除标记 → rsync 覆盖合并"。
 
+### 网卡固件：live-server 镜像把它剪光了
+
+Ubuntu 的 live-server 镜像里 `linux-firmware` 在 dpkg 眼里是
+"install ok installed"，**文件却被剪掉了**（连 `.list` 都删了，看包管理器
+完全看不出来）：磁盘上只剩 `amd` / `amd-ucode` / `intel-ucode` / `regulatory.db`。
+
+危害不是"少个功能"，是**报告说谎**。`bnx2x`（Broadcom 10G，Dell R6x0 /
+HP Gen8-9 上到处都是）必须先加载固件才能起来；固件不在 → 驱动起不来 →
+`ip link` 里一个物理口都看不到 → `collect_nic` 判 WARN「无物理口」。
+一台有 4 个网口的机器，报告上写着它没网卡 —— 而且全程零报错，
+只在 `dmesg` 里留一行 `Direct firmware load ... failed`。
+
+所以 `chroot-setup.sh` 会 `--reinstall linux-firmware` 装回来，
+再按 `config.sh` 的 `FIRMWARE_PRUNE` 剪掉服务器用不到的（616MB → 92MB）。
+
+⚠️ **`FIRMWARE_PRUNE` 是黑名单，必须一直是黑名单。** 漏一条只是多占地方；
+换成白名单，漏一条就是"某张网卡的驱动起不来"。
+验收在 `tests/check-firmware.sh`：拿 `modinfo -F firmware` 问驱动自己要什么，
+剪多了那边当场跑红。
+
+⚠️ 剪 `nvidia/` 那条写的是 `nvidia/[a-z]*`。linux-firmware 的 nouveau GSP 固件
+按芯片代号分目录（`ad102` / `ga100` / `gb202`…），而 NVIDIA 驱动自己铺的那份在
+`nvidia/595.84/`（数字开头）。写成 `nvidia` 会把后者一起删掉，
+而 open 内核模块**没有 GSP 固件就起不来** —— 表现是开机 `nvidia.ko` 加载失败，
+被 `gpu.sh` 判 FAIL「驱动加载失败」，好卡判成坏卡。
+`chroot-setup.sh` 里有断言把这件事钉在构建期。
+
+### 盘里只能有一个内核
+
+`casper/vmlinuz` 引导哪个内核，`/lib/modules` 下就只该有哪个。
+
+多出来的那套是这么进来的：装 NVIDIA 要 `dkms`，`dkms` 的 Recommends 指向
+`linux-headers-generic` 这个**元包**，元包跟着 archive 里最新的 ABI 走，
+于是 `linux-image-generic` → 一整套新内核（模块 155MB + `/usr/src` 头文件 157MB）
+跟着进盘，而它一行代码都不会被执行。
+
+内核版本**不靠 `ls /lib/modules | head -1` 猜**（那是按字典序取第一个，
+而这时候盘里常常有两个）。`build-iso.sh` 用 `bzimage_kver()` 从
+`casper/vmlinuz` 的 bzImage 头里读出真正会被引导的版本，传进 chroot。
+猜错的两种后果都长得像硬件故障：
+
+- 给不会被引导的那个内核编 NVIDIA 模块 → 开机 `nvidia.ko` 加载失败 → 判「显卡故障」
+- 把该留的那套模块当多余的删掉 → 开机认不到任何硬盘
+
+两条硬断言：`chroot-setup.sh` 里清理完必须只剩 `$KVER`；
+`build-iso.sh` 出了 chroot 再验一次，**而且要和 `casper/vmlinuz` 对版本** ——
+只数数量分不出"清掉多余的"和"清掉该留的"。
+
+⚠️ 清理那步会 `apt-get purge` 元包 + `autoremove`，而 **autoremove 的射程比
+想象中远**：第一次跑就顺手带走了 `amd64-microcode`（它是 `linux-image-generic`
+的 Recommends）。所以微码和 `thermald` 现在显式列在 `PKGS_PLATFORM` 里
+（= 手动安装标记 = autoremove 不碰），
+并且「关键工具点名」在清理之后**再跑一遍**。
+
 ### vendor/ 离线包
 
 `vendor/` 不进版本库（体积大、有授权限制），构建脚本自动检测：
@@ -744,6 +798,7 @@ check_fans() {
 | 测试 | 锁住什么 | 什么时候跑 |
 |---|---|---|
 | `e2e-qemu.sh` | **把出好的 ISO 在 QEMU 里真的启动一次**：能不能引导、数据分区认不认得出、报告有没有真的落到"U 盘"上、盘里跑的是不是这次构建的代码。**需要 root**（losetup / 挂 exFAT / KVM） | 出盘之后、发货之前 |
+| `check-firmware.sh` | **盘里关键驱动要的固件一个都不能少**：拿 `modinfo -F firmware` 问驱动自己要什么，再逐个去 `<rootfs>/lib/firmware` 下找。顺带复核"有且只有一个内核"和 CPU 微码在不在 | 构建之后（它查的是构建工作区里的 rootfs） |
 | `mutate.sh` | 把已修好的 bug 逐个塞回代码，确认对应的用例真的会跑红。**逃掉 = 那条守卫是摆设** | 改了任何判定逻辑或守卫之后 |
 
 ```bash
@@ -751,9 +806,21 @@ sudo ./tests/e2e-qemu.sh                          # BIOS 冒烟，约 3 分钟
 sudo ./tests/e2e-qemu.sh --firmware uefi          # UEFI（OVMF + q35）
 sudo ./tests/e2e-qemu.sh --no-data-partition      # U 盘上没有可用 exFAT 分区
 sudo ./tests/e2e-qemu.sh --stage full             # 完整跑一遍 QUICK 档，约 20 分钟
+./tests/check-firmware.sh                         # 固件对账，几秒
 ./tests/mutate.sh                                 # 全部变异，约 3~5 分钟
 ./tests/mutate.sh --list                          # 看有哪些变异、各由谁守
 ```
+
+`check-firmware.sh` 之所以不能进 `run-all.sh`：它要一个**已经构建出来的 rootfs**
+（默认 `${KLBURN_WORK:-$HOME}/klburn-build/rootfs`，也可以 `--rootfs` 指定），
+没构建过就无从查起 —— 定位和 `e2e-qemu.sh` 一样。
+没有 rootfs 时它判 0 项跳过，不判失败。
+
+> 它守的东西没有别的测试能替：live-server 镜像把 `linux-firmware` 的文件剪光了，
+> 而 `bnx2x` 这类驱动**必须先加载固件才能起来**。固件不在 → 驱动起不来 →
+> `ip link` 里一个物理口都看不到 → `collect_nic` 判 WARN「无物理口」。
+> **一台有 4 个网口的机器，报告上写着它没网卡**，全程零报错。
+> 这种"少一整块硬件"的失效，单元测试和 QEMU 都造不出来。
 
 **BIOS 和 UEFI 两条都要跑。** ISO 是双引导的，但两条走的引导链完全不同
 （SeaBIOS + isohybrid MBR vs OVMF + ESP 里的 grub），只验一条等于只验了一半 ——

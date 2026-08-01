@@ -11,7 +11,7 @@
 # ⚠️ 改完脚本要「先 bump 再构建」。0.3.0 就栽过一次：ISO 构建完之后又改了
 # core.sh/collect.sh 却没动版本号，于是现场那根盘自称 0.3.0、跑的却是修复前的
 # 代码（lshw 卡满 90s、屏幕上冒 Killed），对着仓库怎么看都对不上。
-KLBURN_VERSION="1.4.2"
+KLBURN_VERSION="1.5.0"
 
 # ================================================================
 # 品牌抬头
@@ -129,6 +129,53 @@ LAYER_EXCLUDE_PATTERNS=(
 SQUASHFS_COMP="zstd"
 SQUASHFS_LEVEL="19"
 
+# ---------- 固件剪裁 ----------
+# live-server 镜像把 linux-firmware 的文件剪光了（dpkg 说装了 611MB，磁盘上只剩
+# 118MB / 140 个文件），chroot-setup.sh 会 `--reinstall linux-firmware` 装回来。
+# 装回来是 616MB，整包带上去太亏，所以按这张表剪。
+#
+# **这是黑名单不是白名单**，而且必须一直是黑名单：漏掉一条只是多占点地方，
+# 而白名单漏掉一条就是"某张网卡的驱动起不来 -> 报告上说这台机器没网卡"。
+# 每一条都写清楚为什么服务器上用不到；拿不准的一律留着。
+#
+# 剪完的验收在 tests/check-firmware.sh：它拿 modinfo 问驱动自己要什么固件，
+# 再逐个去盘里找。剪多了那边会当场跑红。
+#
+# 路径相对 /lib/firmware，支持 glob。
+FIRMWARE_PRUNE=(
+  # --- 显卡：我们只跑 NVIDIA，而 NVIDIA 的固件是驱动自己带的 ---
+  'nvidia/[a-z]*'   # 107MB，nouveau 用的 GSP 固件，按芯片代号分目录（ad102/ga100/gb202…）。
+                    # 内核参数里 nouveau 是 blacklist 的，这些一个都用不上。
+                    # ⚠️ 写成 `nvidia` 会把 NVIDIA 驱动自己铺的 nvidia/595.84/ 一起删掉 ——
+                    #    那是 open 内核模块必须的 GSP 固件，删了 nvidia.ko 直接加载失败，
+                    #    然后被判成"显卡故障"。用 [a-z] 开头卡死：驱动那份是版本号，数字开头。
+  'amdgpu'          # 28MB
+  'radeon' 'xe'     # 老 AMD 卡 / Intel Arc，服务器上没有
+  # --- 无线 / 蓝牙：服务器没有，也不参与任何判定 ---
+  'mrvl'            # 79MB，Marvell wifi/蓝牙
+  'qcom'            # 61MB，高通 SoC
+  'ath10k' 'ath11k' 'ath12k' 'ath' 'ath6k' 'ath9k_htc' 'ar3k' 'qca'
+  'mediatek' 'brcm' 'cypress' 'libertas' 'rsi' 'rtlwifi' 'rtw88' 'rtw89'
+  'rtl_bt' 'ti-connectivity' 'wfx' 'cw1200' 'ueagle-atm'
+  'iwlwifi-*'       # ~150MB，Intel 无线网卡固件，散在顶层
+  'iwlmvm*' 'iwlax*'
+  # --- 嵌入式 SoC / 手机平台 ---
+  'dpaa2'           # NXP LS 系列 SoC
+  # --- 声卡 ---
+  'cirrus' 'asihpi'
+  # --- 交换机 ASIC ---
+  'mellanox'        # 79MB，全是 mlxsw_spectrum-*.mfa2 和 lc_ini_bundle_*，
+                    # 那是 Mellanox **交换机**芯片跑 Linux 时刷的固件，被测服务器上没有。
+                    # 迈络思**网卡**（mlx5_core/mlx4_core）固件烧在卡上 flash 里，
+                    # modinfo 报 0 个固件依赖 —— check-firmware.sh 每次构建都复核这一条，
+                    # 哪天它开始要固件了，那边会当场跑红。
+)
+# ⚠️ 有几个名字长得像该剪、其实**必须留**，别手滑：
+#   rtl_nic      Realtek r8169 有线网卡固件（rtl_bt 才是蓝牙）
+#   intel        里面有 intel/ice/ddp/ice.pkg —— E810 缺它会降级进 safe mode
+#   i915         Xeon 一般没核显，但边缘机型有；缺固件顶多丢电源管理，
+#                留着 9.7MB 换"屏幕一定点得亮"
+
 # ---------- 预装软件包 ----------
 # 采集类
 PKGS_COLLECT=(
@@ -151,6 +198,23 @@ PKGS_STRESS=(
 # 报告落盘 / 杂项
 PKGS_MISC=(
   exfatprogs dosfstools ntfs-3g xz-utils zstd pciutils
+)
+# CPU 微码 / 平台守护进程
+#
+# 这几个本来是 `linux-image-generic` 的 Recommends，带的是**自动安装**标记。
+# chroot-setup.sh 会 purge 掉那个元包（它是多余内核的来源），紧接着的
+# autoremove 就把它们一起带走了 —— 1.5.0 第一次构建就这么把 amd64-microcode
+# 弄丢了，是 tests/check-firmware.sh 那条微码断言逮住的。
+# 显式列在这里 = 手动安装标记 = autoremove 不会碰。
+#
+#   amd64-microcode / intel-microcode
+#       CPU 微码。缺了的话，本该被微码修掉的勘误会在压测里冒出来，
+#       然后被记成"这台机器不稳定"—— 又是一次把好机器拦在出货前。
+#   thermald
+#       1.4.2 及以前的盘里一直有它。它在服务器上到底管不管用是另一回事，
+#       但"同一台机器换张盘测出来的温度/性能不一样"这种变化不能悄悄发生。
+PKGS_PLATFORM=(
+  amd64-microcode intel-microcode thermald
 )
 
 # 编译 NVIDIA 内核模块需要的包（INCLUDE_NVIDIA=1 时才装，装完就删）

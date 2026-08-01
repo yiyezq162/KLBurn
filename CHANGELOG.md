@@ -22,6 +22,109 @@ git tag -l --sort=version:refname
 
 ---
 
+## 1.5.0
+
+- **装回 linux-firmware —— 之前有 8 类网卡/HBA 的驱动在盘里根本起不来。**
+  Ubuntu 的 live-server 镜像把 `linux-firmware` 的**文件**剪光了（dpkg 里它还是
+  "install ok installed"，连 `.list` 都删了，看包管理器完全看不出来），
+  磁盘上只剩 118MB，其中 99MB 还是 NVIDIA 驱动自己铺的 GSP 固件。
+
+  拿 `modinfo -F firmware` 对着盘里的驱动逐个点账，结果是**需要 35 个固件，
+  一个都没有**：
+
+  | 驱动 | 缺 | 是什么 |
+  |---|---|---|
+  | `bnx2x` | 6 | Broadcom 10G，Dell R6x0 / HP Gen8-9 上到处都是 |
+  | `nfp` | 11 | Netronome Agilio |
+  | `qla2xxx` | 6 | QLogic FC HBA |
+  | `tg3` | 4 | Broadcom 1G（板载最常见） |
+  | `cxgb4` | 3 | Chelsio T4/T5/T6 |
+  | `bfa` | 3 | Brocade FC HBA |
+  | `ice` | 1 | Intel E810 25/100G，缺 DDP 包会降级进 safe mode |
+  | `qed` | 1 | Marvell FastLinQ |
+
+  > 危害不是"少个功能"，是**报告说谎**。`bnx2x` 必须先加载固件才能起来；
+  > 固件不在 → 驱动起不来 → `ip link` 里一个物理口都看不到 →
+  > `collect_nic` 判 WARN「无物理口」。
+  > **一台有 4 个网口的机器，报告上写着它没网卡。**
+  > 而且全程没有任何报错，只在 dmesg 里留一行 `Direct firmware load ... failed`。
+
+  现在 `chroot-setup.sh` 里 `--reinstall linux-firmware` 装回来，
+  再按 `config.sh` 的 `FIRMWARE_PRUNE` 剪掉服务器用不到的。
+  **那是黑名单不是白名单** —— 漏一条只是多占地方，白名单漏一条就是少一块网卡。
+
+  | | 体积 | 文件数 |
+  |---|---|---|
+  | 装回来（完整包） | 616 MB | 5927 |
+  | 剪掉 | −524 MB | −4627 |
+  | 剩下 | **92 MB** | 1300 |
+
+  剪掉的大头：`nvidia/`（nouveau GSP，107MB，我们 blacklist 了 nouveau）、
+  `mrvl`（79MB）、`mellanox`（79MB，全是 mlxsw **交换机**芯片固件）、
+  `iwlwifi-*`（78MB）、`qcom`（61MB）、`amdgpu`（28MB）、
+  ath/mediatek/brcm 等无线（约 50MB）。
+  `intel/`（含 `intel/ice/ddp/ice.pkg`）、`i915`、`rtl_nic` 都留着。
+
+- **清掉那套从来不会被执行的多余内核。** 盘里一直有两套：
+  `6.8.0-100-generic`（`casper/vmlinuz` 真正引导的）和 `6.8.0-136-generic`。
+  来路是装 NVIDIA 要 `dkms`，`dkms` 的 Recommends 指向 `linux-headers-generic`
+  这个**元包**，元包跟着 archive 里最新的 ABI 走，于是
+  `linux-image-generic` → 一整套新内核跟着进盘。
+  省下 **155MB 模块 + 157MB `/usr/src` 头文件**。
+
+- **内核版本不再靠 `ls /lib/modules | head -1` 猜。** 那是按字典序取第一个，
+  而 chroot 里此刻常常有两个内核。现在由 `build-iso.sh` 从 `casper/vmlinuz`
+  的 bzImage 头里读出真正会被引导的版本（`bzimage_kver()`），传进 chroot。
+
+  > 猜错的两种后果都很难查，而且**都长得像硬件故障**：给不会被引导的那个内核
+  > 编 NVIDIA 模块 → 开机 `nvidia.ko` 加载失败 → 判「显卡故障」；
+  > 把该留的那套模块当多余的删掉 → 开机认不到任何硬盘。
+
+- **两条新的构建期硬断言**（和已有的「合并后必须有 `/lib/modules`」并列）：
+  - `rootfs` 里有且只有一套内核模块，且版本 == `casper/vmlinuz` ——
+    只数数量分不出"清掉多余的"和"清掉该留的"，所以必须对版本。
+  - 带显卡驱动时 `/lib/firmware/nvidia/<版本号>/` 必须非空 ——
+    open 内核模块没有 GSP 固件起不来。固件剪裁那条写的是 `nvidia/[a-z]*`
+    正是为了绕开这个数字开头的目录，这条断言把"有人改回 `nvidia`"钉死在构建期。
+
+- **新增 [`tests/check-firmware.sh`](tests/check-firmware.sh)**：拿 `modinfo` 问
+  驱动自己要哪些固件，再逐个去盘里找。25 个关键驱动（以太网 / FC HBA / 阵列卡），
+  缺一个就红。**不需要固件的驱动故意留在表里** —— 哪天内核升级后它开始要固件了，
+  这里会当场跑红，而不是等到现场发现少了一块网卡。
+  它要一个已构建的 rootfs，所以和 `e2e-qemu.sh` 一样**不在** `run-all.sh` 里。
+
+- **`amd64-microcode` / `intel-microcode` / `thermald` 改成显式安装**
+  （`config.sh` 的 `PKGS_PLATFORM`）。它们本来是 `linux-image-generic` 的
+  Recommends、带自动安装标记；purge 掉那个元包之后，紧跟着的 `autoremove`
+  把它们一起收走了 —— **1.5.0 第一次构建就真的把 CPU 微码弄丢了**，
+  是上面那条新测试的微码断言逮住的。
+
+  > 顺带补了一条：`chroot-setup.sh` 的「关键工具点名」原来只在装完包时跑一次，
+  > 现在**清理内核之后再跑一遍**。"装上了、后来又被 autoremove 收走"这条路
+  > 以前完全没人看着。
+
+  `autoremove` 同时带走的还有 `bpfcc-tools` / `bpftrace` / `libllvm18` /
+  `libclang-cpp18` / `upower` / `usbmuxd` 等一串（`ubuntu-kernel-accessories`
+  那棵树）。这些 KLBurn 一个都不用，留着只是占地方，就不再装回来了；
+  包数 814 → 788。
+
+- **体积**（同一份源码、同样的 zstd-19）：
+
+  | | 1.4.2 | 1.5.0 |
+  |---|---|---|
+  | ISO | 1,514,956,800 B | **1,314,162,688 B**（−191.5 MiB，−13.3%）|
+  | rootfs（未压缩） | 3.7 GB | 3.2 GB |
+  | `/lib/firmware` | 118 MB / 140 个文件 | 212 MB / 1446 个文件 |
+
+  固件那一栏两边都含 NVIDIA 驱动自带的 99MB GSP —— 真正的 linux-firmware
+  内容是 19MB → 113MB。清内核省下的比装固件涨的多得多，所以盘整体是小了的。
+
+- **新增 `collect_disk` 的单元测试**（`test-hw-checks.sh`，13 条）。
+  21 个判定 id 里它是唯一一个单元测试碰不到的，一直只有 QEMU 里那台虚拟机在跑，
+  而虚拟机永远只走"普通盘"那一条分支。现在三条分支都有断言，
+  其中最要紧的是**没装硬盘时判 WARN 不判 FAIL**，
+  并在 `mutate.sh` 里加了对应变异（`disk-none-fail`）。
+
 ## 1.4.2
 
 - **裸盘排除表的理由分开写。** 原来 `loop*|ram*|zram*|sr*|fd*|dm-*|md*` 共用

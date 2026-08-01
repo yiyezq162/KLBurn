@@ -130,3 +130,30 @@ human() {
   local b="$1"
   numfmt --to=iec --suffix=B "$b" 2>/dev/null || echo "${b}B"
 }
+
+# bzimage_kver <vmlinuz> -> "6.8.0-100-generic"
+#
+# 从 bzImage 头部直接读版本串，不靠 `ls /lib/modules | head -1` 猜。
+# x86 boot protocol：0x20E 处是一个 16 位小端偏移，加上 0x200 就是版本串的位置，
+# 串以 NUL 结尾、第一个空格前是版本号（后面跟编译者和时间）。`file(1)` 认这个
+# 内核也是这么认的，这里自己算是为了不多依赖一个命令。
+#
+# 为什么值得较真：这个值决定"留哪套内核模块、给哪个内核编 NVIDIA 模块"。
+# 搞反的表现是开机认不到任何硬盘、或者显卡模块加载失败，
+# 而这两样在报告里都长得像硬件故障。
+bzimage_kver() {
+  local img="$1" off ver=""
+  [[ -f "$img" ]] || return 1
+  off="$(od -An -tu2 -j 526 -N 2 -- "$img" 2>/dev/null | tr -cd '0-9')"
+  if [[ "$off" =~ ^[0-9]+$ ]] && (( off > 0 )); then
+    ver="$(dd if="$img" bs=1 skip="$(( off + 512 ))" count=256 status=none 2>/dev/null \
+           | LC_ALL=C tr '\000' '\n' | head -1 || true)"
+    ver="${ver%%[[:space:]]*}"
+  fi
+  # 退回 file(1)：万一哪天头部布局变了，至少还有一条路
+  if [[ ! "$ver" =~ ^[0-9]+\.[0-9]+ ]]; then
+    ver="$(file -b -- "$img" 2>/dev/null | sed -n 's/.*version \([^ ]*\).*/\1/p' || true)"
+  fi
+  [[ "$ver" =~ ^[0-9]+\.[0-9]+ ]] || return 1
+  printf '%s' "$ver"
+}

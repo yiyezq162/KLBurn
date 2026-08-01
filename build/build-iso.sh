@@ -156,6 +156,13 @@ fi
 
 [[ -d "$ISO_DIR/casper" ]] || die "$ISO_DIR/casper 不存在，这不像 Ubuntu live ISO"
 
+# 盘上真正会被引导的内核版本。后面 chroot 定制、清理多余内核、自检全靠它对齐。
+ISO_KVER="$(bzimage_kver "$ISO_DIR/casper/vmlinuz" || true)"
+[[ -n "$ISO_KVER" ]] \
+  || die "读不出 casper/vmlinuz 的内核版本。没有它就只能靠猜哪套模块该留，
+     而猜错的表现是开机认不到任何硬盘 —— 宁可在这里停下。"
+log "引导内核: $ISO_KVER"
+
 # 记录原始卷标，重打包时原样保留（避免 UEFI grub 找不到介质）
 ISO_LABEL="$(xorriso -indev "$SRC_ISO" -pvd_info 2>/dev/null \
              | sed -n 's/^Volume Id *: *//p' | head -1)"
@@ -252,8 +259,17 @@ fi
 
 # 内核模块自检：Ubuntu 把内核放在 installer.generic 层，一旦层选错就会全丢
 if (( NEED_MODULES )); then
-  KMOD_DIR="$(find "$ROOTFS_DIR/usr/lib/modules" "$ROOTFS_DIR/lib/modules" \
-              -maxdepth 1 -mindepth 1 -type d 2>/dev/null | head -1)"
+  # 增量构建复用上一轮的 rootfs，那里面可能不止一套内核，所以**先按 ISO_KVER 找**，
+  # 找不到才退回"随便挑一个"。挑错的话下面那几条 ✓ 查的是不会被引导的那套模块，
+  # 看着全绿、其实什么都没验。
+  KMOD_DIR=""
+  for cand in "$ROOTFS_DIR/usr/lib/modules/$ISO_KVER" "$ROOTFS_DIR/lib/modules/$ISO_KVER"; do
+    [[ -d "$cand" ]] && { KMOD_DIR="$cand"; break; }
+  done
+  if [[ -z "$KMOD_DIR" ]]; then
+    KMOD_DIR="$(find "$ROOTFS_DIR/usr/lib/modules" "$ROOTFS_DIR/lib/modules" \
+                -maxdepth 1 -mindepth 1 -type d 2>/dev/null | head -1)"
+  fi
   [[ -n "$KMOD_DIR" ]] || die "合并后的根文件系统里没有 /lib/modules —— 层选错了。
      检查 config.sh 的 LAYER_EXCLUDE_PATTERNS，内核在 *.installer.generic.squashfs 层里。"
   KVER_FOUND="$(basename "$KMOD_DIR")"
@@ -311,6 +327,9 @@ GIT_COMMIT="${GIT_COMMIT}${GIT_DIRTY}"
 # chroot 里没有 vendor/ 目录，自动检测得不出正确答案，这里钉死外面算好的结论
 INCLUDE_NVIDIA="${INCLUDE_NVIDIA}"
 NVIDIA_VERSION="${NVIDIA_VERSION}"
+# casper/vmlinuz 的内核版本。chroot 里看不到 ISO 目录树，只能从外面传进去；
+# 里面**不许**再用 \`ls /lib/modules | head -1\` 猜（那时候常常有两套内核）。
+ISO_KVER="${ISO_KVER}"
 EOF
 
 # rootfs 覆盖层（去 CRLF 后再拷）
@@ -335,6 +354,36 @@ chroot_umount "$ROOTFS_DIR"
 
 rm -rf "$STAGE"
 log "chroot 定制完成"
+
+# ---------------------------------------------------------------- 内核唯一性自检
+# 和上面"合并后必须有 /lib/modules"那条并列，但守的是另一头：
+# 那条防"一个内核都没有"，这条防"有两个、而且可能留错了那个"。
+#
+# 装 NVIDIA 要 dkms，dkms 的 Recommends 会把 linux-headers-generic 这个元包
+# 拖进来，元包又跟着 archive 里最新的 ABI 走，于是盘里悄悄多出一整套
+# 从来不会被执行的内核（模块 155MB + 头文件 157MB）。
+# chroot-setup.sh 已经清过一遍，这里复核 —— **而且要和 casper/vmlinuz 对版本**，
+# 因为"清掉多余的"和"清掉该留的"这两件事，只看数量是分不出来的。
+#
+# 留错的表现：开机认不到任何硬盘，或者 nvidia.ko 加载失败。
+# 两样在报告里都长得像硬件故障，一台好机器会被拦在出货前。
+# 24.04 是 usrmerge 的（/lib -> usr/lib），两个路径指的是同一个目录。
+# 只挑其中**一个**去数，两个都给 find 会把同一套内核数成两套。
+MODULES_ROOT="$ROOTFS_DIR/usr/lib/modules"
+[[ -d "$MODULES_ROOT" ]] || MODULES_ROOT="$ROOTFS_DIR/lib/modules"
+mapfile -t ROOTFS_KVERS < <(
+  find "$MODULES_ROOT" -mindepth 1 -maxdepth 1 -type d -printf '%f\n' 2>/dev/null | sort
+)
+if (( ${#ROOTFS_KVERS[@]} != 1 )); then
+  die "rootfs 里有 ${#ROOTFS_KVERS[@]} 套内核模块（应该只有 1 套）: ${ROOTFS_KVERS[*]:-空}
+     多出来的那套一行代码都不会被执行，只是占地方；而万一留错了那个，
+     做出来的盘开机会认不到任何硬盘。检查 chroot-setup.sh 的「清理多余内核」。"
+fi
+if [[ "${ROOTFS_KVERS[0]}" != "$ISO_KVER" ]]; then
+  die "rootfs 里的内核模块是 ${ROOTFS_KVERS[0]}，而 casper/vmlinuz 是 $ISO_KVER —— 对不上。
+     做出来的盘开机后一个模块都加载不了（认不到硬盘、认不到网卡）。"
+fi
+log "内核唯一性自检通过: ${ROOTFS_KVERS[0]}（与 casper/vmlinuz 一致）"
 
 # ================================================================ 5. 打包 squashfs
 step "5/9 打包 squashfs（$SQUASHFS_COMP -$SQUASHFS_LEVEL，耗时几分钟）"

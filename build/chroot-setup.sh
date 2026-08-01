@@ -38,7 +38,8 @@ say "apt-get update"
 apt-get update -qq || fail "apt update 失败（检查 WSL 网络 / 镜像地址）"
 
 # ---------------------------------------------------------------- 装包
-PKGS=( "${PKGS_COLLECT[@]}" "${PKGS_NET[@]}" "${PKGS_STRESS[@]}" "${PKGS_MISC[@]}" )
+PKGS=( "${PKGS_COLLECT[@]}" "${PKGS_NET[@]}" "${PKGS_STRESS[@]}" "${PKGS_MISC[@]}"
+       "${PKGS_PLATFORM[@]}" )
 if [[ "${INCLUDE_NVIDIA:-0}" == "1" ]]; then
   PKGS+=( "${PKGS_NVIDIA_BUILD[@]}" )
 fi
@@ -47,26 +48,83 @@ say "安装 ${#PKGS[@]} 个包..."
 apt-get install -y -qq --no-install-recommends "${PKGS[@]}" \
   || fail "装包失败"
 
-# 逐个确认关键工具真的到位了（apt 返回成功不代表命令存在）
-missing=()
-for entry in dmidecode lshw lspci nvme smartctl ipmitool ethtool jq python3 \
-             stress-ng stressapptest fio sysbench dhclient ping ip chronyd; do
-  command -v "$entry" >/dev/null 2>&1 || missing+=("$entry")
-done
-if ((${#missing[@]})); then
-  fail "以下工具装完仍不存在: ${missing[*]}"
-fi
-say "关键工具检查通过"
+# 逐个确认关键工具真的到位了（apt 返回成功不代表命令存在）。
+#
+# 这一段后面还要**再跑一遍**：清理多余内核那步会 purge 元包 + autoremove，
+# 而 autoremove 的射程比想象中远（第一次跑就顺手带走了 amd64-microcode）。
+# 只在装完时查一次的话，"装上了、后来又被 autoremove 收走"这条路完全没人看着。
+verify_tools() {
+  local when="$1" entry missing=()
+  for entry in dmidecode lshw lspci nvme smartctl ipmitool ethtool jq python3 \
+               stress-ng stressapptest fio sysbench dhclient ping ip chronyd; do
+    command -v "$entry" >/dev/null 2>&1 || missing+=("$entry")
+  done
+  if ((${#missing[@]})); then
+    fail "$when：以下工具不存在: ${missing[*]}"
+  fi
+  say "关键工具检查通过（$when）"
+}
+verify_tools "装包后"
+
+# ---------------------------------------------------------------- 目标内核
+# 盘上真正会被引导的是 casper/vmlinuz 里那个内核。版本由 build-iso.sh 从 bzImage
+# 头部读出来、追加进暂存的 config.sh 传进来。
+#
+# **绝不能在这里用 `ls -1 /lib/modules | head -1` 猜。** 那是按字典序取第一个，
+# 而 chroot 里此刻常常有两个内核（装 dkms 会连带把 linux-image-generic 元包
+# 指向的那套新内核拉进来）。猜错的两种后果都很难查：
+#   - 给不会被引导的那个内核编 NVIDIA 模块 -> 开机 nvidia.ko 加载失败 -> 判"显卡故障"
+#   - 把要用的那套模块当多余的删掉         -> 开机认不到任何硬盘 -> 判"硬盘故障"
+# 两样都会被记成硬件问题，而机器其实是好的。
+KVER="${ISO_KVER:-}"
+[[ -n "$KVER" ]] \
+  || fail "ISO_KVER 没传进来。build-iso.sh 要在暂存的 config.sh 末尾追加它。"
+[[ -d "/lib/modules/$KVER" ]] \
+  || fail "ISO_KVER=$KVER 在 /lib/modules 下不存在，现有: $(ls -1 /lib/modules | tr '\n' ' ')"
+say "目标内核（casper/vmlinuz 引导的那个）: $KVER"
 
 # exfat 内核模块必须在（报告要写进 U 盘的 exFAT 分区）
-KVER="$(ls -1 /lib/modules | head -1)"
-if [[ -n "$KVER" ]]; then
-  if find "/lib/modules/$KVER" -name 'exfat.ko*' | grep -q .; then
-    say "exfat 内核模块 OK ($KVER)"
-  else
-    say "WARN: 没找到 exfat.ko，报告可能无法写入 U 盘数据分区"
-  fi
+if find "/lib/modules/$KVER" -name 'exfat.ko*' | grep -q .; then
+  say "exfat 内核模块 OK ($KVER)"
+else
+  say "WARN: 没找到 exfat.ko，报告可能无法写入 U 盘数据分区"
 fi
+
+# ---------------------------------------------------------------- 网卡固件
+# Ubuntu 的 live-server 镜像把 linux-firmware 的**文件**剪掉了（dpkg 里它还是
+# "install ok installed"，连 .list 都被删了，所以看包管理器完全看不出来），
+# 磁盘上只剩 amd / amd-ucode / intel-ucode / regulatory.db 这么几样。
+#
+# 后果不是"少个功能"，是**报告说谎**：bnx2x（Broadcom 10G，Dell R6x0 / HP Gen8-9
+# 上到处都是）必须先加载固件才能起来，固件不在 -> 驱动起不来 -> `ip link` 里
+# 一个物理口都看不到 -> collect_nic 判 WARN「无物理口」。
+# 一台有 4 个网口的机器，报告上写着它没网卡。
+# 而且全程没有任何报错，只在 dmesg 里留一行 "Direct firmware load ... failed"。
+#
+# 同样受影响的还有 qla2xxx / bfa（FC HBA）、cxgb4、nfp、tg3，
+# 以及 ice（Intel E810，缺 DDP 包会降级进 safe mode）。
+say "=== 装回 linux-firmware ==="
+say "现状: $(du -sh /lib/firmware 2>/dev/null | cut -f1) / $(find /lib/firmware -type f 2>/dev/null | wc -l) 个文件"
+apt-get install -y -qq --reinstall linux-firmware || fail "装 linux-firmware 失败"
+say "装回后: $(du -sh /lib/firmware | cut -f1) / $(find /lib/firmware -type f -o -type l | wc -l) 个文件"
+
+# 整包 600MB 全带上太亏，按 config.sh 的 FIRMWARE_PRUNE 剪。
+# 那是**黑名单**（漏一条只是多占地方），不是白名单（漏一条就是少一块网卡）。
+say "剪裁前各顶层目录（KB）:"
+du -sk /lib/firmware/* 2>/dev/null | sort -rn | head -12 | sed 's/^/      /'
+fw_pruned=0
+for pat in "${FIRMWARE_PRUNE[@]}"; do
+  # 这是以 root 跑的 rm -rf，模式本身先卡一道：空串会展开成 /lib/firmware/，
+  # 绝对路径和 .. 能跑出这个目录。任何一条不对就停下，不要"尽力而为"。
+  [[ -n "$pat" && "$pat" != /* && "$pat" != *".."* ]] \
+    || fail "FIRMWARE_PRUNE 里有危险的模式: [$pat]"
+  while IFS= read -r p; do
+    [[ -n "$p" ]] || continue
+    rm -rf -- "$p"
+    fw_pruned=$(( fw_pruned + 1 ))
+  done < <(compgen -G "/lib/firmware/$pat" || true)
+done
+say "剪掉 $fw_pruned 项，剩 $(du -sh /lib/firmware | cut -f1) / $(find /lib/firmware -type f -o -type l | wc -l) 个文件"
 
 # ---------------------------------------------------------------- 瘦身 & 关掉碍事的服务
 say "移除 snapd / 关闭 cloud-init"
@@ -169,9 +227,13 @@ if [[ "${INCLUDE_NVIDIA:-0}" == "1" ]]; then
   RUNFILE="$(ls -1 "$STAGE"/vendor/nvidia/NVIDIA-Linux-x86_64-*.run 2>/dev/null | head -1 || true)"
   [[ -n "$RUNFILE" ]] || fail "INCLUDE_NVIDIA=1 但 vendor/nvidia/ 下没有 .run 文件"
 
-  KVER="$(ls -1 /lib/modules | head -1)"
   say "为内核 $KVER 安装 headers"
-  apt-get install -y -qq "linux-headers-${KVER}" || fail "装 linux-headers-${KVER} 失败"
+  # --no-install-recommends：dkms 的 Recommends 里有 linux-headers-generic 这个
+  # **元包**，它跟着 archive 里的最新 ABI 走，一装就把整套 6.8.0-136 内核
+  # （image + modules + modules-extra + headers，300MB 上下）拉进盘里。
+  # 下面的"清理多余内核"会兜底，但没必要先装进来再删。
+  apt-get install -y -qq --no-install-recommends "linux-headers-${KVER}" \
+    || fail "装 linux-headers-${KVER} 失败"
 
   say "静默安装 $(basename "$RUNFILE")"
   chmod +x "$RUNFILE"
@@ -190,6 +252,20 @@ if [[ "${INCLUDE_NVIDIA:-0}" == "1" ]]; then
 
   # 确认装出来的真是 open 模块：license 字段 open 是 "Dual MIT/GPL"，
   # proprietary 是 "NVIDIA"。装错了在 Blackwell 上就是全盘认不到卡。
+  # open 内核模块**必须**有 GSP 固件才能起来（Turing 及以后全部如此），
+  # 而这份固件是 .run 自己铺到 /lib/firmware/nvidia/<版本号>/ 的、不归 dpkg 管。
+  # 上面剪固件那一步用的是 `nvidia/[a-z]*`，正是为了绕开这个数字开头的目录；
+  # 万一哪天有人把它改回 `nvidia`，或者把两步的顺序调过来，这里当场停。
+  # 漏掉的话表现是开机 nvidia.ko 加载失败 -> gpu.sh 判 FAIL「驱动加载失败」，
+  # 一台好机器的好显卡被判成坏的。
+  if [[ -d "/lib/firmware/nvidia/${NVIDIA_VERSION}" ]] \
+     && [[ -n "$(ls -A "/lib/firmware/nvidia/${NVIDIA_VERSION}" 2>/dev/null)" ]]; then
+    say "GSP 固件 OK (/lib/firmware/nvidia/${NVIDIA_VERSION})"
+  else
+    fail "/lib/firmware/nvidia/${NVIDIA_VERSION} 不存在或为空 —— open 内核模块没有 GSP 固件起不来。
+     检查 config.sh 的 FIRMWARE_PRUNE 是不是把 nvidia/ 整个剪掉了。"
+  fi
+
   NVMOD="$(find "/lib/modules/$KVER" -name 'nvidia.ko*' | head -1)"
   if [[ -n "$NVMOD" ]]; then
     NVLIC="$(modinfo -F license "$NVMOD" 2>/dev/null || true)"
@@ -232,6 +308,75 @@ if [[ "${INCLUDE_NVIDIA:-0}" == "1" ]]; then
   apt-get purge -y -qq "linux-headers-${KVER}" >/dev/null 2>&1 || true
   apt-get autoremove -y -qq >/dev/null 2>&1 || true
 fi
+
+# ---------------------------------------------------------------- 清理多余内核
+# 盘里只该有一个内核：casper/vmlinuz 引导的那个（$KVER）。
+#
+# 另一套是这么混进来的 —— 装 NVIDIA 驱动要 dkms，dkms 的 Recommends 指向
+# linux-headers-generic 这个**元包**；元包跟着 archive 里最新的 ABI 走，
+# 于是 linux-image-generic / linux-modules-* / linux-headers-* 一整套新内核
+# （模块 155MB + /usr/src 头文件 157MB）跟着进了盘，而它一行代码都不会被执行。
+#
+# 上面装 headers 时加 --no-install-recommends 是从源头挡；这里是兜底 ——
+# 增量构建复用上一轮的 rootfs，光挡住新的没用，得把已经躺在里面的清掉。
+say "=== 清理多余内核（只留 $KVER）==="
+
+# 先拆元包：它们钉着"最新内核"，不先拆掉，下面 purge 具体版本会被依赖挡回来。
+apt-get purge -y -qq linux-generic linux-image-generic linux-headers-generic \
+  >/dev/null 2>&1 || true
+
+# 找出不属于 $KVER 的内核包。
+# 每一段都要能失败：dpkg-query 的模式一个都没匹配上返回 1，grep 过滤到空也返回 1，
+# 而 -o pipefail 下任何一个都足以把整个 chroot 脚本静默弄死（§11-9 同款）。
+mapfile -t EXTRA_KPKGS < <(
+  dpkg-query -W -f='${Package} ${Status}\n' \
+    'linux-image-*' 'linux-modules-*' 'linux-headers-*' 2>/dev/null \
+    | awk '$NF=="installed"{print $1}' \
+    | grep -E '[0-9]+\.[0-9]+\.[0-9]+-[0-9]+' \
+    | grep -vF -- "$KVER" || true
+)
+if ((${#EXTRA_KPKGS[@]})); then
+  say "purge ${#EXTRA_KPKGS[@]} 个包: ${EXTRA_KPKGS[*]}"
+  # 不 fail：内核包的 postrm 会去调 update-grub，chroot 里没有真的引导设备，
+  # 它可能返回非零。真正说了算的是下面那条断言 —— 文件在不在，比 dpkg 怎么记更重要。
+  apt-get purge -y -qq "${EXTRA_KPKGS[@]}" >/dev/null 2>&1 \
+    || say "WARN: apt-get purge 返回非零（chroot 里 update-grub 常见），改由下面按目录清"
+else
+  say "没有多余的内核包"
+fi
+apt-get autoremove --purge -y -qq >/dev/null 2>&1 || true
+
+# 残留目录：dkms 往 updates/ 下写过东西的话 dpkg 不会删父目录；
+# /usr/src 下的头文件树运行时也完全用不上。
+for d in /lib/modules/*/; do
+  [[ -d "$d" ]] || continue
+  b="$(basename "$d")"
+  if [[ "$b" != "$KVER" ]]; then
+    say "删除残留模块目录 $b"
+    rm -rf -- "${d:?}"
+  fi
+done
+rm -rf /usr/src/linux-headers-* 2>/dev/null || true
+
+# 硬断言。剩两套内核意味着"开机会加载哪一套"不确定，而搞反的表现是
+# 开机认不到任何硬盘、或者显卡模块加载失败 —— 两样都会被误判成硬件故障。
+# build-iso.sh 出了 chroot 还会再验一次（那边还要和 casper/vmlinuz 对版本）。
+# 两处都留着不重复：这一条能指出是 chroot 里哪一步没干净。
+mapfile -t LEFT_KVERS < <(ls -1 /lib/modules 2>/dev/null)
+if (( ${#LEFT_KVERS[@]} != 1 )) || [[ "${LEFT_KVERS[0]}" != "$KVER" ]]; then
+  fail "清理完 /lib/modules 下还有: ${LEFT_KVERS[*]}（应该只剩 $KVER）"
+fi
+say "只剩 $KVER（$(du -sh "/lib/modules/$KVER" | cut -f1)）"
+
+# autoremove 顺手收走别的东西这件事已经发生过一次（amd64-microcode），
+# 所以清理完再把关键工具点一遍名。
+verify_tools "清理内核后"
+for d in intel-ucode amd-ucode; do
+  [[ -d "/lib/firmware/$d" && -n "$(ls -A "/lib/firmware/$d" 2>/dev/null)" ]] \
+    || fail "CPU 微码 /lib/firmware/$d 没了 —— 多半又被 autoremove 收走了。
+     显式装它的地方在 config.sh 的 PKGS_PLATFORM。"
+done
+say "CPU 微码 intel-ucode / amd-ucode 都在"
 
 # ---------------------------------------------------------------- 收尾
 say "清理 apt 缓存 / 还原源"

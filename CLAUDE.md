@@ -55,6 +55,16 @@ wsl -d Ubuntu-24.04 -u root -e bash -c "cd /mnt/c/Users/li/Desktop/project/KLBur
 wsl -d Ubuntu-24.04 -u root -e bash -c "cd /mnt/c/Users/li/Desktop/project/KLBurn && ./tests/e2e-qemu.sh --stage smoke"
 ```
 
+构建完还要跑一条固件对账（几秒，不要 root，查的是构建工作区里的 rootfs）：
+
+```
+wsl -d Ubuntu-24.04 -e bash -c "cd /mnt/c/Users/li/Desktop/project/KLBurn && KLBURN_WORK=/home/li/klburn-build ./tests/check-firmware.sh"
+```
+
+它守的是「盘里关键驱动要的固件一个都不能少」。少了不会有任何报错 ——
+驱动起不来，`ip link` 里那块网卡就是不存在，报告写着这台机器没网卡。
+它也不在 `run-all.sh` 里（要一个已构建的 rootfs）。
+
 `e2e-qemu.sh` 要 root（losetup / 挂 exFAT / KVM）。它会**断言盘里的版本号和
 `config.sh` 一致** —— 所以 bump 完版本必须先重新构建再跑 e2e，否则它会红在
 "版本对不上"。那不是 bug，那正是它要拦的事（改完代码拿旧 ISO 跑）。
