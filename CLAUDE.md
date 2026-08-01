@@ -4,6 +4,11 @@
 [`docs/architecture.md`](docs/architecture.md)（怎么改）和
 [`CHANGELOG.md`](CHANGELOG.md)（哪个版本改了什么）。
 
+**没有明确任务、或者要接着上一轮往下做时，先看
+[`docs/next-steps.md`](docs/next-steps.md)** —— 那里按优先级列着待办，
+每条都写了为什么值得做、具体怎么做、怎么算做完，以及**明确不做的和理由**
+（省得重新推演一遍）。做完一条删一条。
+
 ## 这是什么
 
 服务器出厂老化测试 U 盘。源码在 Windows 上编辑、在 **WSL（Ubuntu-24.04）里构建**、
