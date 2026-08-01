@@ -57,6 +57,7 @@ MUTATIONS=(
 "lint-exempt${S}给 lint 偷偷多加一类豁免（豁免清单本身也要有人守）${S}lint${S}tests/lint.sh${S}mut_lint_exempt"
 "net-servers${S}NET_TIME_SERVERS 改回裸赋值（现场在 klburn.conf 里换内网 NTP 会被静默顶掉）${S}test-hw-checks${S}$RT/lib/network.sh${S}mut_net_servers"
 "fd0-overreach${S}把软驱豁免扩大成所有设备（真盘的 I/O error 会被一起吃掉，坏盘查不出来）${S}test-hw-checks${S}$RT/lib/verify.sh${S}mut_fd0_overreach"
+"disk-none-fail${S}没装硬盘时判 FAIL 而不是 WARN（§2-2：能力缺失 ≠ 硬件故障，会把无盘机器拦在出货前）${S}test-hw-checks${S}$RT/lib/collect.sh${S}mut_disk_none_fail"
 )
 
 # ================================================================
@@ -136,6 +137,15 @@ mut_fd0_overreach() {
   replace_line "$RT/lib/verify.sh" \
     "| grep -viE 'thermal throttl.*not|nouveau|dev fd[0-9]' \\" \
     "    | grep -viE 'thermal throttl.*not|nouveau|dev [a-z]' \\"
+}
+
+# 「本机未安装硬盘」和「硬盘坏了」是两回事。判成 FAIL 的话，出厂只测
+# CPU/内存/网卡的无盘机器会被整机判不合格 —— 把好机器拦在出货前，
+# 比漏判更糟（§2-2）。这条变异守的是 collect_disk 那三条分支里最要紧的一条。
+mut_disk_none_fail() {
+  replace_line "$RT/lib/collect.sh" \
+    '"硬盘信息采集" "$ST_WARN"' \
+    '      result_add "collect_disk" "硬盘信息采集" "$ST_FAIL" \'
 }
 
 mut_net_servers() {

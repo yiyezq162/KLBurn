@@ -1259,6 +1259,63 @@ check "dmesg-pre.txt 的采集必须排在 verify_dmesg_boot 之前" \
 
 # ================================================================
 echo
+echo "=== 硬盘信息采集（collect_disk）==="
+# 21 个判定 id 里，这是唯一一个单元测试碰不到的 —— 一直只有 QEMU 端到端
+# 那台虚拟机在跑它，而虚拟机永远只走"普通盘"那一条分支。
+#
+# 三条分支都在 collect_smart 的 pre 阶段末尾。最该锁住的是**第一条**：
+# 一块盘都没有时判 WARN，不判 FAIL。那是"本机未安装硬盘"，不是"硬盘坏了"
+# —— 二号原则（能力缺失 ≠ 硬件故障）。判成 FAIL 就是把一台无盘机器
+# （现场真有，出厂只测 CPU/内存/网卡的那种）拦在出货前。
+#
+# collect_smart 前半段真的会去跑 smartctl / nvme / lsblk，靠两处打桩绕开：
+#   capture           上面 dmesg 那一节已经打成 `:` 了，这里顺带用上
+#   megaraid_pd_ids   1161 行 unset 之后又是真的那个了，这里按用例重新打桩
+# **smart_targets_build 用真的那个** —— 这样连"按 DISK_SMART 展开成采集目标"
+# 那一段也一起测了，而且不必在本文件里给它加一个更靠后的定义
+# （加了会让 shellcheck 对着 1125 行那个调用报 SC2218）。
+megaraid_pd_ids() { :; }       # 默认：没有阵列卡后端物理盘
+mkdir -p "$TMP/smart-pre"      # collect_smart 里那句 jq 要往这儿写归一化结果
+
+# 结果落在 LAST_STATUS / LAST_DETAIL 上，所以**不能**放进 $( ) 里调 ——
+# 子 shell 里的赋值传不回来，断言会永远拿到空值然后一路绿。
+run_collect_disk() {
+  DISK_SMART=("$@")
+  LAST_STATUS=""; LAST_DETAIL=""
+  collect_smart pre >/dev/null 2>&1
+}
+
+run_collect_disk
+check "一块盘都没有 -> WARN（不是 FAIL：没装盘不等于盘坏了）" "$ST_WARN" "$LAST_STATUS"
+check "无盘时文案要说「本机未安装硬盘」" "1" \
+      "$(printf '%s' "$LAST_DETAIL" | grep -c '本机未安装硬盘')"
+
+run_collect_disk /dev/sda /dev/nvme0n1
+check "两块普通盘 -> PASS" "$ST_PASS" "$LAST_STATUS"
+check "普通盘的文案要报出盘数" "1" \
+      "$(printf '%s' "$LAST_DETAIL" | grep -c '共 2 块盘')"
+check "普通盘的文案里不该提阵列卡后端物理盘" "0" \
+      "$(printf '%s' "$LAST_DETAIL" | grep -c '物理盘' || true)"
+
+# 阵列卡后端的物理盘没有 /dev 节点，只能靠 -d megaraid,N 透传去读 ——
+# 这条分支就是 v1.2.0 的主功能，而它一次真机都没验过（§12 里写着）。
+megaraid_pd_ids() { printf '8\n9\n'; }
+run_collect_disk /dev/sda
+check "阵列卡后端物理盘 -> PASS" "$ST_PASS" "$LAST_STATUS"
+check "采集目标 = 1 块逻辑盘 + 2 块物理盘" "3" "${#SMART_TARGETS[@]}"
+check "有阵列卡后端盘时，文案要单独报出物理盘块数" "1" \
+      "$(printf '%s' "$LAST_DETAIL" | grep -c '共 3 块盘，其中 2 块为阵列卡后端的物理盘')"
+
+# 全局 FORBIDDEN 扫描已经覆盖了 collect.sh 里所有 result_add 的文案，
+# 这里对着**真跑出来的那一份** detail 再钉一条：扫描是按源码文本走的，
+# 而这条走的是运行时拼出来的字符串（上面那句就是拼的）。
+for forbidden in "storcli" "vendor/" "重新出盘" "构建目录" "盘内"; do
+  check "collect_disk 的客户可见文案里不许出现「${forbidden}」" "0" \
+        "$(printf '%s' "$LAST_DETAIL" | grep -c "$forbidden" || true)"
+done
+
+# ================================================================
+echo
 echo "=== 整机结论：全程最不该出错的那一次判定 ==="
 # 屏幕上那个 PASS/FAIL 大字，1.3.0 之前是
 #     grep -q '"status":"FAIL"' results.jsonl
