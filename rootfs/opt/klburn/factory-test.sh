@@ -324,12 +324,42 @@ fi
 sync
 
 # ---------------------------------------------------------------- 总结
+# 整机结论只看有没有 FAIL。
+#
+# 这里必须走 jq 解析，不能拿 grep 匹配 JSON 文本：一号不变量就是"不要用关键字
+# 匹配做判定"，而这是全程最不该出错的一次判定 —— 判错方向就是把坏机器放出厂。
+# 文本匹配依赖 jq -cn 的输出恰好没有空格（`"status":"FAIL"`），格式一变就永远
+# 匹配不上，而且不会有任何报错，表现是每台机器都显示绿色 PASS。
+# 报告生成器那边本来就是解析 JSON 判的，这里跟它走同一条路，两边不会打架。
 OVERALL="PASS"
-if grep -q '"status":"FAIL"' "$RUN_DIR/results.jsonl" 2>/dev/null; then
+if jq -e -s 'any(.[]; .status == "FAIL")' "$RUN_DIR/results.jsonl" >/dev/null 2>&1; then
   OVERALL="FAIL"
 fi
 
+# 一条判定都没有 != 全都通过。
+#
+# results.jsonl 为空 / 读不出来 / 解析不了（采集阶段就崩了、U 盘写满了、
+# 进程被收掉），上面那句 jq 会返回非零，OVERALL 就停在 PASS —— 一台什么都
+# 没测过的机器打出绿色大字，现场没有任何理由怀疑它。判不出来就得说判不出来。
+#
+# 报告生成器那边是同一条规矩，两边不会打架。
+if ! jq -e -s 'length > 0' "$RUN_DIR/results.jsonl" >/dev/null 2>&1; then
+  OVERALL="FAIL"
+  NO_RESULTS=1
+  warn "No test results were recorded - this run is INVALID."
+  warn "The machine was NOT evaluated. Re-test; do not ship on this report."
+fi
+
 verdict_banner "$OVERALL"
+
+# 大字之后再说一次原因：这个 FAIL 说的是"这轮测试作废"，不是"这台机器坏了"。
+# 只在上面 warn 一次的话，出报告那几行一滚就看不见了，现场会照着 FAIL 去查硬件。
+if (( ${NO_RESULTS:-0} == 1 )); then
+  printf '  %sThis FAIL means the RUN is invalid, not that the hardware is bad.%s\n' \
+    "$C_YEL$C_BLD" "$C_RST"
+  printf '  %sNothing was evaluated. Check %s/klburn.log, then run the test again ([t]).%s\n' \
+    "$C_YEL" "$RUN_DIR" "$C_RST"
+fi
 
 hr
 printf '  Serial      : %s\n' "$SERIAL"

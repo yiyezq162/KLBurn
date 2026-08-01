@@ -799,7 +799,16 @@ def build_html(data):
     results = data.results
 
     statuses = [r.get("status") for r in results]
-    overall = "FAIL" if "FAIL" in statuses else "PASS"
+    # 一条判定都没有 != 全都通过。
+    #
+    # results.jsonl 为空或读不出来（采集阶段就崩了、U 盘写满了、进程被收掉），
+    # 以前会走进 else 分支打出绿色大字 PASS —— 一台什么都没测过的机器，报告上
+    # 看起来是合格的。判不出来就得说判不出来，绝不能默认成合格。
+    #
+    # 注意这不是说机器坏了：下面的提示语写的是"本次测试无效、需重新测试"，
+    # 不往硬件头上扣帽子（见 docs/report-policy.md）。
+    no_results = not statuses
+    overall = "FAIL" if ("FAIL" in statuses or no_results) else "PASS"
 
     n_pass = statuses.count("PASS")
     n_fail = statuses.count("FAIL")
@@ -842,7 +851,11 @@ def build_html(data):
     A('<div style="margin:18px 0 8px"><span class="verdict v-%s">%s</span>' % (overall, overall))
     A('<span style="margin-left:18px" class="sub">通过 %d 项 ｜ 失败 %d 项 ｜ 告警 %d 项 ｜ 跳过 %d 项</span></div>'
       % (n_pass, n_fail, n_warn, n_skip))
-    if overall == "FAIL":
+    if no_results:
+        # 措辞只说"这次测试没跑成"，不说机器有问题——两码事
+        A('<div class="notice notice-warn"><b>本次测试未产生任何判定结果，'
+          "本报告无效。</b>测试过程未能正常完成，请重新测试后以新报告为准。</div>")
+    elif overall == "FAIL":
         A('<div class="notice notice-warn"><b>本机存在未通过项，不建议出货。</b>'
           "请查看下方标红的测试项详情。</div>")
 

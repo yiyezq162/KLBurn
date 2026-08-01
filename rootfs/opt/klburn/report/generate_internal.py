@@ -283,7 +283,14 @@ def assess(d):
     # ---------------- 整机结论与判定分布 ----------------
     st = [r.get("status") for r in d.results]
     n_fail, n_warn = st.count("FAIL"), st.count("WARN")
-    if n_fail:
+    if not st:
+        # 一条判定都没有：这不是"全都通过"，是这一轮压根没跑成。
+        # 排在 n_fail 前面 —— 没有结果的时候 n_fail 也是 0，会走进"无 FAIL 项"那支。
+        f.append(finding(RISK, "整机", "results.jsonl 里一条判定都没有",
+                         "本次运行没有产生任何结论，报告无效，需要重测。"
+                         "先看 klburn.log 最后几行，确认是采集阶段崩了、盘写满了，"
+                         "还是进程被收掉了。", "results.jsonl"))
+    elif n_fail:
         names = "、".join(r.get("name", "?") for r in d.results if r.get("status") == "FAIL")
         f.append(finding(RISK, "整机", "有 %d 项判定为 FAIL：%s" % (n_fail, names),
                          "整机结论为 FAIL，不能出货。", "results.jsonl"))
@@ -646,7 +653,9 @@ def build_internal_html(d):
     findings = assess(d)
 
     st = [r.get("status") for r in d.results]
-    overall = "FAIL" if "FAIL" in st else "PASS"
+    # 和 generate_report.py / factory-test.sh 同一条规矩：一条判定都没有 != 全都通过。
+    # 三处必须一致，否则同一次运行的屏幕、交付报告、内部报告会给出三个结论。
+    overall = "FAIL" if ("FAIL" in st or not st) else "PASS"
 
     A('<div class="wrap"><header>')
     A('<div class="internal-banner">内部工程报告 · 请勿外发'
