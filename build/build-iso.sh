@@ -210,7 +210,10 @@ if (( OPT_REBUILD_FS )) || [[ ! -f "$STAMP_DIR/rootfs-extracted" ]]; then
     while IFS= read -r -d '' wf; do
       [[ "$(stat -c '%t:%T' "$wf" 2>/dev/null)" == "0:0" ]] || continue
       rel="${wf#"$src"/}"
-      rm -rf -- "$dst/$rel"      # 兑现删除（可能是目录）
+      # ${rel:?} 不是装饰：这个脚本以 root 跑，rel 万一算成空串（src 前缀没剥掉
+      # 之类），"$dst/$rel" 就是 "$dst/"，一条 rm -rf 能把整个 rootfs 端掉。
+      # :? 让它在空的时候直接报错退出，而不是安静地删。
+      rm -rf -- "$dst/${rel:?whiteout 相对路径为空，拒绝执行 rm -rf}"
       rm -f   -- "$wf"           # 标记本身不要带进最终镜像
       n=$(( n + 1 ))
     done < <(find "$src" -type c -print0 2>/dev/null)
