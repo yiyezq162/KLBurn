@@ -25,6 +25,7 @@ ok()  { printf '  \033[32mOK\033[0m   %s\n' "$1"; PASS=$((PASS+1)); }
 bad() { printf '  \033[31mFAIL\033[0m %s\n' "$1"; FAIL=$((FAIL+1)); }
 has()    { grep -qF -- "$2" "$1" && ok "内部报告含「$2」：$3" || bad "内部报告应含「$2」：$3"; }
 has_no() { grep -qF -- "$2" "$1" && bad "内部报告不应有「$2」：$3" || ok "内部报告无「$2」：$3"; }
+check()  { [[ "$2" == "$3" ]] && ok "$1" || bad "$1（期望 $2，实际 $3）"; }
 
 # 断言函数名打错不能静悄悄地过去（§11-13"断言悄悄停止计数"的同款病）：
 # 本脚本不开 set -e，`xxx: command not found` 只往 stderr 打一行就没了，
@@ -243,6 +244,20 @@ printf '(command not found: storcli64)\n' > "$RD/raw/storcli-show.txt"
 printf 'mce: [Hardware Error]: CPU 3: Machine Check\n' > "$RD/raw/dmesg-errors-boot.txt"
 printf 'stress-ng: info: [1] dispatching hogs\n' > "$RD/raw/stress/cpu-stress-ng.log"
 
+# raw/ 索引那一节按分组渲染，而**只有真的存在的文件才会出现**。
+# 每个分组各放一份代表文件，好让索引的分组和说明都被真的走一遍。
+printf '27:00.0 Ethernet controller: Intel 82599ES [8086:10fb]\n' > "$RD/raw/lspci.txt"
+printf '27:00.0 Ethernet controller\n\tLnkCap: Speed 5GT/s, Width x8\n' > "$RD/raw/lspci-vv.txt"
+printf '[    0.000000] Linux version 6.8.0-100-generic\n' > "$RD/raw/dmesg-pre.txt"
+printf '[  900.000000] done\n'                            > "$RD/raw/dmesg-post.txt"
+printf 'PSU1_Vin | 230.000 | Volts | ok\n'                > "$RD/raw/ipmi-sensors.txt"
+printf 'Temperature #0x01 | Upper Critical going high\n'  > "$RD/raw/ipmi-sel-new.txt"
+printf 'GPU 0: OK\nerrors: 0\n'                           > "$RD/raw/stress/gpu-burn.log"
+printf 'Aug 02 06:33:45 klburn systemd[1]: Started.\n'    > "$RD/raw/deep/journal-boot.txt"
+printf 'chronyd: no reachable sources\n'                  > "$RD/raw/clock-sync.log"
+printf '+====+\n| KLBurn v1.0.0  CONFIGURATION REVIEW |\n+====+\n' > "$RD/raw/config-review.txt"
+printf 'no carrier\n'                                     > "$RD/raw/nic/eno1-ping.txt"
+
 # ================================================================
 OUT="$RD/raw/INTERNAL_test.html"
 echo "=== 生成内部工程报告 ==="
@@ -262,8 +277,28 @@ has "$OUT" "通电次数"      "同上"
 has "$OUT" "21000"         "sda 的实际通电小时数"
 has "$OUT" "已用寿命"      "SSD 磨损率"
 has "$OUT" "abc1234-dirty" "源码 commit，出悬案时靠它对得上"
-has "$OUT" "storcli64"     "盘里少带哪个工具，内部要直说"
 has "$OUT" "595.84"        "驱动版本"
+
+echo
+echo "=== 用词中性，但一个字的信息都不许丢 ==="
+# 1.7.0 改了内部报告的用词：定位是"我们自己复盘用的、更详细的那份数据"，
+# 不是"问题清单"。凡是描述「某项数据本轮没有」的地方，主语换成**那项数据**
+# 或它的性质，不再是"我们盘里没有 XXX"。
+#
+# ⚠️ 但这条断言的**意图没变**，还是那句"盘里少带哪个工具，内部要直说"：
+# 中性不等于含糊。所以下面同时钉三样 —— 具体是哪一类工具、哪一项数据因此没有、
+# 以及那个工具到底叫什么。少任何一样，工程人员就不知道下次该怎么补齐。
+has "$OUT" "storcli64"                   "具体是哪个工具，照旧要写出来（信息不许丢）"
+has "$OUT" "厂商管理工具"                 "是哪一类工具"
+has "$OUT" "阵列卡的固件版本与逻辑盘状态" "哪一项数据因此没有"
+has "$OUT" "本轮未加载该工具"             "客观陈述，主语是那项数据不是我们"
+has "$OUT" "本轮采集范围说明"             "这一节的标题也要中性"
+has "$OUT" "补齐办法"                     "看完要知道下次怎么把这份数据取到"
+
+# 反过来：这些"主语是我们的否定式表达"一个都不许再出现
+for w in "盘内没有" "盘内有" "本测试盘" "精简" "我们环境的问题" "环境的缺口" "没测"; do
+  has_no "$OUT" "$w" "主语是我们的否定式表达，1.7.0 起不再使用"
+done
 
 echo
 echo "=== 内部评估必须抓到这台机器的问题 ==="
@@ -274,13 +309,96 @@ has "$OUT" "已用寿命 23%"            "SSD 磨损"
 has "$OUT" "异常掉电"                "300 次"
 has "$OUT" "坏道"                    "压测后新增待处理扇区"
 has "$OUT" "8 ⚠"                     "前后对比要标出变化"
-has "$OUT" "驱动版本不支持"          "不匹配的那张卡"
+has "$OUT" "不在本轮驱动版本的支持范围内" "不匹配的那张卡"
+has "$OUT" "与卡本身的好坏无关"          "而且要说清这不是卡的问题（客户报告那边判的是 SKIP）"
 has "$OUT" "PCIe 链路没跑满"         "Gen3 x8 / 额定 Gen4 x16"
 has "$OUT" "没协商到额定速率"        "万兆口只跑千兆"
-has "$OUT" "采集过程有"              "超时 + 缺工具"
+has "$OUT" "本轮有 2 项数据未取到"   "一条采集超时 + 一项要专用工具"
 has "$OUT" "开机阶段有 1 条硬件错误" "dmesg 里的 Machine Check"
 has "$OUT" "FINISAR"                 "光模块厂商"
-has "$OUT" "本次未做硬盘破坏性读写压测" "disk_confirmed=0"
+has "$OUT" "硬盘破坏性读写压测不在本轮范围内" "disk_confirmed=0"
+
+echo
+echo "=== 九节结构与导航（读的人想知道什么，就按什么顺序排）==="
+for s in "一、结论摘要" "二、机器身份" "三、配置清单" "四、逐项判定" "五、压测过程" \
+         "六、测后复查" "七、深度硬件数据" "八、本轮采集范围说明" "九、原始文件索引"; do
+  has "$OUT" "$s" "第 ${s%%、*} 节在"
+done
+check_order() {   # check_order <先> <后>
+  local a b
+  a="$(grep -bo -- "$2" "$OUT" | head -1 | cut -d: -f1)"
+  b="$(grep -bo -- "$3" "$OUT" | head -1 | cut -d: -f1)"
+  if [[ -n "$a" && -n "$b" ]] && (( a < b )); then ok "$1"; else bad "$1"; fi
+}
+check_order "结论摘要排在配置清单前面（先给结论，再给依据）" "一、结论摘要" "三、配置清单"
+check_order "逐项判定排在原始文件索引前面" "四、逐项判定" "九、原始文件索引"
+has "$OUT" '<nav class="toc">' "顶部要有锚点导航（这份报告很长，没导航翻不动）"
+has "$OUT" 'href="#s8"'        "导航能跳到第八节"
+has "$OUT" 'id="s8"'           "第八节有对应的锚点"
+# 每一节都要有一句话说明"这节是干什么的"
+has "$OUT" 'class="lead"'      "每节的一句话说明"
+
+echo
+echo "=== 原始文件索引：不能只有一堆链接 ==="
+# 看报告的是工程人员，不是开发人员。lspci-vv.txt 这种名字他们不一定知道
+# 是什么、什么时候该点开。
+has "$OUT" "这是什么"        "索引表要说清每个文件是什么"
+has "$OUT" "什么时候该看它"  "以及什么时候该点开"
+has "$OUT" "怎么看"          "以及点开之后看哪儿"
+has "$OUT" "搜 error / fail / timeout" "dmesg 那一类的具体看法"
+has "$OUT" "**只看新增的**"  "测后复查那份的看法（和 pre 对比）"
+for g in "存储" "网络" "GPU" "BMC" "内核日志" "压测日志"; do
+  has "$OUT" "<h3>$g</h3>" "索引按「$g」分组"
+done
+has_no "$OUT" "未分类" "fixture 里的每个文件都应该在索引里有说明"
+
+echo
+echo "=== 加了新采集却忘了写说明，必须跑红 ==="
+# 这条守的是"采了数据却没人知道它是什么"——那和没采一样。
+# 把 rootfs 里所有 capture() 的目标文件名捞出来，逐个丢给 --classify。
+CLS_BAD=0; CLS_N=0
+while IFS= read -r rel; do
+  [[ -n "$rel" ]] || continue
+  # 把路径里的变量换成一个具体的例子，只是为了让正则能匹配
+  rel="${rel//\$dir/smart-pre}"
+  rel="${rel//\$phase/pre}"
+  rel="${rel//\$\{key\}/sda}"
+  rel="${rel//\$\{base\}/sda}"
+  rel="${rel//\$\{ifn\}/eno1}"
+  rel="${rel//\$\{t\}/perccli64}"
+  [[ "$rel" == *'$'* ]] && continue      # 还带变量的（capture "$1"）跳过
+  [[ "$rel" == *.* ]]   || continue      # 目录（mkdir "$RAW_DIR/nic"）不是采集文件
+  CLS_N=$((CLS_N+1))
+  if ! python3 "$GEN" --classify "$rel" >/dev/null 2>&1; then
+    printf '       没有说明的采集文件：%s\n' "$rel"
+    CLS_BAD=$((CLS_BAD+1))
+  fi
+done < <(
+  {
+    grep -rhoE 'capture (-t [0-9]+ )?"[^"]+"' "$ROOT/rootfs/opt/klburn/" \
+      | sed -E 's/capture (-t [0-9]+ )?"//; s/"$//'
+    # 不走 capture()、直接往 raw/ 里写的那些
+    grep -rhoE '"\$RAW_DIR/[^"]+"' "$ROOT/rootfs/opt/klburn/" \
+      | sed 's|"\$RAW_DIR/||; s|"$||'
+    printf '%s\n' 'stress/cpu-stress-ng.log' 'stress/mem-stressapptest.log' \
+                  'stress/gpu-burn.log' 'stress/fio-seq.job'
+  } | sort -u
+)
+check "每一类采集文件都在 raw/ 索引里有说明（共 $CLS_N 类）" "0" "$CLS_BAD"
+check "而且真的扫到了东西（扫出 0 类说明这条守卫是摆设）" "yes" \
+      "$(if (( CLS_N > 30 )); then echo yes; else echo no; fi)"
+# 守卫本身要能变红：喂一个肯定不在表里的名字
+check "守卫必须抓得住没写说明的文件（否则上一条是摆设）" "1" \
+      "$(python3 "$GEN" --classify "deep/brand-new-thing.txt" >/dev/null 2>&1; echo $?)"
+
+echo
+echo "=== 单文件、离线可开、能打印 ==="
+# 现场无网络，报告要能双击打开就看。
+check "不引任何外部资源（无 http(s) 的 src/href）" "0" \
+      "$(grep -coE '(src|href)="https?://' "$OUT" || true)"
+check "没有外链样式表" "0" "$(grep -c '<link' "$OUT" || true)"
+check "没有外部脚本"   "0" "$(grep -c '<script' "$OUT" || true)"
+has "$OUT" "@media print" "有打印样式（工程人员会打出来夹进机器箱）"
 
 echo
 echo "=== 结论口径不能被内部评估带偏 ==="

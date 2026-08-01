@@ -8,13 +8,11 @@ KLBurn 内部工程报告生成器
 和客户报告的分工，改代码前先记牢：
 
     报告名.html   随机器交付给客户。只回答"这台机器合不合格"，
-                  措辞假设读者是采购/运维。通电时间、我们盘里少带哪个工具、
+                  措辞假设读者是采购/运维。通电时间、厂商管理工具、
                   git commit 这些一律不出现。规范见 docs/report-policy.md。
 
-    本报告        只给我们自己看。回答的是另外两个问题：
+    本报告        只给我们自己看，比那份详细得多。回答的是另外两个问题：
                   「这台机器到底什么成色」和「我们这一轮测得干不干净」。
-                  什么都可以写：通电时间、通电次数、SSD 磨损率、异常掉电、
-                  逐颗 CPU 温差、盘里有没有 storcli64、源码 commit……
 
 为什么放在 raw/ 里：客户要的是那个和目录同名的 .html，raw/ 整个目录本来就不外发；
 文件名再加 INTERNAL_ 前缀，页面顶部再压一条红色横幅 —— 三道保险，防的是手滑。
@@ -22,8 +20,29 @@ KLBurn 内部工程报告生成器
 它是**只读**的：只读 run-dir 里已经落好的数据，不采集、不判定整机结论。
 整机结论永远以 results.jsonl 为准，这里只做"人看的时候会想知道"的二次解读。
 
+================================================================
+用词规范（1.7.0 起）—— 规范全文见 docs/report-policy.md 第七节
+================================================================
+
+这份报告的定位是**「我们自己复盘用的、更详细的那份数据」**，不是「问题清单」。
+它一般不外发，但要按「万一发出去了也站得住」的标准写。
+
+具体到措辞，只有一条规矩：
+**描述「某项数据本轮没有」时，主语是那项数据或它的性质，不是我们。**
+
+    ❌ 盘内没有 storcli64              ❌ 我们这一轮环境的缺口
+    ❌ 本测试盘未包含 / 精简版          ❌ 某某项没测
+
+    ✅ 阵列卡的固件版本与逻辑盘状态需由厂商管理工具（storcli64）读取，本轮未加载该工具
+    ✅ 本轮采集范围说明
+
+**但不许因此丢信息。** 原因要具体到"哪一类工具、哪一项数据因此没有"，
+工程人员看完要知道下次怎么补齐 —— 「未加载该工具」比「盘内没有 storcli64」
+信息量并没有变少，只是主语换了。TOOL_PROVIDES 那张表就是干这个的。
+
 用法:
     generate_internal.py --run-dir <run-dir> [--out <html>]
+    generate_internal.py --classify <raw 下的相对路径>     # 查这个文件属于哪一类
 """
 import argparse
 import csv
@@ -75,6 +94,284 @@ def num(v, default=None):
     return int(f) if f == int(f) else f
 
 
+# ============================================================ 工具 -> 它提供哪项数据
+#
+# 「本轮采集范围说明」那一节全靠这张表：只说"某个命令没跑成"对读报告的人没用，
+# 他要知道的是**哪一项数据因此没有、以及那项数据本来该由什么来提供**。
+#
+# 每项： 命令名 -> (这项数据是什么, 它由什么提供)
+
+TOOL_PROVIDES = {
+    "storcli64":  ("阵列卡的固件版本与逻辑盘状态", "Broadcom / LSI MegaRAID 系列的厂商管理工具"),
+    "perccli64":  ("阵列卡的固件版本与逻辑盘状态", "Dell PERC 系列的厂商管理工具"),
+    "arcconf":    ("阵列卡的固件版本与逻辑盘状态", "Microchip / Adaptec 系列的厂商管理工具"),
+    "ssacli":     ("阵列卡的固件版本与逻辑盘状态", "HPE Smart Array 系列的厂商管理工具"),
+    "sas3ircu":   ("HBA（IT 模式）的控制器与物理盘状态", "LSI / Broadcom HBA 的厂商管理工具"),
+    "nvidia-smi": ("显卡型号、显存与驱动版本，以及满载期间的温度/功耗读数",
+                   "NVIDIA 驱动自带的管理程序"),
+    "ipmitool":   ("BMC 传感器读数与事件日志", "IPMI 客户端"),
+    "smartctl":   ("硬盘的 SMART 健康状态与属性表", "smartmontools"),
+    "nvme":       ("NVMe 控制器参数与厂商扩展 SMART 页", "nvme-cli"),
+    "lshw":       ("整机硬件树的留档快照", "lshw"),
+    "sensors":    ("主板与 CPU 的温度传感器读数", "lm-sensors"),
+    "ethtool":    ("网口的协商速率、驱动固件版本与光模块参数", "ethtool"),
+    "dmidecode":  ("主板 / BIOS / CPU / 内存条的 DMI 信息", "dmidecode"),
+    "ras-mc-ctl": ("逐条 DIMM 的 ECC 可纠正 / 不可纠正错误计数", "rasdaemon"),
+    "edac-util":  ("内存控制器的 EDAC 错误计数", "edac-utils"),
+    "mstflint":   ("迈络思网卡的固件版本与 PSID", "mstflint"),
+    "lldpctl":    ("网口对端交换机与端口的 LLDP 邻居信息", "lldpd"),
+    "fwupdmgr":   ("整机可升级部件的固件版本清单", "fwupd"),
+    "turbostat":  ("逐核的频率 / 温度 / 功耗采样", "linux-tools 的 turbostat"),
+    "sg_ses":     ("机框 / 背板（SES）的槽位与风扇状态", "sg3-utils"),
+    "cpuid":      ("CPU 的特性位与步进信息", "cpuid"),
+    "rdmsr":      ("CPU 的功耗 / 温度 / 降频寄存器读数", "msr-tools"),
+}
+
+
+def tool_note(cmd):
+    """-> (这项数据是什么, 由什么提供)；表里没有就照实说不知道，不编。"""
+    base = os.path.basename((cmd or "").split()[0]) if cmd else ""
+    if base in TOOL_PROVIDES:
+        return TOOL_PROVIDES[base]
+    return ("该命令的原始输出", base or "外部命令")
+
+
+# ============================================================ raw/ 文件索引表
+#
+# 看报告的是**工程人员，不是开发人员**：`lspci-vv.txt` 这种名字他们不一定知道
+# 是什么、什么时候该点开。所以索引不是一堆链接，是一张
+# 「这是什么 / 什么时候该看它 / 怎么看」的表。
+#
+# ⚠️ **加了新采集就要在这里加一条。** 漏了会被
+# tests/test-internal-report.sh 抓住 —— 那条测试把 rootfs 里所有 capture()
+# 的目标文件名捞出来，逐个丢给 --classify，有一个落到 UNKNOWN 就跑红。
+# 这是为了防"采了数据却没人知道它是什么"，那和没采一样。
+#
+# 每项： (正则, 分组, 这是什么, 什么时候该看它, 怎么看)
+# 顺序有意义：从上往下第一个匹配上的算数，所以特例写在通例前面。
+
+RAW_INDEX = (
+    # ---------------- 本次运行 ----------------
+    (r"^config-review\.txt$", "本次运行",
+     "开机后现场核对过的那一屏配置（纯文本存档）",
+     "想知道现场当时看到的是什么配置时",
+     "和下面的配置清单对照，不一致说明采集和显示之间有偏差"),
+    (r"^clock-sync\.log$", "本次运行",
+     "联网校时的完整过程日志",
+     "报告时间戳看着不对时",
+     "看有没有成功连上 NTP；没联网时时间来自主板 RTC"),
+
+    # ---------------- 系统 ----------------
+    (r"^dmidecode\.txt$", "系统",
+     "完整的 DMI/SMBIOS 表（主板、BIOS、CPU、内存、插槽全在里面）",
+     "任何「这台机器到底是什么配置」的问题",
+     "按 Handle 0x 分块看，每块开头是 DMI type 名"),
+    (r"^dmidecode-system\.txt$", "系统",
+     "厂商 / 整机型号 / 序列号 / BIOS 版本与日期",
+     "核对整机身份、查 BIOS 该不该升级时",
+     "直接看 System Information 和 BIOS Information 两块"),
+    (r"^dmidecode-psu\.txt$", "系统",
+     "电源模块的位置与在位状态（DMI type 39）",
+     "电源判定出现 WARN/FAIL 时",
+     "看每个模块的 Status；判 FAIL 还要结合 BMC 的 Vin 读数"),
+    (r"^lshw\.(json|txt)$", "系统",
+     "整机硬件树的留档快照",
+     "想一眼扫完整机有哪些设备时",
+     "留档用，判定逻辑一行都不读它；超时截断了也不影响别的项"),
+    (r"^uname\.txt$", "系统", "本次运行的内核版本",
+     "怀疑某个驱动是内核版本问题时", "对照 meta.json 里的介质构建日期"),
+    (r"^lsusb\.txt$", "系统", "USB 设备清单",
+     "查 BMC 虚拟媒体、外接设备时", "启动 U 盘本身也会出现在这里"),
+    (r"^lspci\.txt$", "系统", "PCI 设备一行一个的清单（含厂商:设备 ID）",
+     "查这台机器装了什么卡时", "网卡型号、阵列卡型号都是从这里按总线地址反查的"),
+    (r"^lspci-vv\.txt$", "系统", "PCI 设备的完整配置空间信息",
+     "卡的型号或链路速率对不上时", "搜 LnkSta 看实际协商速率，和同一设备的 LnkCap 比"),
+    (r"^deep/dmidecode-slots\.txt$", "系统", "所有 PCIe / 内存插槽的定义与在用状态",
+     "查「这台机器还有几个空槽」、卡插在第几槽时", "看 In Use / Current Usage"),
+    (r"^deep/dmidecode-(cache|array|oem)\.txt$", "系统",
+     "CPU 缓存 / 内存阵列拓扑 / OEM 自定义字符串",
+     "核对缓存容量、内存最大支持容量时", "留档为主"),
+    (r"^deep/(cmdline|modules|mtrr|efibootmgr)\.txt$", "系统",
+     "内核启动参数 / 已加载模块 / MTRR / EFI 启动项",
+     "怀疑某个模块没加载、或者引导方式不对时",
+     "cmdline 里能看到 nouveau 是不是被 blacklist 了"),
+    (r"^deep/journal-boot\.txt$", "系统",
+     "本次开机的完整 systemd 日志",
+     "上面几份都看不出问题、要从头翻的时候",
+     "很长，先搜 error / fail / timeout 再回头看上下文"),
+
+    # ---------------- CPU 与内存 ----------------
+    (r"^(lscpu\.(txt|json)|cpuinfo\.txt|deep/lscpu-extended\.txt|deep/cpuid-microcode\.txt)$",
+     "CPU 与内存",
+     "CPU 型号、路数、核心/线程、微码版本、逐核拓扑",
+     "核对配置、以及怀疑微码没打上时",
+     "microcode 那一行和厂商发布的版本对一下"),
+    (r"^numactl\.txt$", "CPU 与内存", "NUMA 节点划分与节点间距离",
+     "多路机器上性能不对称时", "看每个 node 分到的内存是不是均等"),
+    (r"^dmidecode-memory\.txt$", "CPU 与内存",
+     "逐条内存的容量 / 厂商 / 颗粒型号 / 频率 / 插槽位置",
+     "装机容量和系统识别容量对不上时，或者要查混插时",
+     "按 Locator 对到具体插槽；Size 为 No Module Installed 的是空槽"),
+    (r"^meminfo\.txt$", "CPU 与内存", "系统识别到的内存总量与可用量",
+     "内存容量核对判 WARN 时", "MemTotal 是内核看到的，会比装机容量少一点"),
+    (r"^(sensors\.(txt|json)|sensors-post\.txt|deep/sensors-raw\.txt)$", "CPU 与内存",
+     "主板与 CPU 的温度 / 风扇 / 电压传感器读数（post 是压测后的）",
+     "温度判定出现 WARN/FAIL、或者读不到温度时",
+     "sensors-raw 是机器可读格式，好做前后对比"),
+    (r"^deep/(interrupts|vmstat|zoneinfo)\.txt$", "CPU 与内存",
+     "中断分布 / 虚拟内存统计 / 内存 zone 水位",
+     "怀疑中断没打散、或者内存压测被 OOM 时",
+     "interrupts 看各 CPU 列是不是均衡"),
+
+    # ---------------- 存储 ----------------
+    (r"^smart-pre/.*\.norm\.json$", "存储",
+     "压测前 SMART 的归一化字段（SATA/SAS/NVMe 统一成同一组键）",
+     "要程序化对比前后差值时",
+     "第六节那张「压测前 -> 压测后」的表就是拿它算的"),
+    (r"^smart-post/.*\.norm\.json$", "存储",
+     "压测后 SMART 的归一化字段",
+     "同上", "和 smart-pre 逐字段比，任何一格变大都是硬伤"),
+    (r"^smart-pre/.*\.(txt|json)$", "存储",
+     "每块盘压测前的完整 SMART 输出",
+     "要看某块盘出厂时的健康度、通电时间、寿命时",
+     "重点看 Reallocated_Sector / Current_Pending_Sector / 介质错误"),
+    (r"^smart-post/.*\.(txt|json)$", "存储",
+     "每块盘压测后的完整 SMART 输出",
+     "判定说「新增坏道」时核对",
+     "和 smart-pre 逐属性对比，只看**新增**的那部分"),
+    (r"^deep/smart-x-.*\.txt$", "存储",
+     "扩展 SMART（完整属性表 + 自检日志 + 错误日志）",
+     "普通 SMART 看不出名堂、要往深里查时",
+     "阵列卡后面的物理盘也在这里，key 带 -pdN 后缀"),
+    (r"^deep/nvme-(id-ctrl|smart-log|error-log)-.*\.txt$", "存储",
+     "NVMe 控制器参数 / 厂商 SMART 日志 / 错误日志",
+     "NVMe 盘出现介质错误或温度异常时",
+     "id-ctrl 里有厂商 OUI 和支持的日志页"),
+    (r"^(nvme-list\.(json|txt))$", "存储", "NVMe 盘清单",
+     "核对装了几块 NVMe、命名空间怎么分的", "和 lsblk 对照"),
+    (r"^(lsblk\.(txt|json)|deep/lsblk-all\.txt)$", "存储",
+     "块设备树：容量 / 介质类型 / 挂载点 / 分区表",
+     "查哪块盘被排除了、为什么没参与压测时",
+     "有挂载点的盘不参与破坏性写入，这是设计如此"),
+    (r"^storcli-.*\.txt$", "存储",
+     "Broadcom / LSI MegaRAID 阵列卡的控制器、物理盘、逻辑盘与事件",
+     "带阵列卡的机器上核对固件版本和盘位状态时",
+     "先看 -show 里的 Product Name 和 FW Package Build"),
+    (r"^raid/.*\.txt$", "存储",
+     "其它厂商阵列卡 / HBA 的管理工具输出（PERC / Adaptec / HPE / IT 模式 HBA）",
+     "同上，非 Broadcom 的卡看这里",
+     "文件名前缀就是命中的那个工具"),
+    (r"^fio-(seq|rand)\.json$", "存储",
+     "硬盘压测的带宽 / IOPS / 延迟原始结果",
+     "要看实测性能、或者判定说有 I/O 错误时",
+     "每个 job 都有 error 字段，非 0 才是真出错"),
+
+    # ---------------- 网络 ----------------
+    (r"^nic-summary\.txt$", "网络", "各网口的 MAC / 链路状态 / 协商速率汇总",
+     "核对装了几个口、哪几个接了线时", "一屏看完，细节再翻 nic/ 下的"),
+    (r"^nic-test\.txt$", "网络", "全部网口连通性测试的汇总结果",
+     "网卡连通性判定出现 WARN 时", "现场没接网线时这里本来就是空的，不是故障"),
+    (r"^nic/.*-ethtool\.txt$", "网络", "单个网口的协商速率与支持的速率列表",
+     "协商速率判定出现 WARN 时", "比 Speed 和 Supported link modes 的最大值"),
+    (r"^nic/.*-driver\.txt$", "网络", "单个网口的驱动名、固件版本、PCI 地址与商用型号",
+     "查网卡型号、或者怀疑固件太旧时", "model 那一行是从 lspci 按总线地址反查来的"),
+    (r"^nic/.*-(ping|test)\.txt$", "网络", "单个网口的 DHCP 与 ping 连通性测试过程",
+     "连通性判定出现 WARN 时", "现场没接网线时这里本来就是空的，不是故障"),
+    (r"^deep/nic-.*-module\.txt$", "网络", "光模块（SFP/QSFP）的厂商、型号、收发光功率",
+     "光口机器链路不稳时 —— 这份数据最值钱", "收光功率偏低多半是光纤或模块的问题"),
+    (r"^deep/nic-.*-(stats|ring|pause)\.txt$", "网络", "网口的收发计数器 / 环形缓冲 / 流控设置",
+     "怀疑丢包或性能不对时", "看 rx_errors / rx_dropped 这类计数"),
+    (r"^deep/ip-link-detail\.txt$", "网络", "所有网络接口的详细状态与统计",
+     "接口起不来时", "看 state 和 qdisc"),
+
+    # ---------------- GPU ----------------
+    (r"^gpu-lspci\.txt$", "GPU", "PCI 总线上看到的 NVIDIA 显卡",
+     "驱动认不到卡、要确认卡在不在总线上时",
+     "这里有、nvidia-smi 里没有 = 驱动问题或卡的问题"),
+    (r"^gpu-smi-(query|full)\.txt$", "GPU", "nvidia-smi 的概览与逐卡完整属性",
+     "核对显卡型号 / 显存 / 驱动版本时", "full 里有 ECC、时钟、功耗上限"),
+    (r"^gpu-driver-modinfo\.txt$", "GPU", "显卡内核模块的版本与 license",
+     "nvidia-smi 起不来、但想知道装的是哪版驱动时",
+     "license 是 Dual MIT/GPL 说明是 open 内核模块"),
+    (r"^gpu-(modprobe-error|driver-mismatch)\.txt$", "GPU",
+     "内核里 NVRM 打的原话（含「这张卡我不支持」那几行）",
+     "GPU 判定出现 SKIP「驱动与显卡不匹配」时",
+     "搜 not supported by；这是「驱动旧了」而不是「卡坏了」的直接证据"),
+    (r"^deep/nvidia-inventory\.csv$", "GPU",
+     "逐卡清单：序列号 / VBIOS / 显存 / PCIe 额定与实际代数宽度",
+     "核对显卡台账、或者怀疑卡没插到底时",
+     "PCIe 那几列是压测后读的才准（空闲时 N 卡会主动降到 Gen1）"),
+    (r"^deep/nvidia-ecc\.txt$", "GPU", "显存 ECC 的可纠正 / 不可纠正错误计数",
+     "多卡机器复盘时", "少量可纠错误在数据中心卡上常见，持续增长才是坏显存"),
+    (r"^deep/nvidia-(topo|clocks|power|perf)\.txt$", "GPU",
+     "卡间互联拓扑 / 时钟 / 功耗上限 / 性能状态",
+     "多卡通信性能不对、或者怀疑功耗被限时", "topo 看 NVLink 有没有连上"),
+
+    # ---------------- BMC ----------------
+    (r"^ipmi-mcinfo\.txt$", "BMC", "BMC 自身的固件版本与支持的功能",
+     "确认 BMC 在不在线、固件该不该升时", "读不到就是这台机器没有 BMC 或没启用 IPMI"),
+    (r"^ipmi-sensors(-post)?\.txt$", "BMC", "BMC 全部传感器读数（post 是压测后的）",
+     "电源判定、温度交叉核对时", "PSU*_Vin 是判断某一路有没有进电的依据"),
+    (r"^ipmi-sdr\.txt$", "BMC", "BMC 传感器定义表（装没装卡都会有定义）",
+     "查主板设计上有哪些传感器时", "有定义但全无读数 = 该位置现在没有东西在响应"),
+    (r"^ipmi-sel-pre\.txt$", "BMC", "压测前的 BMC 事件日志（机器的历史）",
+     "想知道这台机器过去出过什么事时", "看时间戳，很多是很久以前的"),
+    (r"^ipmi-sel-post\.txt$", "BMC", "压测后的 BMC 事件日志全量",
+     "要自己比对前后差异时", "一般直接看下面那份 new 就够了"),
+    (r"^ipmi-sel-new\.txt$", "BMC", "**压测期间新增**的 BMC 事件",
+     "这是 BMC 里最该看的一份", "时间戳落在压测区间的告警级事件会让整机判 FAIL"),
+    (r"^ipmi-sel-psu\.txt$", "BMC", "历史事件里和电源相关的那些",
+     "电源判定出现 WARN/FAIL 时", "和 dmidecode-psu 的 Status 对照"),
+    (r"^ipmi-fru\.txt$", "BMC", "FRU 信息（主板 / 背板 / 电源的厂商与序列号）",
+     "做设备台账、查部件序列号时", "部分机型这里比 DMI 还全"),
+    (r"^deep/ipmi-(chassis|lan|mc-getsysinfo)\.txt$", "BMC",
+     "机箱状态 / BMC 网口配置 / 系统信息",
+     "查 BMC 的 IP、或者前面板告警灯状态时", "chassis 里有 Front Panel Light"),
+
+    # ---------------- 内核日志 ----------------
+    (r"^dmesg-pre\.txt$", "内核日志", "开机到压测前的完整内核日志",
+     "怀疑某个硬件没被识别、或者驱动没加载时",
+     "搜 error / fail / timeout；固件加载失败也在这里"),
+    (r"^dmesg-post\.txt$", "内核日志", "压测结束后的完整内核日志",
+     "判定里出现 I/O error / MCE / AER 时", "和 pre 对比，**只看新增的**"),
+    (r"^dmesg-delta\.txt$", "内核日志", "压测期间新增的那部分内核日志",
+     "上面那条「只看新增的」，这份是已经帮你减好的", "直接从头看到尾"),
+    (r"^dmesg-errors-boot\.txt$", "内核日志", "开机阶段筛出来的硬件错误行",
+     "开机内核日志判 FAIL 时", "每一行都对应一条真实的硬件错误关键字"),
+    (r"^dmesg-errors\.txt$", "内核日志", "压测期间筛出来的硬件错误行",
+     "内核日志复查判 FAIL 时", "这几行就是判 FAIL 的全部依据"),
+
+    # ---------------- 压测日志 ----------------
+    (r"^stress/cpu-.*\.log$", "压测日志", "CPU 压测（stress-ng）的完整输出",
+     "CPU 压测判 FAIL 时", "看 failed: 后面那个**数字**，别按关键字搜——正常日志里也有 failed"),
+    (r"^stress/mem-.*\.log$", "压测日志", "内存压测（stressapptest / stress-ng）的完整输出",
+     "内存压测判 FAIL 或 WARN 时",
+     "看 hardware incidents 和 errors 后面的数字；退出码 137 是被 OOM 收了，不是内存坏"),
+    (r"^stress/gpu-.*\.log$", "压测日志", "显卡压测（gpu_burn）的完整输出",
+     "GPU 压测判 FAIL 时",
+     "多卡的错误数写在同一行、用空格加减号分隔，要全部相加；结尾 GPU N: OK/FAULTY"),
+    (r"^stress/fio-.*\.(log|job)$", "压测日志", "硬盘压测的运行日志与 fio 作业文件",
+     "想知道 fio 到底按什么参数跑的时候", "job 文件里是完整的参数"),
+    (r"^stress/.*$", "压测日志", "压测过程的其它日志",
+     "上面几类都不是的时候", "按文件名对应到具体的压测项"),
+)
+
+_RAW_INDEX_RE = tuple((re.compile(p), g, w, wh, h) for p, g, w, wh, h in RAW_INDEX)
+
+
+def classify_raw(rel):
+    """rel（raw/ 下的相对路径）-> (分组, 这是什么, 什么时候看, 怎么看)；认不出来给 None。"""
+    rel = (rel or "").replace(os.sep, "/").lstrip("./")
+    for rx, group, what, when, how in _RAW_INDEX_RE:
+        if rx.match(rel):
+            return (group, what, when, how)
+    return None
+
+
+RAW_GROUP_ORDER = ("本次运行", "系统", "CPU 与内存", "存储", "网络", "GPU",
+                   "BMC", "内核日志", "压测日志", "未分类")
+
+
 # ============================================================ 数据层
 
 class Internal(Data):
@@ -104,13 +401,17 @@ class Internal(Data):
     # ---------- 逐颗 CPU 封装温度（0.9.0 起才有这一列）----------
     def cpu_pkg_series(self):
         """-> {0: [温度...], 1: [...]}；老 run-dir 没这列就返回 {}"""
-        path = os.path.join(self.run_dir, "sys_metrics.csv")
+        return self._csv_multi("sys_metrics.csv", "cpu_pkg_temps")
+
+    def _csv_multi(self, fname, col):
+        """读一列"分号分隔的多个数值"，拆成 {序号: [值...]}。"""
+        path = os.path.join(self.run_dir, fname)
         out = {}
         if not os.path.exists(path):
             return out
         with open(path, newline="", encoding="utf-8", errors="replace") as f:
             for row in csv.DictReader(f):
-                raw = (row.get("cpu_pkg_temps") or "").strip()
+                raw = (row.get(col) or "").strip()
                 if not raw:
                     continue
                 for i, part in enumerate(raw.split(";")):
@@ -229,10 +530,42 @@ class Internal(Data):
             ]))
         return out
 
-    # ---------- 本次测试环境自己的缺口 ----------
-    def env_gaps(self):
-        """采集期间超时/缺工具的命令。这类东西只该出现在内部报告里。"""
-        gaps = []
+    # ---------- 本轮采集范围 ----------
+    def scope_notes(self):
+        """本轮哪些数据没有、各自的客观原因。
+
+        措辞规范见文件顶部：主语是**那项数据**，不是我们。
+        但原因必须具体到"哪一类工具、哪一项数据" —— 中性不等于含糊。
+
+        -> [(性质, 涉及的数据, 由什么提供, 证据文件, 补充说明)]
+        """
+        notes = []
+
+        # ---- 先说本轮介质随带了哪些专用组件 ----
+        # 这几项在 meta.json 里是构建期就定下来的，和现场跑得怎么样无关，
+        # 所以不等采集文件里出现 "command not found" 才说 —— 那种情况只有
+        # 真去跑过才会留下记录，而"根本没这个组件"应该一上来就写清楚。
+        meta = self.meta
+        for flag, cmd, extra in (
+            ("storcli_present", "storcli64",
+             "把对应厂商的管理工具放进构建期的 vendor/ 目录，下一版盘即可读到。"
+             "本机若装的不是 Broadcom / LSI 的卡，需要的是对应品牌的那一个。"),
+            ("gpu_burn_present", "gpu_burn",
+             "显卡的型号、显存与驱动版本照常采集；缺的是满载期间的温度/功耗曲线。"),
+        ):
+            if str(meta.get(flag)) == "0":
+                if cmd == "gpu_burn":
+                    what, by = ("显卡满载期间的温度与功耗曲线", "显卡满载测试程序（gpu_burn）")
+                else:
+                    what, by = tool_note(cmd)
+                notes.append(("该项由专用工具提供", what, by, "meta.json",
+                              "该数据需由%s读取，本轮未加载该工具（%s）。%s" % (by, cmd, extra)))
+        if str(meta.get("include_nvidia")) != "1":
+            what, by = tool_note("nvidia-smi")
+            notes.append(("该项由专用工具提供", what, by, "meta.json",
+                          "该数据需由%s读取，本轮介质未随带显卡驱动。"
+                          "无独立显卡的机型不受影响。" % by))
+
         for root, _dirs, files in os.walk(self.raw):
             for fn in sorted(files):
                 if not fn.endswith((".txt", ".json", ".csv", ".log")):
@@ -246,19 +579,37 @@ class Internal(Data):
                 txt = read_text(p)
                 rel = os.path.relpath(p, self.raw).replace(os.sep, "/")
                 for m in re.finditer(r"\(TIMEOUT after (\d+)s: ([^)]+)\)", txt):
-                    gaps.append(("超时", rel, "%s（%ss）" % (m.group(2), m.group(1))))
+                    what, by = tool_note(m.group(2))
+                    notes.append(("采集超时", what, by, rel,
+                                  "%s 在 %s 秒内未返回，本轮取到的是截断的结果。"
+                                  "下一轮可放宽该项超时，或在目标机器空闲时重采。"
+                                  % (m.group(2).split()[0], m.group(1))))
                 for m in re.finditer(r"\(command not found: ([^)]+)\)", txt):
-                    gaps.append(("缺工具", rel, m.group(1)))
-        return gaps
+                    what, by = tool_note(m.group(1))
+                    notes.append(("该项由专用工具提供", what, by, rel,
+                                  "该数据需由%s读取，本轮未加载该工具（%s）。"
+                                  "把对应工具放进构建期的 vendor/ 目录即可在下一版盘里取到。"
+                                  % (by, m.group(1))))
+
+        # 同一项数据可能既在 meta 里标了没有、又在采集文件里留了一条记录，
+        # 去重按「性质 + 是哪项数据 + 由什么提供」，证据文件取第一次出现的那个。
+        seen, uniq = set(), []
+        for n in notes:
+            key = (n[0], n[1], n[2])
+            if key in seen:
+                continue
+            seen.add(key)
+            uniq.append(n)
+        return uniq
 
     # ---------- raw/ 文件索引 ----------
-    def raw_index(self, skip=()):
+    def raw_files(self, skip_prefix="INTERNAL_"):
         rows = []
         for root, _dirs, files in os.walk(self.raw):
             for fn in sorted(files):
                 p = os.path.join(root, fn)
                 rel = os.path.relpath(p, self.raw).replace(os.sep, "/")
-                if rel in skip:
+                if rel.startswith(skip_prefix):
                     continue
                 try:
                     size = os.path.getsize(p)
@@ -267,6 +618,29 @@ class Internal(Data):
                 rows.append((rel, size))
         rows.sort(key=lambda r: r[0])
         return rows
+
+    def raw_index_grouped(self):
+        """-> OrderedDict{分组: [(说明四元组, [(相对路径, 大小)...])]}
+
+        同一类的文件合并成一行（"每块盘一份 SMART" 没必要重复十遍说明），
+        看的人要的是"这一类是什么、什么时候该点开"。
+        """
+        buckets = OrderedDict()
+        for rel, size in self.raw_files():
+            info = classify_raw(rel)
+            if info is None:
+                info = ("未分类", "（这一类还没有写说明）",
+                        "——", "在 generate_internal.py 的 RAW_INDEX 里补一条")
+            group = info[0]
+            buckets.setdefault(group, OrderedDict()).setdefault(info, []).append((rel, size))
+        out = OrderedDict()
+        for g in RAW_GROUP_ORDER:
+            if g in buckets:
+                out[g] = list(buckets[g].items())
+        for g, v in buckets.items():        # 万一将来加了新分组没登记进顺序表
+            if g not in out:
+                out[g] = list(v.items())
+        return out
 
 
 # ============================================================ 评估规则
@@ -307,22 +681,24 @@ def assess(d):
                          "实际耗时明显短于计划（%s / %s）" % (fmt_dur(elapsed), fmt_dur(planned)),
                          "压测可能提前退出，看一下各项压测的退出码再下结论。", "meta.json"))
     if str(meta.get("disk_confirmed")) not in ("1", "True", "true"):
-        f.append(finding(INFO, "测试完整性", "本次未做硬盘破坏性读写压测",
-                         "现场默认跳过。硬盘的型号/SMART/温度照常采集，"
-                         "但没有 fio 的带宽与 IOPS 数据。", "meta.json"))
+        f.append(finding(INFO, "测试范围", "硬盘破坏性读写压测不在本轮范围内",
+                         "现场默认跳过（需要两道人工确认）。硬盘的型号、SMART 与温度"
+                         "照常采集并参与判定，只是没有 fio 的带宽与 IOPS 数据。", "meta.json"))
     if str(meta.get("clock_synced")) != "1":
-        f.append(finding(INFO, "测试完整性", "本次未能联网校时",
-                         "报告时间戳沿用主板 RTC，可能不准。", "raw/clock-sync.log"))
+        f.append(finding(INFO, "测试范围", "本轮时间戳取自主板 RTC",
+                         "现场无网络时联网校时不可用，属正常情况；"
+                         "报告里的时间可能与真实时间有偏差。", "raw/clock-sync.log"))
 
-    gaps = d.env_gaps()
-    if gaps:
+    notes = d.scope_notes()
+    if notes:
         kinds = OrderedDict()
-        for kind, _rel, what in gaps:
-            kinds.setdefault(kind, set()).add(what.split("（")[0])
+        for kind, what, _by, _rel, _more in notes:
+            kinds.setdefault(kind, set()).add(what)
         desc = "；".join("%s：%s" % (k, "、".join(sorted(v))) for k, v in kinds.items())
-        f.append(finding(WATCH, "测试完整性", "采集过程有 %d 处不完整" % len(gaps),
-                         desc + "。这些是我们环境的问题，不是机器的问题，"
-                                "但缺的数据会让日后追溯少一块。", "见下方「本次采集的缺口」"))
+        f.append(finding(WATCH, "测试范围", "本轮有 %d 项数据未取到" % len(notes),
+                         desc + "。这些项与被测机器的状态无关，客户报告里对应的项记 SKIP；"
+                                "逐条的客观原因和补齐办法见「本轮采集范围说明」。",
+                         "见第八节"))
 
     # ---------------- CPU ----------------
     temps, freqs, powers = d.sys_series()
@@ -344,9 +720,9 @@ def assess(d):
                          "告警线 %s°C / 判故障线 %s°C。" % (warn_t, fail_t),
                          "sys_metrics.csv"))
     else:
-        f.append(finding(INFO, "CPU 散热", "读不到 CPU 温度",
-                         "这台机器的温度驱动不是 coretemp/k10temp，"
-                         "属于正常情况，判定已自动让开。", "raw/sensors.txt"))
+        f.append(finding(INFO, "CPU 散热", "本机不上报 CPU 温度",
+                         "这台机器的温度驱动不是 coretemp/k10temp，属于正常情况，"
+                         "温度类判定已自动让开。", "raw/sensors.txt"))
 
     # 逐颗温差：双路机上一颗凉一颗烫，基本就是散热器没装好或风道偏
     pkg = d.cpu_pkg_series()
@@ -437,7 +813,8 @@ def assess(d):
     # ---------------- 硬盘 ----------------
     devs = d.smart_devices()
     if not devs:
-        f.append(finding(INFO, "硬盘", "本机未采集到任何硬盘的 SMART", "", "raw/smart-pre/"))
+        f.append(finding(INFO, "硬盘", "本机未检测到可读取 SMART 的硬盘", "",
+                         "raw/smart-pre/"))
     else:
         aged, worn, bad, hot, unsafe = [], [], [], [], []
         models = set()
@@ -498,10 +875,11 @@ def assess(d):
     if present:
         if str(meta.get("gpu_mismatch")) == "1":
             f.append(finding(WATCH, "显卡",
-                             "驱动版本不支持其中 %d 张卡" % (present - usable),
-                             "这是**我们盘里的驱动旧了**，不是客户的卡有问题 —— "
-                             "客户报告里判的是 SKIP。要测这几张卡，"
-                             "得换更新的驱动重新出盘。原话见证据文件。",
+                             "有 %d 张卡不在本轮驱动版本的支持范围内" % (present - usable),
+                             "判据是内核里 NVRM 自己打的原话。这是**驱动版本与卡的代际不匹配**，"
+                             "与卡本身的好坏无关 —— 客户报告里判的是 SKIP。"
+                             "要覆盖这几张卡，需要换一个支持该代际的驱动分支重新出盘。"
+                             "原话见证据文件。",
                              "raw/gpu-driver-mismatch.txt"))
         gpus = d.gpu_series()
         peaks = {i: max(v["temp"]) for i, v in gpus.items() if v.get("temp")}
@@ -559,9 +937,9 @@ def assess(d):
         f.append(finding(GOOD, "网卡", "%d 个已接线的口都协商到额定速率" % len(linked),
                          "共 %d 个物理口。" % len(speeds), "raw/nic-summary.txt"))
     else:
-        f.append(finding(INFO, "网卡", "现场一个口都没接网线",
-                         "共 %d 个物理口，型号/固件照常采集。" % len(speeds),
-                         "raw/nic-summary.txt"))
+        f.append(finding(INFO, "网卡", "本轮现场未接网线",
+                         "共 %d 个物理口，型号与固件照常采集；连通性一项记 SKIP。"
+                         % len(speeds), "raw/nic-summary.txt"))
 
     # ---------------- 电源 ----------------
     psus = d.psus()
@@ -607,11 +985,23 @@ def assess(d):
 
 
 # ============================================================ 渲染
+#
+# 视觉语言和客户报告保持一致（复用它的 CSS），但信息密度更高：
+# 表格更紧凑、顶部有锚点导航、原始数据全部收在可折叠块里。
+# **单文件、内嵌 CSS、不引任何外部资源** —— 现场无网络，报告要能离线打开。
+# 打印也要能看：工程人员会打出来夹进机器箱。
 
 EXTRA_CSS = """
 .internal-banner{background:#7f1d1d;color:#fff;padding:12px 18px;border-radius:6px;
 margin:0 0 18px;font-weight:700;letter-spacing:.5px}
 .internal-banner span{display:block;font-weight:400;font-size:12.5px;opacity:.92;margin-top:4px}
+.toc{position:sticky;top:0;z-index:9;background:var(--bg);border-bottom:1px solid var(--line);
+padding:9px 0;margin:14px 0 4px;display:flex;flex-wrap:wrap;gap:6px 14px;font-size:12.5px}
+.toc a{color:var(--accent);text-decoration:none;white-space:nowrap}
+.toc a:hover{text-decoration:underline}
+h2{scroll-margin-top:52px}
+.lead{color:var(--muted);font-size:12.5px;margin:2px 0 12px;padding-left:11px;
+border-left:2px solid var(--line)}
 .pill{display:inline-block;min-width:44px;text-align:center;padding:1px 9px;border-radius:10px;
 color:#fff;font-size:12px;font-weight:700;letter-spacing:1px}
 .p-good{background:#1a7f37}.p-watch{background:#b45309}.p-risk{background:#c1121f}.p-info{background:#6b7280}
@@ -623,9 +1013,37 @@ border-left-width:4px;border-radius:5px;margin-bottom:7px;background:var(--panel
 .fnd .fa{min-width:74px;color:var(--muted);font-size:12.5px}
 .fnd .fd{color:#444;font-size:13px;margin-top:2px}
 .fnd .fe{color:var(--muted);font-size:11.5px;margin-top:3px;font-family:Consolas,monospace}
-.idx{font-size:12px}
-.idx td{padding:4px 8px}
+.dense table{font-size:12px}
+.dense th,.dense td{padding:4px 8px}
+.idx td{vertical-align:top}
+.idx td.f a{display:block;font-family:Consolas,Monaco,monospace;font-size:11.5px;
+white-space:nowrap;color:var(--accent);text-decoration:none}
+.idx td.f a:hover{text-decoration:underline}
+.idx td.how{color:var(--muted);font-size:12px}
+.delta{color:#c1121f;font-weight:700}
+.same{color:var(--muted)}
+@media print{
+  .toc{display:none}
+  .internal-banner{background:#fff;color:#7f1d1d;border:2px solid #7f1d1d}
+  .fnd{break-inside:avoid}
+  details{break-inside:avoid}
+  details[open] pre{max-height:none}
+}
 """
+
+# 九节的标题与"这节是干什么的"。顺序就是读的人想知道的顺序：
+# 先结论，再身份，再配置，再逐项依据，再过程，再复查，最后才是原始数据。
+SECTIONS = (
+    ("s1", "一、结论摘要", "整机结论、本轮参数，以及所有 FAIL / WARN 的逐条清单。先看这一节。"),
+    ("s2", "二、机器身份", "这台机器是谁：厂商、型号、序列号、BIOS 与 BMC 版本、资产标签。"),
+    ("s3", "三、配置清单", "这台机器装了什么：CPU、逐条内存、存储、网络、显卡、阵列卡、电源。"),
+    ("s4", "四、逐项判定", "每一条判定的状态、依据，以及它引用了哪个原始文件。按 id 能直接定位到代码。"),
+    ("s5", "五、压测过程", "压测期间的曲线与峰值：温度、频率、功耗、负载、显卡读数、硬盘带宽。"),
+    ("s6", "六、测后复查", "压测把什么逼出来了：SMART 前后逐属性差值、内核日志、BMC 新增事件。"),
+    ("s7", "七、深度硬件数据", "不参与判定、但复盘时最值钱的那些：光模块、显卡逐卡清单、固件版本。"),
+    ("s8", "八、本轮采集范围说明", "本轮哪些数据没有、各自的客观原因，以及下一轮怎么补齐。"),
+    ("s9", "九、原始文件索引", "每一份原始数据是什么、什么时候该看它、怎么看。"),
+)
 
 
 def findings_html(items):
@@ -643,6 +1061,11 @@ def findings_html(items):
     return "".join(out)
 
 
+def nav_html():
+    return '<nav class="toc">%s</nav>' % "".join(
+        '<a href="#%s">%s</a>' % (sid, E(title)) for sid, title, _lead in SECTIONS)
+
+
 def build_internal_html(d):
     meta = d.meta
     H = []
@@ -651,31 +1074,67 @@ def build_internal_html(d):
     tag = meta.get("machine_tag") or os.path.basename(d.run_dir)
     serial = (d.system().get("整机序列号") or meta.get("serial") or "UNKNOWN")
     findings = assess(d)
+    devs = d.smart_devices()
 
     st = [r.get("status") for r in d.results]
     # 和 generate_report.py / factory-test.sh 同一条规矩：一条判定都没有 != 全都通过。
     # 三处必须一致，否则同一次运行的屏幕、交付报告、内部报告会给出三个结论。
     overall = "FAIL" if ("FAIL" in st or not st) else "PASS"
 
+    def SEC(sid):
+        for s, title, lead in SECTIONS:
+            if s == sid:
+                A('<h2 id="%s">%s</h2>' % (s, E(title)))
+                A('<p class="lead">%s</p>' % E(lead))
+                return
+        raise KeyError(sid)
+
+    # ================================================ 抬头
     A('<div class="wrap"><header>')
     A('<div class="internal-banner">内部工程报告 · 请勿外发'
-      "<span>这份是工程数据，包含设备台账字段、本次测试环境的信息和源码版本，"
-      "用于复盘和日后追溯。交付的是报告目录下与目录同名的那个 .html。</span></div>")
+      "<span>这份是工程数据，包含设备台账字段、本轮测试的环境信息和源码版本，"
+      "用于复盘和日后追溯。交付给客户的是报告目录下与目录同名的那个 .html。</span></div>")
     A('<div class="company">%s</div>' % E(meta.get("company_name")))
     A("<h1>%s ｜ 工程数据</h1>" % E(meta.get("report_title") or "服务器出厂老化测试报告"))
     A('<div class="sub">机器标识 <b>%s</b></div>' % E(tag))
-    A('<div class="sub">整机序列号 %s ｜ 测试 %s ~ %s ｜ %s ｜ 实际耗时 %s</div>'
-      % (E(serial), E(meta.get("start_time")), E(meta.get("end_time")),
-         E(profile_text(meta.get("profile"))), E(fmt_dur(meta.get("elapsed_secs")))))
     A("</header>")
+    A(nav_html())
 
-    A('<div style="margin:16px 0 6px"><span class="verdict v-%s">%s</span>' % (overall, overall))
+    # ================================================ 一、结论摘要
+    SEC("s1")
+    A('<div style="margin:10px 0 6px"><span class="verdict v-%s">%s</span>' % (overall, overall))
     A('<span style="margin-left:16px" class="sub">通过 %d ｜ 失败 %d ｜ 告警 %d ｜ 跳过 %d'
       "（整机结论只看有没有 FAIL）</span></div>"
       % (st.count("PASS"), st.count("FAIL"), st.count("WARN"), st.count("SKIP")))
 
-    # ---------------- 一、内部评估 ----------------
-    A("<h2>一、内部评估：这台机器什么成色</h2>")
+    A("<h3>1.1 本轮参数</h3>")
+    thr = meta.get("thresholds") or {}
+    A(kv_block(OrderedDict([
+        ("整机序列号", serial),
+        ("测试档位", profile_text(meta.get("profile"))),
+        ("计划时长", fmt_dur(meta.get("planned_secs"))),
+        ("实际耗时", fmt_dur(meta.get("elapsed_secs"))),
+        ("开始时间", meta.get("start_time")),
+        ("结束时间", meta.get("end_time")),
+        ("硬盘破坏性压测", "已执行" if str(meta.get("disk_confirmed")) == "1" else "不在本轮范围内"),
+        ("CPU 温度阈值", "告警 %s / 故障 %s °C"
+         % (thr.get("cpu_temp_warn"), thr.get("cpu_temp_fail"))),
+        ("GPU 温度阈值", "告警 %s / 故障 %s °C"
+         % (thr.get("gpu_temp_warn"), thr.get("gpu_temp_fail"))),
+        ("硬盘温度阈值", "告警 %s / 故障 %s °C"
+         % (thr.get("disk_temp_warn"), thr.get("disk_temp_fail"))),
+    ])))
+
+    bad_rows = [r for r in d.results if r.get("status") in ("FAIL", "WARN")]
+    A("<h3>1.2 需要处理的项</h3>")
+    if bad_rows:
+        A(table([OrderedDict([("状态", r.get("status")), ("项目", r.get("name")),
+                              ("结论", r.get("detail")), ("证据", r.get("ref"))])
+                 for r in bad_rows]))
+    else:
+        A('<p class="muted">本轮没有 FAIL，也没有 WARN。</p>')
+
+    A("<h3>1.3 工程评估</h3>")
     counts = OrderedDict()
     for lv in (RISK, WATCH, GOOD, INFO):
         n = len([x for x in findings if x["level"] == lv])
@@ -686,46 +1145,30 @@ def build_internal_html(d):
       "它们回答的是另一个问题：这台机器哪里好、哪里将来可能出问题、这一轮测得干不干净。</p>")
     A(findings_html(findings))
 
-    # ---------------- 二、本次测试环境 ----------------
-    A("<h2>二、本次测试环境</h2>")
-    thr = meta.get("thresholds") or {}
-    A(kv_block(OrderedDict([
-        ("KLBurn 版本", meta.get("klburn_version")),
-        ("源码 commit", meta.get("git_commit")),
-        ("构建日期", meta.get("build_date")),
-        ("基础系统", meta.get("base_os")),
-        ("运行内核", meta.get("kernel")),
-        ("显卡驱动", ("已包含 %s" % meta.get("nvidia_version")
-                      if str(meta.get("include_nvidia")) == "1" else "未包含")),
-        ("阵列卡工具", "盘内有 storcli64" if str(meta.get("storcli_present")) == "1"
-                       else "盘内没有 storcli64"),
-        ("显卡压测程序", "盘内有 gpu_burn" if str(meta.get("gpu_burn_present")) == "1"
-                         else "盘内没有 gpu_burn"),
-        ("报告落盘设备", meta.get("data_partition")),
-        ("联网校时", "成功" if str(meta.get("clock_synced")) == "1" else "未成功"),
-        ("CPU 温度阈值", "告警 %s / 故障 %s °C"
-         % (thr.get("cpu_temp_warn"), thr.get("cpu_temp_fail"))),
-        ("GPU 温度阈值", "告警 %s / 故障 %s °C"
-         % (thr.get("gpu_temp_warn"), thr.get("gpu_temp_fail"))),
-        ("硬盘温度阈值", "告警 %s / 故障 %s °C"
-         % (thr.get("disk_temp_warn"), thr.get("disk_temp_fail"))),
-    ])))
+    # ================================================ 二、机器身份
+    SEC("s2")
+    sysinfo = OrderedDict(d.system())
+    sysinfo["KLBurn 版本"] = meta.get("klburn_version")
+    sysinfo["源码 commit"] = meta.get("git_commit")
+    sysinfo["介质构建日期"] = meta.get("build_date")
+    sysinfo["基础系统"] = meta.get("base_os")
+    sysinfo["运行内核"] = meta.get("kernel")
+    sysinfo["报告落盘设备"] = meta.get("data_partition")
+    # 有才写。没有的那些统一在第八节交代清楚是哪一项数据、由什么提供，
+    # 不在这里写一行"没有 XXX"。
+    if str(meta.get("include_nvidia")) == "1" and meta.get("nvidia_version"):
+        sysinfo["显卡驱动版本"] = "NVIDIA %s" % meta.get("nvidia_version")
+    A(kv_block(sysinfo))
 
-    gaps = d.env_gaps()
-    A("<h3>本次采集的缺口</h3>")
-    if gaps:
-        A('<p class="sub">下面这些是<b>我们环境</b>的问题，不是被测机器的问题。'
-          "客户报告里对应的项一律记 SKIP。缺的数据会让日后追溯少一块，能补就补。</p>")
-        A(table([OrderedDict([("类型", k), ("文件", rel), ("命令 / 工具", what)])
-                 for k, rel, what in gaps]))
-    else:
-        A('<p class="muted">没有超时、也没有缺工具，本轮采集是完整的。</p>')
-
-    # ---------------- 三、硬盘全量参数 ----------------
-    A("<h2>三、硬盘全量参数</h2>")
-    devs = d.smart_devices()
+    # ================================================ 三、配置清单
+    SEC("s3")
+    A("<h3>3.1 CPU</h3>")
+    A('<div class="dense">%s</div>' % table(d.cpus(), "未读到 CPU 信息"))
+    A("<h3>3.2 内存（逐条）</h3>")
+    A('<div class="dense">%s</div>' % table(d.dimms(), "未检测到内存条信息"))
+    A("<h3>3.3 存储</h3>")
     if not devs:
-        A('<p class="muted">未采集到任何硬盘的 SMART。</p>')
+        A('<p class="muted">未检测到可读取 SMART 的硬盘。</p>')
     else:
         lsb = d.lsblk_by_name()
         rows = []
@@ -753,9 +1196,92 @@ def build_internal_html(d):
             ]))
         A('<p class="sub">通电时间 / 通电次数 / 已用寿命 / 异常掉电这几列不参与判定，'
           "交付报告里不列；做设备台账、排产，以及日后回查时用的就是它们。</p>")
-        A(table(rows))
+        A('<div class="dense">%s</div>' % table(rows))
+    A("<h3>3.4 网络</h3>")
+    A('<div class="dense">%s</div>' % table(d.nics(), "未检测到物理网口"))
+    A("<h3>3.5 显卡</h3>")
+    A('<div class="dense">%s</div>' % table(d.gpus(), "未安装独立显卡"))
+    A("<h3>3.6 阵列卡</h3>")
+    A('<div class="dense">%s</div>' % table(d.raid(), "未安装阵列卡"))
+    A("<h3>3.7 电源</h3>")
+    A('<div class="dense">%s</div>' % table(d.psus(), "BIOS 未上报电源信息"))
 
-        A("<h3>坏道类计数：压测前 → 压测后</h3>")
+    # ================================================ 四、逐项判定
+    SEC("s4")
+    A('<p class="sub">客户报告只显示名称和结论，这里连 id 和证据文件路径一起列出来 —— '
+      "复盘时按 id 就能直接定位到代码里的判定分支。</p>")
+    A('<div class="dense">%s</div>' % table(
+        [OrderedDict([("状态", r.get("status")), ("id", r.get("id")),
+                      ("名称", r.get("name")), ("结论", r.get("detail")),
+                      ("证据", r.get("ref")), ("时间", r.get("time"))])
+         for r in d.results], "没有任何判定记录"))
+    if d.metrics:
+        A("<h3>4.1 实测指标全量</h3>")
+        A('<div class="dense">%s</div>' % table(
+            [OrderedDict([("分组", m.get("group")), ("指标", m.get("key")),
+                          ("数值", m.get("value"))]) for m in d.metrics]))
+
+    # ================================================ 五、压测过程
+    SEC("s5")
+    temps, freqs, powers = d.sys_series()
+    pkg = d.cpu_pkg_series()
+    if pkg:
+        A("<h3>5.1 逐颗 CPU 封装温度</h3>")
+        A('<p class="sub">客户报告只画一条整机最高温。逐颗分开画，才看得出'
+          "是不是某一颗的散热器没装好 —— 这是双路机最常见的隐性问题。</p>")
+        A(svg_line_chart([("CPU%d" % i, pkg[i]) for i in sorted(pkg)],
+                         y_label="°C", y_suffix="°C"))
+    if temps:
+        A("<h3>5.2 整机最高 CPU 温度</h3>")
+        A(svg_line_chart([("CPU 最高温", temps)], y_label="°C", y_suffix="°C"))
+    if freqs:
+        A("<h3>5.3 全核平均频率</h3>")
+        A(svg_line_chart([("平均频率", freqs)], y_label="MHz", y_suffix="MHz"))
+    if powers:
+        A("<h3>5.4 CPU 封装功耗</h3>")
+        A(svg_line_chart([("封装功耗", powers)], y_label="W", y_suffix="W"))
+    load, memused = d.sys_extra_series()
+    if load or memused:
+        A("<h3>5.5 系统负载与内存占用</h3>")
+        A('<p class="sub">用来核对压测强度：负载没上去 = 压测没真跑满；'
+          "内存占用曲线能看出内存压测吃到了多少、离 OOM 还有多远。</p>")
+        if load:
+            A(svg_line_chart([("1 分钟负载", load)], y_label="load"))
+        if memused:
+            A(svg_line_chart([("已用内存", memused)], y_label="MB", y_suffix="MB"))
+
+    gfull = d.gpu_full_series()
+    if gfull:
+        A("<h3>5.6 GPU 频率 / 利用率 / 显存占用</h3>")
+        A('<p class="sub">利用率没到 100% 说明压测没喂满，出来的温度功耗数字要打折看。</p>')
+        for key, label, suf in (("clock", "SM 频率", "MHz"), ("util", "利用率", "%"),
+                                ("mem", "显存占用", "MB")):
+            series = [("GPU%s %s" % (i, gfull[i]["name"]), gfull[i][key])
+                      for i in sorted(gfull) if gfull[i][key]]
+            if series:
+                A("<p class='sub'>%s</p>" % E(label))
+                A(svg_line_chart(series, y_label=suf, y_suffix=suf))
+
+    fio = d.fio_results()
+    if fio:
+        A("<h3>5.7 硬盘性能数据</h3>")
+        A('<div class="dense">%s</div>' % table(fio))
+
+    A("<h3>5.8 压测日志原文</h3>")
+    for title, rel in (("CPU 压测", "stress/cpu-stress-ng.log"),
+                       ("内存压测", "stress/mem-stressapptest.log"),
+                       ("内存压测（退到 stress-ng --vm）", "stress/mem-stress-ng.log"),
+                       ("GPU 压测", "stress/gpu-burn.log")):
+        p = d.rawpath(rel)
+        if os.path.exists(p) and read_text(p).strip():
+            A(collapsible("%s  [raw/%s]" % (title, rel), read_text(p)[:120000]))
+
+    # ================================================ 六、测后复查
+    SEC("s6")
+    A("<h3>6.1 坏道类计数：压测前 → 压测后</h3>")
+    if not devs:
+        A('<p class="muted">未采集到任何硬盘的 SMART。</p>')
+    else:
         A('<p class="sub">出厂测试真正的价值在这张表：压测本身跑完不代表没问题，'
           "要看压测把什么逼出来了。任何一格前后变大都是硬伤。</p>")
         fields = [("realloc_sectors", "重分配扇区"), ("pending_sectors", "待处理扇区"),
@@ -774,137 +1300,97 @@ def build_internal_html(d):
                 else:
                     row[label] = "%s → %s ⚠" % (a, b)
             rows.append(row)
-        A(table(rows))
+        A('<div class="dense">%s</div>' % table(rows))
 
-    # ---------------- 四、压测曲线 ----------------
-    A("<h2>四、压测曲线（比客户报告多几条）</h2>")
-    temps, freqs, powers = d.sys_series()
-    pkg = d.cpu_pkg_series()
-    if pkg:
-        A("<h3>4.1 逐颗 CPU 封装温度</h3>")
-        A('<p class="sub">客户报告只画一条整机最高温。逐颗分开画，才看得出'
-          "是不是某一颗的散热器没装好 —— 这是双路机最常见的隐性问题。</p>")
-        A(svg_line_chart([("CPU%d" % i, pkg[i]) for i in sorted(pkg)],
-                         y_label="°C", y_suffix="°C"))
-    if temps:
-        A("<h3>4.2 整机最高 CPU 温度</h3>")
-        A(svg_line_chart([("CPU 最高温", temps)], y_label="°C", y_suffix="°C"))
-    if freqs:
-        A("<h3>4.3 全核平均频率</h3>")
-        A(svg_line_chart([("平均频率", freqs)], y_label="MHz", y_suffix="MHz"))
-    if powers:
-        A("<h3>4.4 CPU 封装功耗</h3>")
-        A(svg_line_chart([("封装功耗", powers)], y_label="W", y_suffix="W"))
-    load, memused = d.sys_extra_series()
-    if load or memused:
-        A("<h3>4.5 系统负载与内存占用</h3>")
-        A('<p class="sub">用来核对压测强度：负载没上去 = 压测没真跑满；'
-          "内存占用曲线能看出内存压测吃到了多少、离 OOM 还有多远。</p>")
-        if load:
-            A(svg_line_chart([("1 分钟负载", load)], y_label="load"))
-        if memused:
-            A(svg_line_chart([("已用内存", memused)], y_label="MB", y_suffix="MB"))
+    A("<h3>6.2 内核日志与 BMC 事件</h3>")
+    got_any = False
+    for title, rel in (("开机阶段筛出的硬件错误", "dmesg-errors-boot.txt"),
+                       ("压测期间筛出的硬件错误", "dmesg-errors.txt"),
+                       ("压测期间新增的内核日志", "dmesg-delta.txt"),
+                       ("压测期间 BMC 新增事件", "ipmi-sel-new.txt"),
+                       ("压测后的 BMC 传感器读数", "ipmi-sensors-post.txt")):
+        p = d.rawpath(rel)
+        if os.path.exists(p) and read_text(p).strip():
+            got_any = True
+            A(collapsible("%s  [raw/%s]" % (title, rel), read_text(p)[:120000]))
+    if not got_any:
+        A('<p class="muted">压测前后没有筛出任何硬件错误行，BMC 也没有新增事件。</p>')
 
-    gfull = d.gpu_full_series()
-    if gfull:
-        A("<h3>4.6 GPU 频率 / 利用率 / 显存占用</h3>")
-        A('<p class="sub">利用率没到 100% 说明压测没喂满，出来的温度功耗数字要打折看。</p>')
-        for key, label, suf in (("clock", "SM 频率", "MHz"), ("util", "利用率", "%"),
-                                ("mem", "显存占用", "MB")):
-            series = [("GPU%s %s" % (i, gfull[i]["name"]), gfull[i][key])
-                      for i in sorted(gfull) if gfull[i][key]]
-            if series:
-                A("<p class='sub'>%s</p>" % E(label))
-                A(svg_line_chart(series, y_label=suf, y_suffix=suf))
-
-    # ---------------- 五、逐项判定明细 ----------------
-    A("<h2>五、逐项判定明细（含内部 id 与证据文件）</h2>")
-    A('<p class="sub">客户报告只显示名称和结论，这里连 id 和证据文件路径一起列出来 —— '
-      "复盘时按 id 就能直接定位到代码里的判定分支。</p>")
-    rows = []
-    for r in d.results:
-        rows.append(OrderedDict([
-            ("状态", r.get("status")),
-            ("id", r.get("id")),
-            ("名称", r.get("name")),
-            ("结论", r.get("detail")),
-            ("证据", r.get("ref")),
-            ("时间", r.get("time")),
-        ]))
-    A(table(rows, "没有任何判定记录"))
-
-    if d.metrics:
-        A("<h3>实测指标全量</h3>")
-        A(table([OrderedDict([("分组", m.get("group")), ("指标", m.get("key")),
-                              ("数值", m.get("value"))]) for m in d.metrics]))
-
-    fio = d.fio_results()
-    if fio:
-        A("<h3>硬盘性能数据</h3>")
-        A(table(fio))
-
-    # ---------------- 六、更多硬件明细 ----------------
-    A("<h2>六、更多硬件明细</h2>")
+    # ================================================ 七、深度硬件数据
+    SEC("s7")
+    got_any = False
     optics = d.nic_optics()
     if optics:
-        A("<h3>6.1 光模块</h3>")
+        got_any = True
+        A("<h3>7.1 光模块</h3>")
         A('<p class="sub">只有插着模块时才读得到。光口机器出问题时，'
           "收发光功率是最值钱的一份数据 —— 客户报告里没有它。</p>")
-        A(table(optics))
-
+        A('<div class="dense">%s</div>' % table(optics))
     inv = d.gpu_inventory()
     if inv:
-        A("<h3>6.2 显卡逐卡清单（压测后读的 PCIe 链路）</h3>")
-        A(table([OrderedDict((k, v) for k, v in row.items()) for row in inv]))
-
-    A("<h3>6.3 内存条明细</h3>")
-    A(table(d.dimms(), "未检测到内存条信息"))
-
-    # ---------------- 七、raw/ 索引 ----------------
-    # 本报告自己就在 raw/ 里，所以相对链接直接可用：在 U 盘上双击打开这份 HTML，
-    # 点任何一行就能跳到对应的原始文件，不用再去翻目录。
-    A("<h2>七、raw/ 文件索引</h2>")
-    idx = [(rel, size) for rel, size in d.raw_index()
-           if not rel.startswith("INTERNAL_")]
-    A('<p class="sub">共 %d 个文件，下面的链接可以直接点开（在浏览器里打开本文件时有效）。</p>'
-      % len(idx))
-    # 链接要原样输出，不能被 E() 转义，所以这张表自己拼
-    A('<div class="tablewrap"><table class="idx"><thead><tr><th>文件</th><th>大小</th>'
-      "</tr></thead><tbody>")
-    for rel, size in idx:
-        A('<tr><td><a href="%s">%s</a></td><td>%s</td></tr>'
-          % (html.escape(rel), html.escape(rel), E(human_bytes(size) if size else "0 B")))
-    A("</tbody></table></div>")
-
-    # ---------------- 八、关键原始输出 ----------------
-    A("<h2>八、关键原始输出</h2>")
-    A('<p class="sub">挑几份最常翻的内嵌进来，省得一个个开文件。'
-      "单份超过 120KB 的会截断，完整内容点上面的索引。</p>")
-    for title, rel in [
-        ("驱动/显卡不匹配的内核原话", "gpu-driver-mismatch.txt"),
-        ("显卡驱动信息", "gpu-driver-modinfo.txt"),
-        ("内核日志中的硬件错误（开机）", "dmesg-errors-boot.txt"),
-        ("内核日志中的硬件错误（压测）", "dmesg-errors.txt"),
-        ("IPMI 传感器读数（测后）", "ipmi-sensors-post.txt"),
-        ("BMC 新增事件", "ipmi-sel-new.txt"),
-        ("联网校时日志", "clock-sync.log"),
-        ("CPU 压测日志", "stress/cpu-stress-ng.log"),
-        ("内存压测日志", "stress/mem-stressapptest.log"),
-        ("GPU 压测日志", "stress/gpu-burn.log"),
-        ("PCIe 链路详情", "lspci-vv.txt"),
-        ("扩展 SMART（第一块盘）",
-         "deep/smart-x-%s.txt" % (devs[0] if devs else "none")),
-        ("本次开机完整日志", "deep/journal-boot.txt"),
-    ]:
+        got_any = True
+        A("<h3>7.2 显卡逐卡清单（压测后读的 PCIe 链路）</h3>")
+        A('<div class="dense">%s</div>' % table(
+            [OrderedDict((k, v) for k, v in row.items()) for row in inv]))
+    for title, rel in (("PCIe 链路详情", "lspci-vv.txt"),
+                       ("显卡驱动信息", "gpu-driver-modinfo.txt"),
+                       ("驱动与显卡不匹配的内核原话", "gpu-driver-mismatch.txt"),
+                       ("扩展 SMART（第一块盘）",
+                        "deep/smart-x-%s.txt" % (devs[0] if devs else "none")),
+                       ("现场核对过的配置屏", "config-review.txt"),
+                       ("联网校时日志", "clock-sync.log"),
+                       ("本次开机完整日志", "deep/journal-boot.txt")):
         p = d.rawpath(rel)
         if not os.path.exists(p):
             continue
         txt = read_text(p)
         if not txt.strip():
             continue
+        got_any = True
         if len(txt) > 120000:
             txt = txt[:120000] + "\n...（已截断，完整内容见 raw/%s）" % rel
         A(collapsible("%s  [raw/%s]" % (title, rel), txt))
+    if not got_any:
+        A('<p class="muted">本轮没有采到这一类数据。</p>')
+
+    # ================================================ 八、本轮采集范围说明
+    SEC("s8")
+    notes = d.scope_notes()
+    if notes:
+        A('<p class="sub">下面这些项与<b>被测机器的状态无关</b>，是本轮采集条件的客观限制。'
+          "客户报告里对应的项一律记 SKIP，不影响整机结论。"
+          "「补齐办法」那一列写清楚了下一轮怎么把这份数据取到。</p>")
+        A('<div class="dense">%s</div>' % table(
+            [OrderedDict([("性质", k), ("本轮未取到的数据", what),
+                          ("该数据由什么提供", by), ("证据文件", rel),
+                          ("补齐办法", more)])
+             for k, what, by, rel, more in notes]))
+    else:
+        A('<p class="muted">本轮采集是完整的：没有超时，也没有需要专用工具才能取到的项。</p>')
+
+    # ================================================ 九、原始文件索引
+    # 本报告自己就在 raw/ 里，所以相对链接直接可用：在 U 盘上双击打开这份 HTML，
+    # 点任何一行就能跳到对应的原始文件，不用再去翻目录。
+    SEC("s9")
+    grouped = d.raw_index_grouped()
+    total = sum(len(files) for entries in grouped.values() for _info, files in entries)
+    A('<p class="sub">共 %d 个文件。看的人是工程人员不是开发人员，所以这张表除了链接，'
+      "还写清楚每一类<b>是什么、什么时候该看它、怎么看</b>。"
+      "链接在浏览器里打开本文件时可以直接点开。</p>" % total)
+    for group, entries in grouped.items():
+        A("<h3>%s</h3>" % E(group))
+        # 链接要原样输出、不能被 E() 转义，所以这张表自己拼
+        A('<div class="tablewrap dense"><table class="idx"><thead><tr>'
+          "<th>文件</th><th>这是什么</th><th>什么时候该看它</th><th>怎么看</th>"
+          "</tr></thead><tbody>")
+        for info, files in entries:
+            links = "".join(
+                '<a href="%s">%s <span class="same">(%s)</span></a>'
+                % (html.escape(rel), html.escape(rel), E(human_bytes(size) if size else "0 B"))
+                for rel, size in files)
+            A('<tr><td class="f">%s</td><td>%s</td><td>%s</td><td class="how">%s</td></tr>'
+              % (links, E(info[1]), E(info[2]), E(info[3])))
+        A("</tbody></table></div>")
 
     A("<footer>")
     A("KLBurn v%s ｜ 源码 %s ｜ 生成自 %s<br>"
@@ -922,10 +1408,25 @@ def build_internal_html(d):
 
 def main():
     ap = argparse.ArgumentParser()
-    ap.add_argument("--run-dir", required=True)
+    ap.add_argument("--run-dir")
     ap.add_argument("--out", default=None)
+    # 给 tests/test-internal-report.sh 用：把 rootfs 里所有 capture() 的目标文件名
+    # 逐个丢进来，有一个落到 UNKNOWN 就说明"采了数据却没写说明"。
+    ap.add_argument("--classify", default=None,
+                    help="查一个 raw/ 下的相对路径属于索引里的哪一类")
     a = ap.parse_args()
 
+    if a.classify is not None:
+        info = classify_raw(a.classify)
+        if info is None:
+            print("UNKNOWN\t%s" % a.classify)
+            return 1
+        print("%s\t%s" % (info[0], info[1]))
+        return 0
+
+    if not a.run_dir:
+        print("要么给 --run-dir，要么给 --classify", file=sys.stderr)
+        return 2
     if not os.path.isdir(a.run_dir):
         print("run-dir 不存在: %s" % a.run_dir, file=sys.stderr)
         return 1
