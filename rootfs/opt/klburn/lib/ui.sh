@@ -5,6 +5,10 @@ COLS="$(tput cols 2>/dev/null || echo 80)"
 [[ "$COLS" =~ ^[0-9]+$ ]] || COLS=80
 (( COLS < 60 )) && COLS=80
 
+ROWS="$(tput lines 2>/dev/null || echo 25)"
+[[ "$ROWS" =~ ^[0-9]+$ ]] || ROWS=25
+(( ROWS < 24 )) && ROWS=25
+
 hr()  { printf '%s%s%s\n' "$C_GRY" "$(printf '=%.0s' $(seq 1 "$COLS"))" "$C_RST"; }
 hr2() { printf '%s%s%s\n' "$C_GRY" "$(printf -- '-%.0s' $(seq 1 "$COLS"))" "$C_RST"; }
 
@@ -138,45 +142,120 @@ EOF
   printf '%s\n' "$C_RST"
 }
 
-# ---------------------------------------------------------------- 进度条（压测期间）
-# progress_bar <已用秒> <总秒> <标签>
-progress_bar() {
-  local elapsed="$1" total="$2" label="$3"
-  (( total <= 0 )) && total=1
-  # 格式串里除进度条本身外的固定开销正好 39 个字符：
-  #   2空格 + 10标签 + 1空格 + '[' + ']' + 1空格 + 3百分比 + '%' + 2空格 + 8耗时 + '/' + 8总时长
-  # 整行只要达到或超过终端宽度就会自动换行，\r 随后回到的是换行后的新行，
-  # 结果就是每刷新一次多一行、把整屏刷满。留 3 格余量确保永不触发换行。
-  local width=$(( COLS - 39 - 3 ))
-  (( width < 10 )) && width=10
-  local filled=$(( elapsed * width / total ))
-  (( filled > width )) && filled=$width
-  local pct=$(( elapsed * 100 / total ))
-  (( pct > 100 )) && pct=100
-  printf '\r\033[K  %-10s [%s%s] %3d%%  %s/%s' \
-    "$label" \
-    "$(printf '#%.0s' $(seq 1 $((filled>0?filled:0)) ) )" \
-    "$(printf ' %.0s' $(seq 1 $((width-filled>0?width-filled:0)) ) )" \
-    "$pct" "$(fmt_dur "$elapsed")" "$(fmt_dur "$total")"
+# ================================================================
+# 屏幕面板
+# ================================================================
+#
+# 三条硬约束，改这一段之前先读 docs/architecture.md §11-14 / §11-23：
+#
+#   1. **框线只用 ASCII（+ - | =）。** 现场是通过 BMC 的 KVM 或串口看这块屏幕的，
+#      字体和字符集都不受我们控制，Unicode 制表符有很大概率变成一屏乱码 ——
+#      而这块屏幕是操作员判断"机器现在什么状态"的唯一依据。
+#
+#   2. **屏幕上一律英文。** Linux 文本控制台显示不了中文。中文只进 HTML 报告。
+#      所有进面板的文本都过 ascii_clean()：型号串来自 dmidecode / nvidia-smi，
+#      理论上带得进非 ASCII 字节，而一个字节就能把整屏顶花。
+#      这是"屏幕上不许出现非 ASCII"这条不变量**唯一的收口处**。
+#
+#   3. **不用 \033[A 做粘滞刷新区**（§11-14：只要有别的东西往控制台上写，
+#      光标就不在预期位置，之后每次 \r 都回到错的行，看着像整个程序卡死）。
+#      改成"整屏定期重绘"：每 2 秒清屏 + 从第一行重画。被别人写脏了，
+#      下一次重绘自动修好。前提是把别的写入源掐干净 ——
+#      压测子进程的输出全部重定向进日志文件，进仪表盘前 console_quiet_on
+#      把内核消息压下去。
+#
+# 渲染函数一律是**纯函数**：只吃数据、只吐printable ASCII，不碰硬件、不带颜色。
+# 这样 tests/test-screen-render.sh 可以直接喂 fixture 断言行数/列宽/字符集。
+
+# 只留可打印 ASCII。控制字符、ESC、中文全部丢掉。
+ascii_clean() { printf '%s' "$*" | LC_ALL=C tr -cd '\40-\176'; }
+
+# 面板宽度：跟着终端走，但夹在 80~120 之间。
+#   下限 80 —— 串口和多数 BMC KVM 就是 80 列，再窄的布局没意义
+#   上限 120 —— 再宽一行扫不过来，而且表格拉得太开反而难对齐
+panel_width() {
+  local w="${COLS:-80}"
+  [[ "$w" =~ ^[0-9]+$ ]] || w=80
+  (( w < 80 ))  && w=80
+  (( w > 120 )) && w=120
+  printf '%s' "$w"
 }
 
-# ---------------------------------------------------------------- 压测期间的实时读数
-#
-# 设计上踩过的坑，别再退回去：
-#
-# 0.6.0/0.7.0 用的是"进度条一行 + 读数一行，画完用 \033[A 把光标挪回去"的
-# 粘滞两行区。现场直接翻车：只要有**别的东西**往控制台上写（内核的 OOM 消息、
-# bash 的 "... Killed"、并发子 shell 的 info 行），光标就不在预期的位置上了，
-# 之后每一次 \r 都回到错的行，进度条碎片被甩到屏幕右边，看着就像整个程序卡死。
-# 现场那次从 17:13 一直"卡"到 17:22 —— 其实程序一直在跑，只是屏幕不动了。
-#
-# 现在的做法是不跟光标较劲：
-#   - 进度条仍然是单行 \r 刷新（这条从 0.1.0 起就是对的，没出过问题）
-#   - 读数改成**正常打印**的一整块，随屏幕自然滚动，每张卡各占一行
-# 就算中间被别的输出插一脚，最多是块和块之间多几行日志，永远不会错位。
-# 附带好处：滚上去能看到整个压测过程的温度变化历史。
+# str_put <底串> <起始位置(0基)> <要盖上去的串> -> 新串
+# 纯字符串操作，不 fork。越界一律裁掉，绝不让行变长（变长就折行，折行就滚屏）。
+str_put() {
+  local base="$1" pos="$2" s="$3"
+  [[ "$pos" =~ ^-?[0-9]+$ ]] || pos=0
+  (( pos < 0 )) && pos=0
+  local blen=${#base}
+  (( pos >= blen )) && { printf '%s' "$base"; return; }
+  (( pos + ${#s} > blen )) && s="${s:0:blen-pos}"
+  printf '%s%s%s' "${base:0:pos}" "$s" "${base:pos+${#s}}"
+}
 
-# gpu_status_rows -> 每行 "序号|型号|温度|功耗|频率|利用率"
+box_rule() { printf '+%s+\n' "$(printf '%*s' "$(( ${1:-80} - 2 ))" '' | tr ' ' '=')"; }
+box_sep()  { printf '+%s+\n' "$(printf '%*s' "$(( ${1:-80} - 2 ))" '' | tr ' ' '-')"; }
+
+# box_row <宽> <内容>
+box_row() {
+  local w="${1:-80}" inner=$(( ${1:-80} - 2 )) s
+  s="$(ascii_clean "${2:-}")"
+  printf '|%-*.*s|\n' "$inner" "$inner" "$s"
+}
+
+# box_row3 <宽> <左> <中> <右>  —— 抬头那一行：左中右三段各就各位
+box_row3() {
+  local w="${1:-80}" inner=$(( ${1:-80} - 2 )) l c r line
+  l="$(ascii_clean "${2:-}")"; c="$(ascii_clean "${3:-}")"; r="$(ascii_clean "${4:-}")"
+  line="$(printf '%*s' "$inner" '')"
+  line="$(str_put "$line" 2 "$l")"
+  line="$(str_put "$line" $(( (inner - ${#c}) / 2 )) "$c")"
+  line="$(str_put "$line" $(( inner - ${#r} - 2 )) "$r")"
+  printf '|%s|\n' "$line"
+}
+
+# 双栏：左栏占 62%，中间一根竖线
+panel_split() { printf '%s' $(( (${1:-80} - 2) * 62 / 100 )); }
+
+box_sep2() {
+  local w="${1:-80}" lw; lw="$(panel_split "$w")"
+  printf '+%s+%s+\n' \
+    "$(printf '%*s' "$lw" '' | tr ' ' '-')" \
+    "$(printf '%*s' "$(( w - 3 - lw ))" '' | tr ' ' '-')"
+}
+
+# box_row2 <宽> <左栏内容> <右栏内容>
+box_row2() {
+  local w="${1:-80}" lw rw l r
+  lw="$(panel_split "$w")"; rw=$(( w - 3 - lw ))
+  l="$(ascii_clean "${2:-}")"; r="$(ascii_clean "${3:-}")"
+  printf '|%-*.*s|%-*.*s|\n' "$lw" "$lw" "$l" "$rw" "$rw" "$r"
+}
+
+# 整屏重绘的第一步。用裸转义而不是 clear(1)：clear 要 fork、要 terminfo，
+# 而这条每 2 秒跑一次；ESC[H 回原点 + ESC[2J 清屏，任何终端都认。
+screen_home() { printf '\033[H\033[2J'; }
+
+# ---------------------------------------------------------------- 掐掉别的写入源
+# 整屏重绘的前提是"只有我们在往控制台写"。内核消息（PCIe AER、EDAC、nvme reset）
+# 会在压测期间随时插进来，把刚画好的面板顶掉一半。
+# 只压 **console** 的 loglevel，不动 ring buffer —— dmesg 采集和 OOM 判定
+# 读的都是 ring buffer，一个字都不会少。
+_PRINTK_SAVED=""
+console_quiet_on() {
+  [[ -r /proc/sys/kernel/printk ]] || return 0
+  _PRINTK_SAVED="$(awk '{print $1}' /proc/sys/kernel/printk 2>/dev/null)"
+  [[ "$_PRINTK_SAVED" =~ ^[0-9]+$ ]] || { _PRINTK_SAVED=""; return 0; }
+  dmesg -n 1 >/dev/null 2>&1 || true
+}
+console_quiet_off() {
+  [[ -n "$_PRINTK_SAVED" ]] || return 0
+  dmesg -n "$_PRINTK_SAVED" >/dev/null 2>&1 || true
+  _PRINTK_SAVED=""
+}
+
+# ---------------------------------------------------------------- 数据源
+# gpu_status_rows -> 每行 "序号|型号|温度|功耗|频率|利用率|显存已用MB"
 #
 # 读 gpu_monitor 已经在写的 gpu_metrics.csv 的最后一轮采样，
 # **不再单独 fork nvidia-smi**：多卡机器上每次起一个 nvidia-smi 要几百毫秒，
@@ -187,63 +266,539 @@ progress_bar() {
 gpu_status_rows() {
   local csv="${1:-${RUN_DIR:-}/gpu_metrics.csv}"
   [[ -s "$csv" ]] || return 0
-  awk -F, 'NR>1 && NF>=7 { last=$1; rows[++n]=$0 }
+  awk -F, 'NR>1 && NF>=8 { last=$1; rows[++n]=$0 }
            END {
              for (i = 1; i <= n; i++) {
                split(rows[i], c, ",")
                if (c[1] == last)
-                 printf "%s|%s|%s|%s|%s|%s\n", c[2], c[3], c[4], c[5], c[6], c[7]
+                 printf "%s|%s|%s|%s|%s|%s|%s\n", c[2], c[3], c[4], c[5], c[6], c[7], c[8]
              }
            }' "$csv" 2>/dev/null
 }
 
-# 一整块实时读数。全英文：Linux 文本控制台显示不了中文。
-status_block() {
-  local elapsed="$1" total="$2"
-  local f p line idx name temp power clk util
-
-  hr2
-  printf '  %s%s%s  BURN-IN  %s / %s\n' \
-    "$C_BLD" "$(tss)" "$C_RST" "$(fmt_dur "$elapsed")" "$(fmt_dur "$total")"
-
-  # ---- CPU：逐颗封装温度各占一行，和下面的 GPU 行左对齐 ----
-  # 列宽写死成和 GPU 行一致，这样 CPU0/CPU1/GPU0/GPU1 的编号、温度、功耗
-  # 都落在同一列上，扫一眼就能看出哪颗/哪张偏高。
-  f="$(cpu_freq_avg_mhz)"
-  p="$(cpu_power_w)"
-  local got=0 first=1
-  while read -r idx temp; do
-    [[ -n "$idx" ]] || continue
-    got=1
-    if (( first )); then
-      # 频率和封装功耗是整机级的读数，只挂在第一行后面，不逐颗重复
-      printf '   %-5s %3s C  %6s W  %6s MHz\n' \
-        "$idx" "$temp" "${p:---}" "${f:---}"
-      first=0
-    else
-      printf '   %-5s %3s C\n' "$idx" "$temp"
-    fi
-  done < <(cpu_temp_per_pkg)
-  if (( got == 0 )); then
-    # 读不到温度是正常情况（服务器 CPU 的温度驱动不一定是 coretemp），
-    # 照样把频率和功耗打出来，不要整行消失
-    printf '   %-5s %5s  %6s W  %6s MHz\n' "CPU" "n/a" "${p:---}" "${f:---}"
-  fi
-
-  # ---- GPU：一张卡一行 ----
-  while IFS='|' read -r idx name temp power clk util; do
-    [[ -n "$idx" ]] || continue
-    printf '   %-5s %3s C  %6s W  %6s MHz  util %3s%%  %s\n' \
-      "GPU$idx" "${temp:---}" "${power:---}" "${clk:---}" "${util:---}" "$name"
-  done < <(gpu_status_rows)
-
-  hr2
+# 显存总量（MB），逐卡一行 "序号 总量"。开仪表盘时问一次就够了 —— 它不会变。
+GPU_MEM_TOTAL=""
+gpu_mem_total_init() {
+  [[ -z "$GPU_MEM_TOTAL" ]] || return 0
+  have nvidia-smi || { GPU_MEM_TOTAL=" "; return 0; }
+  GPU_MEM_TOTAL="$(nvidia-smi --query-gpu=index,memory.total \
+                    --format=csv,noheader,nounits 2>/dev/null \
+                   | sed 's/[[:space:]]*,[[:space:]]*/ /g')"
+  [[ -n "$GPU_MEM_TOTAL" ]] || GPU_MEM_TOTAL=" "
 }
 
-# ---------------------------------------------------------------- 并发压测的合并进度条
-# CPU / 内存 / GPU 现在是并发跑的三个子 shell，各自不能再画自己的进度条——
-# 三条 \r\033[K 互相抢同一行，画出来的是乱码。改成这里画一条共享进度条，
-# 按外面传的总秒数走，但退出条件是"所有给定 PID 都结束了"而不是单纯到点：
+# ---------------------------------------------------------------- 仪表盘：各分区
+# 每个 dash_* 都是纯函数：吃已经取好的数据行，吐若干条 box_row。
+# 硬件不在就**整块不画**，不要铺一屏 "N/A" 占地方。
+
+# dash_cpu_rows <宽> <数据>   数据每行 "序号|型号|频率MHz|温度C|占用%"
+dash_cpu_rows() {
+  local w="$1" data="$2" idx model freq temp busy busytxt
+  [[ -n "$data" ]] || return 0
+  box_row "$w" "  CPU     MODEL                              FREQ      TEMP    BUSY"
+  while IFS='|' read -r idx model freq temp busy; do
+    [[ -n "$idx" ]] || continue
+    # 读不到就画 "--"，绝不画 0 —— 0°C / 0% 看着像读数，"--" 才是实话。
+    # 而且读不到温度是**正常情况**（服务器 CPU 的温度驱动不一定是 coretemp），
+    # 不是故障，判定那边也是这个口径。
+    busytxt='--'
+    [[ "$busy" =~ ^[0-9]+$ ]] && busytxt="${busy}%"
+    box_row "$w" "$(printf '   #%-4s  %-32.32s %6s MHz  %4s C  %4s' \
+      "$idx" "$model" "${freq:-  --}" "${temp:-  --}" "$busytxt")"
+  done <<< "$data"
+}
+
+# dash_gpu_rows <宽> <数据>  数据每行 "序号|型号|显存已用MB|显存总量MB|温度|功耗|利用率"
+#
+# 最多画 8 张，再多就一行 "and N more" 收口 —— 8 卡机器已经占满半屏了，
+# 全铺开会把进度条挤出屏幕，而那是现场最需要看到的一行。
+DASH_GPU_MAX=8
+dash_gpu_rows() {
+  local w="$1" data="$2" idx name mu mt temp power util n=0 total
+  [[ -n "$data" ]] || return 0
+  total="$(printf '%s\n' "$data" | grep -c . || true)"
+  [[ "$total" =~ ^[0-9]+$ ]] || total=0
+  box_row "$w" "  GPU   MODEL                       MEMORY            TEMP   POWER   UTIL"
+  while IFS='|' read -r idx name mu mt temp power util; do
+    [[ -n "$idx" ]] || continue
+    n=$(( n + 1 ))
+    if (( n > DASH_GPU_MAX )); then
+      box_row "$w" "$(printf '   ... and %d more (all included in the report)' \
+        "$(( total - DASH_GPU_MAX ))")"
+      break
+    fi
+    local memtxt='--' utiltxt='--'
+    if [[ "$mu" =~ ^[0-9]+$ && "$mt" =~ ^[0-9]+$ ]] && (( mt > 0 )); then
+      memtxt="$(awk -v u="$mu" -v t="$mt" 'BEGIN{printf "%.1f/%.1f GB", u/1024, t/1024}')"
+    elif [[ "$mu" =~ ^[0-9]+$ ]]; then
+      memtxt="$(awk -v u="$mu" 'BEGIN{printf "%.1f GB used", u/1024}')"
+    fi
+    [[ "$util" =~ ^[0-9]+$ ]] && utiltxt="${util}%"
+    box_row "$w" "$(printf '   %-3s  %-26.26s %-16s %4s C  %5s W  %4s' \
+      "$idx" "$name" "$memtxt" "${temp:-  --}" "${power:-   --}" "$utiltxt")"
+  done <<< "$data"
+}
+
+# dash_disk_rows <宽> <数据>  数据每行 "盘名|读MB/s|写MB/s|IOPS|温度C"
+dash_disk_rows() {
+  local w="$1" data="$2" name rd wr iops temp
+  [[ -n "$data" ]] || return 0
+  box_row "$w" "  DISK        READ        WRITE          IOPS   TEMP"
+  while IFS='|' read -r name rd wr iops temp; do
+    [[ -n "$name" ]] || continue
+    box_row "$w" "$(printf '   %-10s %5s MB/s  %5s MB/s  %8s   %4s C' \
+      "$name" "${rd:-  --}" "${wr:-  --}" "${iops:-  --}" "${temp:-  --}")"
+  done <<< "$data"
+}
+
+# dash_progress <宽> <已用秒> <总秒>  -> 进度条那两行（不含边框以外的东西）
+dash_progress() {
+  local w="$1" elapsed="$2" total="$3"
+  (( total <= 0 )) && total=1
+  (( elapsed < 0 )) && elapsed=0
+  local remain=$(( total - elapsed )); (( remain < 0 )) && remain=0
+  local pct=$(( elapsed * 100 / total )); (( pct > 100 )) && pct=100
+
+  box_row "$w" "$(printf '  ELAPSED %s   REMAINING %s' \
+    "$(fmt_hms "$elapsed")" "$(fmt_hms "$remain")")"
+
+  # 条宽 = 内框宽 - 前后留白 - "[]" - "  100%"
+  local bw=$(( w - 2 - 2 - 2 - 6 ))
+  (( bw < 10 )) && bw=10
+  local filled=$(( elapsed * bw / total ))
+  (( filled > bw )) && filled=$bw
+  (( filled < 0 ))  && filled=0
+  box_row "$w" "$(printf '  [%s%s] %3d%%' \
+    "$(printf '%*s' "$filled" '' | tr ' ' '#')" \
+    "$(printf '%*s' "$(( bw - filled ))" '' | tr ' ' '.')" \
+    "$pct")"
+}
+
+# ---------------------------------------------------------------- 仪表盘：整屏
+# dash_burn <宽> <抬头右侧> <阶段名> <已用秒> <总秒>
+# 数据从硬件现取（这是唯一一个会碰硬件的函数，上面那些全是纯渲染）。
+dash_burn() {
+  local w="$1" right="$2" phase="$3" elapsed="$4" total="$5"
+
+  # ---- CPU：逐颗 ----
+  local -A freq=() temp=() busy=()
+  local p v model; model="$(cpu_model_display)"
+  while read -r p v; do [[ -n "$p" ]] && freq[$p]="$v"; done < <(cpu_freq_per_pkg)
+  while read -r p v; do [[ -n "$p" ]] && busy[$p]="$v"; done < <(cpu_pkg_busy_pct)
+  local i=0
+  while read -r p v; do
+    [[ -n "$p" ]] || continue
+    temp[$i]="$v"; i=$(( i + 1 ))
+  done < <(cpu_temp_per_pkg)
+
+  local cpu_data="" idxs
+  idxs="$(printf '%s\n' "${!freq[@]}" "${!temp[@]}" "${!busy[@]}" | grep -E '^[0-9]+$' | sort -un)"
+  # 一颗都认不出来（虚拟机/容器里）也要有一行，否则整块 CPU 凭空消失
+  [[ -n "$idxs" ]] || idxs="0"
+  while read -r p; do
+    [[ -n "$p" ]] || continue
+    cpu_data+="${p}|${model}|${freq[$p]:-}|${temp[$p]:-}|${busy[$p]:-}"$'\n'
+  done <<< "$idxs"
+
+  # ---- 内存 / 存储 / 网口：各一行汇总 ----
+  local mu mt ce ue memline
+  read -r mu mt < <(mem_used_total_mb)
+  read -r ce ue < <(mem_ecc_counts)
+  if [[ "$mu" =~ ^[0-9]+$ && "$mt" =~ ^[0-9]+$ ]]; then
+    memline="$(awk -v u="$mu" -v t="$mt" 'BEGIN{printf "Used   %.0f / %.0f GB", u/1024, t/1024}')"
+  else
+    memline="Used   --"
+  fi
+
+  local nic_up=0 nic_all=0 n st
+  for n in /sys/class/net/*; do
+    [[ -e "$n/device" ]] || continue
+    nic_all=$(( nic_all + 1 ))
+    st="$(cat "$n/operstate" 2>/dev/null || true)"
+    [[ "$st" == "up" ]] && nic_up=$(( nic_up + 1 ))
+  done
+
+  local gpu_data="" g_idx g_name g_temp g_pow g_clk g_util g_mem
+  gpu_mem_total_init
+  while IFS='|' read -r g_idx g_name g_temp g_pow g_clk g_util g_mem; do
+    [[ -n "$g_idx" ]] || continue
+    local g_tot; g_tot="$(awk -v i="$g_idx" '$1==i{print $2; exit}' <<< "$GPU_MEM_TOTAL")"
+    gpu_data+="${g_idx}|${g_name}|${g_mem}|${g_tot}|${g_temp}|${g_pow}|${g_util}"$'\n'
+  done < <(gpu_status_rows)
+
+  # ---- 画 ----
+  screen_home
+  box_rule "$w"
+  box_row3 "$w" "KLBurn v${KLBURN_VERSION:-?}" "$phase" "$right"
+  box_rule "$w"
+  dash_cpu_rows "$w" "${cpu_data%$'\n'}"
+  box_sep "$w"
+  box_row "$w" "$(printf '  MEMORY   %-26s ECC  CE %s / UE %s' "$memline" "$ce" "$ue")"
+  box_row "$w" "$(printf '  NETWORK  %d ports, %d up' "$nic_all" "$nic_up")"
+  if [[ -n "$gpu_data" ]]; then
+    box_sep "$w"
+    dash_gpu_rows "$w" "${gpu_data%$'\n'}"
+  fi
+  box_rule "$w"
+  dash_progress "$w" "$elapsed" "$total"
+  box_rule "$w"
+}
+
+# dash_disk <宽> <抬头右侧> <阶段名> <已用秒> <总秒>
+dash_disk() {
+  local w="$1" right="$2" phase="$3" elapsed="$4" total="$5"
+  local data="" name rd wr iops d base
+  while read -r name rd wr iops; do
+    [[ -n "$name" ]] || continue
+    # 只画正在被压的那几块盘，别把系统盘和 U 盘也铺上来
+    local wanted=0
+    for d in "${DISK_CAND[@]:-}"; do
+      base="$(basename "${d:-}")"
+      [[ "$base" == "$name" ]] && { wanted=1; break; }
+    done
+    (( wanted )) || continue
+    data+="${name}|${rd}|${wr}|${iops}|$(disk_temp_c "$name")"$'\n'
+  done < <(disk_io_rates)
+
+  screen_home
+  box_rule "$w"
+  box_row3 "$w" "KLBurn v${KLBURN_VERSION:-?}" "$phase" "$right"
+  box_rule "$w"
+  if [[ -n "$data" ]]; then
+    dash_disk_rows "$w" "${data%$'\n'}"
+  else
+    box_row "$w" "  DISK   warming up (first sample gives no rate yet) ..."
+  fi
+  box_rule "$w"
+  dash_progress "$w" "$elapsed" "$total"
+  box_rule "$w"
+}
+
+# ================================================================
+# 开机后、压测前的「机器配置核对」面板
+# ================================================================
+#
+# 为什么要有这一屏：以前配置只有出报告才看得到，现场没法在开跑之前核对
+# "这台机器到底装了什么"。少一条内存、少一张网卡、少一块盘，等三十分钟
+# 压测跑完才发现，白等。
+#
+# 三条规矩：
+#   1. 数据**全部来自已经采集好的 raw/ 文件和全局数组**，不为了这一屏
+#      再跑一遍采集命令 —— 那会让现场多等，而且两次采到的可能还不一样。
+#   2. 哪一项没有就**整块不画**（没显卡就没有 GPU 那块），不铺一屏 N/A。
+#   3. **绝不能卡住流程**。60 秒倒计时，按任意键立即继续，超时自动继续。
+#      现场最怕的就是"插上去没反应"。
+#
+# 每个 cfg_*_body 都吃一个 raw 目录参数（默认 $RAW_DIR），
+# 这样 tests/test-screen-render.sh 能直接喂 fixture。
+
+_CFG_TITLES=(); _CFG_BODIES=(); _CFG_ORIG=(); _CFG_SHOWN=()
+
+cfg_reset() { _CFG_TITLES=(); _CFG_BODIES=(); _CFG_ORIG=(); _CFG_SHOWN=(); }
+
+# cfg_add <标题> <内容(多行)> [最多显示几行]
+cfg_add() {
+  local title="$1" body="$2" cap="${3:-99}" n
+  body="$(printf '%s\n' "$body" | grep . || true)"
+  [[ -n "$body" ]] || return 0            # 一行都没有 -> 整块不画
+  n="$(printf '%s\n' "$body" | grep -c . || true)"
+  [[ "$n" =~ ^[0-9]+$ ]] || n=0
+  (( n > 0 )) || return 0
+  _CFG_TITLES+=("$title"); _CFG_BODIES+=("$body"); _CFG_ORIG+=("$n")
+  _CFG_SHOWN+=("$(( n < cap ? n : cap ))")
+}
+
+# 某一段实际会占几行（内容 + 可能的 "and N more"）
+_cfg_sec_rows() {
+  local i="$1"
+  if (( _CFG_SHOWN[i] >= _CFG_ORIG[i] )); then printf '%s' "${_CFG_ORIG[i]}"
+  else printf '%s' "$(( _CFG_SHOWN[i] + 1 ))"; fi
+}
+
+_cfg_height() {
+  local h=3 i                              # 顶框 + 抬头 + 抬头下的分隔
+  for i in "${!_CFG_TITLES[@]}"; do
+    h=$(( h + 1 + $(_cfg_sec_rows "$i") )) # 标题行 + 内容
+    (( i > 0 )) && h=$(( h + 1 ))          # 段与段之间的分隔线
+  done
+  printf '%s' $(( h + 1 ))                 # 底框
+}
+
+# 装不下就**砍最长的那一段**，一行一行砍，直到进得去。
+# 砍掉的行数在末尾如实写出来 —— 屏幕装不下不等于报告里没有。
+cfg_fit() {
+  local budget="$1" guard=0 best bestn i
+  while (( $(_cfg_height) > budget )) && (( guard < 400 )); do
+    guard=$(( guard + 1 ))
+    best=-1; bestn=1
+    for i in "${!_CFG_SHOWN[@]}"; do
+      (( _CFG_SHOWN[i] > bestn )) && { bestn="${_CFG_SHOWN[i]}"; best="$i"; }
+    done
+    (( best < 0 )) && break                # 每段都只剩一行了，砍不动
+    _CFG_SHOWN[best]=$(( _CFG_SHOWN[best] - 1 ))
+  done
+}
+
+# cfg_panel <宽> <抬头右侧>  -> 完整面板（纯 ASCII，含边框）
+cfg_panel() {
+  local w="$1" right="$2" i n line
+  box_rule "$w"
+  box_row3 "$w" "KLBurn v${KLBURN_VERSION:-?}" "CONFIGURATION REVIEW" "$right"
+  box_rule "$w"
+  for i in "${!_CFG_TITLES[@]}"; do
+    (( i > 0 )) && box_sep "$w"
+    box_row "$w" "  ${_CFG_TITLES[i]}"
+    n=0
+    while IFS= read -r line; do
+      [[ -n "$line" ]] || continue
+      n=$(( n + 1 ))
+      if (( _CFG_SHOWN[i] < _CFG_ORIG[i] && n > _CFG_SHOWN[i] )); then
+        box_row "$w" "$(printf '    ... and %d more (all included in the report)' \
+          "$(( _CFG_ORIG[i] - _CFG_SHOWN[i] ))")"
+        break
+      fi
+      box_row "$w" "  $line"
+    done <<< "${_CFG_BODIES[i]}"
+  done
+  box_rule "$w"
+}
+
+# ---------------------------------------------------------------- 各段的内容
+# 一律 "Label   Value" 的形状，两列时用固定列宽让第二列对齐。
+
+cfg_system_body() {
+  local f="${1:-$RAW_DIR}/dmidecode-system.txt"
+  [[ -f "$f" ]] || return 0
+  # 按 dmidecode 的空行分块（RS=""），逐块认字段。
+  #
+  # ⚠️ 取值用 val()（拿一个**副本**做 sub），不要直接改 $i —— 给字段赋值会让 awk
+  # 用 OFS 重建 $0，后面那些 /XXX Information/ 的块判断就是在改过的 $0 上做的，
+  # 出的错很难看出来。
+  awk 'BEGIN{RS="";FS="\n"}
+    function val(line,   s) { s = line; sub(/^[[:space:]]*[^:]+:[[:space:]]*/, "", s); return s }
+    /^Handle .*\nSystem Information/ {
+      for (i=1;i<=NF;i++) {
+        if ($i ~ /^[[:space:]]+Manufacturer:/)  mfr = val($i)
+        if ($i ~ /^[[:space:]]+Product Name:/)  prd = val($i)
+        if ($i ~ /^[[:space:]]+Serial Number:/) sn  = val($i)
+      }
+    }
+    /^Handle .*\nBIOS Information/ {
+      for (i=1;i<=NF;i++) {
+        if ($i ~ /^[[:space:]]+Version:/)      bv = val($i)
+        if ($i ~ /^[[:space:]]+Release Date:/) bd = val($i)
+      }
+    }
+    /^Handle .*\nBase Board Information/ {
+      for (i=1;i<=NF;i++)
+        if ($i ~ /^[[:space:]]+Asset Tag:/) at = val($i)
+    }
+    END {
+      if (mfr != "" || prd != "")
+        printf "  Manufacturer  %-26.26s Product   %s\n", mfr, prd
+      if (sn != "" || bv != "")
+        printf "  Serial        %-26.26s BIOS      %s%s\n", sn, bv, (bd != "" ? " (" bd ")" : "")
+      if (at != "" && at !~ /Not Specified|To be filled|Default string/)
+        printf "  Asset tag     %s\n", at
+    }' "$f" 2>/dev/null
+}
+
+cfg_cpu_body() {
+  local raw="${1:-$RAW_DIR}"
+  local f="$raw/lscpu.txt" ci="$raw/cpuinfo.txt"
+  [[ -f "$f" ]] || return 0
+  local model sockets cps tps cpus numa mc
+  model="$(awk -F': +' '/^Model name:/{print $2; exit}' "$f" 2>/dev/null)"
+  sockets="$(awk -F': +' '/^Socket\(s\):/{print $2; exit}' "$f" 2>/dev/null)"
+  cps="$(awk -F': +' '/^Core\(s\) per socket:/{print $2; exit}' "$f" 2>/dev/null)"
+  tps="$(awk -F': +' '/^Thread\(s\) per core:/{print $2; exit}' "$f" 2>/dev/null)"
+  cpus="$(awk -F': +' '/^CPU\(s\):/{print $2; exit}' "$f" 2>/dev/null)"
+  numa="$(awk -F': +' '/^NUMA node\(s\):/{print $2; exit}' "$f" 2>/dev/null)"
+  mc="$(awk -F': ' '/^microcode/{print $2; exit}' "$ci" 2>/dev/null)"
+  [[ -n "$model" ]] || return 0
+
+  local cores=""
+  if [[ "$cps" =~ ^[0-9]+$ && "$tps" =~ ^[0-9]+$ ]]; then
+    cores="$(printf '%dC/%dT' "$cps" $(( cps * tps )))"
+  fi
+  printf '  %s x %-30.30s %s\n' "${sockets:-1}" "$model" "$cores"
+  local tail=""
+  [[ -n "$cpus" ]] && tail="Total ${cpus} logical CPUs"
+  [[ -n "$numa" ]] && tail="${tail}    NUMA nodes ${numa}"
+  [[ -n "$mc"   ]] && tail="${tail}    Microcode ${mc}"
+  [[ -n "$tail" ]] && printf '  %s\n' "$tail"
+}
+
+cfg_memory_body() {
+  local raw="${1:-$RAW_DIR}"
+  local memf="$raw/dmidecode-memory.txt" mi="$raw/meminfo.txt"
+  [[ -f "$memf" ]] || return 0
+  local installed visible slots populated kind speed one
+  installed="$(dmi_installed_mem_mb "$memf")"
+  if [[ -f "$mi" ]]; then visible="$(os_visible_mem_mb "$mi")"; else visible="$(os_visible_mem_mb)"; fi
+  [[ "$installed" =~ ^[0-9]+$ ]] || return 0
+  (( installed > 0 )) || return 0
+
+  # ⚠️ 这几行一律走 awk，不走 `grep -E '^\tSize:'` —— GNU grep 的 ERE **不认 \t**，
+  # 那样写会去匹配字面量的 t，一条都命中不了，而且不会有任何报错
+  # （表现是"每台机器都显示 0 条内存"）。awk 的正则认 \t。
+  slots="$(awk '/^Memory Device$/{n++} END{printf "%d", n}' "$memf" 2>/dev/null)"
+  populated="$(awk '/^\tSize:[[:space:]]+[0-9]+/{n++} END{printf "%d", n}' "$memf" 2>/dev/null)"
+  kind="$(awk -F': ' '/^\tType: (DDR|LPDDR)/{print $2; exit}' "$memf" 2>/dev/null)"
+  speed="$(awk -F': ' '/^\tConfigured Memory Speed: [0-9]/{print $2; exit}' "$memf" 2>/dev/null)"
+  one="$(awk -F': ' '/^\tSize: [0-9]+ (MB|GB)/{print $2; exit}' "$memf" 2>/dev/null)"
+  printf '  Installed %d GB' "$(( installed / 1024 ))"
+  [[ "$populated" =~ ^[0-9]+$ ]] && (( populated > 0 )) && \
+    printf ' (%d x %s%s%s)' "$populated" "${one:-?}" \
+      "${kind:+ $kind}" "${speed:+-${speed%% *}}"
+  printf '\n'
+  local l2="  Populated ${populated:-?}/${slots:-?} slots"
+  [[ "$visible" =~ ^[0-9]+$ ]] && (( visible > 0 )) && \
+    l2="$(printf '  Populated %s/%s slots        OS sees %.1f GB' \
+          "${populated:-?}" "${slots:-?}" "$(awk -v v="$visible" 'BEGIN{print v/1024}')")"
+  printf '%s\n' "$l2"
+}
+
+# 存储：可测的、已挂载的、被排除的，一律列出来并标明为什么
+cfg_storage_body() {
+  local rec path size model serial rota tran pttype
+  for rec in "${DISK_INFO[@]:-}"; do
+    [[ -n "$rec" ]] || continue
+    IFS='|' read -r path size model serial rota tran pttype <<< "$rec"
+    printf '  %-14s %9s  %-26.26s SN %-14.14s [TESTABLE]\n' \
+      "$path" "$size" "$model" "${serial:--}"
+  done
+  local e epath esize emodel ewhy tag
+  for e in "${DISK_EXCLUDED[@]:-}"; do
+    [[ -n "$e" ]] || continue
+    IFS='|' read -r epath esize emodel ewhy <<< "$e"
+    case "$ewhy" in
+      "has a mounted partition") tag="[MOUNTED]" ;;
+      *"KLBurn USB"*)           tag="[TEST MEDIA]" ;;
+      *)                        continue ;;   # loop/ram/软驱之类，现场不关心
+    esac
+    printf '  %-14s %9s  %-26.26s %-17s %s\n' \
+      "$epath" "$esize" "$emodel" "" "$tag"
+  done
+}
+
+cfg_network_body() {
+  local raw="${1:-$RAW_DIR}" n ifn mac st spd model
+  for n in /sys/class/net/*; do
+    [[ -e "$n/device" ]] || continue
+    ifn="$(basename "$n")"
+    [[ "$ifn" == "lo" ]] && continue
+    mac="$(cat "$n/address" 2>/dev/null || true)"
+    st="$(cat "$n/operstate" 2>/dev/null || true)"
+    spd="$(cat "$n/speed" 2>/dev/null || true)"
+    model="$(awk -F': ' '/^model:/{print $2; exit}' "$raw/nic/${ifn}-driver.txt" 2>/dev/null)"
+    [[ -n "$model" ]] || model="$(awk -F': ' '/^driver:/{print $2; exit}' "$raw/nic/${ifn}-driver.txt" 2>/dev/null)"
+    # MAC 只留厂商前缀：这块屏幕会被拍照发群里，整串 MAC 没必要露出去
+    [[ -n "$mac" ]] && mac="${mac:0:8}:xx:xx:xx"
+    printf '  %-8s %-30.30s %-5s %8s   %s\n' \
+      "$ifn" "${model:-unknown}" "$(printf '%s' "${st:-?}" | tr '[:lower:]' '[:upper:]')" \
+      "$( [[ "$spd" =~ ^[0-9]+$ ]] && printf '%s Mb/s' "$spd" || printf 'no link' )" \
+      "${mac:--}"
+  done
+}
+
+cfg_gpu_body() {
+  local raw="${1:-$RAW_DIR}" f="${1:-$RAW_DIR}/deep/nvidia-inventory.csv"
+  [[ -f "$f" ]] || return 0
+  awk -F', *' 'NR>1 && NF>=7 {
+      mem = $7; sub(/ *MiB */, "", mem)
+      if (mem+0 > 0) mem = sprintf("%.0f GB", mem/1024); else mem = "-"
+      printf "  %-3s %-28.28s %-10s Driver %s\n", $1, $2, mem, $6
+    }' "$f" 2>/dev/null
+  : "$raw"
+}
+
+# 阵列卡 / BMC / 电源：各一行，凑成最后一段
+cfg_platform_body() {
+  local raw="${1:-$RAW_DIR}"
+  local raid fw
+  raid="$(grep -iE 'RAID bus controller|Serial Attached SCSI|MegaRAID' "$raw/lspci.txt" 2>/dev/null \
+          | head -1 | sed -E 's/^[0-9a-f:.]+ [^:]+: //; s/ \[[0-9a-f]{4}:[0-9a-f]{4}\].*$//' || true)"
+  if [[ -n "$raid" ]]; then
+    fw="$(awk -F'= *' '/^(FW Package Build|Firmware Version)/{print $2; exit}' \
+          "$raw/storcli-show.txt" 2>/dev/null)"
+    printf '  RAID / HBA   %-40.40s%s\n' "$raid" "${fw:+   FW $fw}"
+  fi
+
+  local bmc="not detected"
+  [[ "${IPMI_OK:-0}" == "1" ]] && bmc="present (IPMI)"
+  local psus=() line total=0 live=0 loc st n ac
+  while IFS= read -r line; do [[ -n "$line" ]] && psus+=("$line"); done < <(dmi_psu_list "$raw/dmidecode-psu.txt")
+  for line in "${psus[@]:-}"; do
+    [[ -n "$line" ]] || continue
+    loc="${line%%|*}"; st="${line#*|}"
+    [[ "$st" == *"Present"* ]] || continue
+    total=$(( total + 1 ))
+    n="$(printf '%s' "$loc" | grep -oE '[0-9]+' | head -1)"; [[ -n "$n" ]] || n="$total"
+    ac="$(psu_ac_state "$n" "$raw/ipmi-sensors.txt")"
+    [[ "$ac" == "present" ]] && live=$(( live + 1 ))
+  done
+  if (( total > 0 )); then
+    printf '  BMC          %-20s PSU  %d/%d present, %d with AC input\n' \
+      "$bmc" "$total" "$total" "$live"
+  else
+    printf '  BMC          %s\n' "$bmc"
+  fi
+}
+
+# ---------------------------------------------------------------- 整屏 + 倒计时
+# config_review <倒计时秒>
+#
+# **绝不能卡住流程**：超时自动继续，按任意键立即继续。
+# 返回值永远是 0 —— 这一屏只是给人看的，没有"失败"这种结果。
+config_review() {
+  local timeout="${1:-60}" w; w="$(panel_width)"
+
+  cfg_reset
+  cfg_add "SYSTEM"  "$(cfg_system_body)"
+  cfg_add "CPU"     "$(cfg_cpu_body)"
+  cfg_add "MEMORY"  "$(cfg_memory_body)"
+  cfg_add "STORAGE" "$(cfg_storage_body)"  6
+  cfg_add "NETWORK" "$(cfg_network_body)"  6
+  cfg_add "GPU"     "$(cfg_gpu_body)"      8
+  cfg_add "PLATFORM" "$(cfg_platform_body)"
+
+  if (( ${#_CFG_TITLES[@]} == 0 )); then
+    warn "Nothing collected to review - skipping the configuration review screen."
+    return 0
+  fi
+
+  # 留 3 行给倒计时和余量。装不下就砍最长的那一段（砍掉几行会如实写在屏幕上）。
+  cfg_fit $(( ROWS - 3 ))
+
+  local text; text="$(cfg_panel "$w" "$(date '+%Y-%m-%d %H:%M:%S')")"
+
+  # 落一份纯文本进 raw/：报告里可以引用，事后也查得到现场当时看到的是什么
+  printf '%s\n' "$text" > "$RAW_DIR/config-review.txt" 2>/dev/null || true
+
+  info "Configuration review: ${#_CFG_TITLES[@]} sections, ${timeout}s (any key continues)"
+  screen_home
+  printf '%s\n' "$text"
+
+  # 倒计时用单行 \r（不是 \033[A）：这时候屏幕上没有别的写入者，
+  # 面板已经画完、压测还没开始，是 \r 唯一安全的场景。
+  local start now remaining key
+  start=$(date +%s)
+  while :; do
+    now=$(date +%s); remaining=$(( timeout - (now - start) ))
+    (( remaining <= 0 )) && { printf '\n'; break; }
+    printf '\r\033[K      Review the configuration above.  Press any key to continue.   [%2ds]' \
+      "$remaining"
+    if IFS= read -r -s -t 1 -n 1 key; then printf '\n'; break; fi
+  done
+
+  ok "Configuration review done"
+  return 0
+}
+
+# ---------------------------------------------------------------- 并发压测的仪表盘循环
+# CPU / 内存 / GPU 是并发跑的三个子 shell，各自都不画屏（见 stress.sh）。
+# 这里每 2 秒整屏重绘一次，退出条件是"所有给定 PID 都结束了"而不是单纯到点：
 # 到点了但压测子进程还没退出（真跑慢了）就继续在 100% 停着刷新，
 # 如实反映"还没测完"而不是假装已经收工。
 #
@@ -251,46 +806,40 @@ status_block() {
 progress_bar_concurrent() {
   local total="$1" label="$2"; shift 2
   local pids=("$@")
-  local start; start=$(date +%s)
+  local start w; start=$(date +%s); w="$(panel_width)"
 
-  # RAPL 是累计计数器，先打一次基准，不然第一块读数的功耗是空的
-  cpu_power_w >/dev/null 2>&1 || true
+  # 两个累计计数器先打一次基准，不然第一屏的功耗/占用率是空的
+  cpu_power_w      >/dev/null 2>&1 || true
+  cpu_pkg_busy_pct >/dev/null 2>&1 || true
 
-  # 读数块的间隔：按总时长自适应，全程大约打 20 块。
-  # 10min -> 30s，30min -> 90s，2h -> 6min，8h -> 24min。
-  # 固定 30 秒的话，八小时的耐久测试会刷出近千块，把屏幕淹掉。
-  local interval="${STATUS_BLOCK_INTERVAL:-0}"
-  if (( interval <= 0 )); then
-    interval=$(( total / 20 ))
-    (( interval < 30 )) && interval=30
-  fi
-
-  # 一上来先打一块，让现场立刻看到机器确实在动、温度在爬
-  status_block 0 "$total"
-
-  local last_block=0
+  local now elapsed alive p
   while :; do
-    local alive=0 p
+    alive=0
     for p in "${pids[@]}"; do
       kill -0 "$p" 2>/dev/null && alive=$((alive+1))
     done
-    local now elapsed; now=$(date +%s); elapsed=$(( now - start ))
+    now=$(date +%s); elapsed=$(( now - start ))
 
-    progress_bar "$elapsed" "$total" "$label"
-
-    if (( elapsed - last_block >= interval )); then
-      # 换行把进度条那一行留在屏幕上，读数块正常往下滚。
-      # 不用 \033[A 之类的光标移动 —— 别的东西往控制台写一行就会全乱套。
-      printf '\n'
-      status_block "$elapsed" "$total"
-      last_block=$elapsed
-    fi
+    dash_burn "$w" "$label" "BURN-IN  $label" "$elapsed" "$total"
 
     (( alive == 0 )) && break
     sleep 2
   done
+  dash_burn "$w" "$label" "BURN-IN  $label" "$total" "$total"
+}
 
-  progress_bar "$total" "$total" "$label"
-  printf '\n'
-  status_block "$total" "$total"
+# run_disk_with_dashboard <pid> <总秒数> <标签>
+# 硬盘压测是单独跑的（不和 CPU/内存并发），屏幕换成硬盘视角。
+run_disk_with_dashboard() {
+  local pid="$1" total="$2" label="$3"
+  local start now elapsed w; start=$(date +%s); w="$(panel_width)"
+  disk_io_rates >/dev/null 2>&1 || true      # 打基准，第一屏才有速率
+  while kill -0 "$pid" 2>/dev/null; do
+    now=$(date +%s); elapsed=$(( now - start ))
+    dash_disk "$w" "$label" "DISK STRESS  $label" "$elapsed" "$total"
+    sleep 2
+  done
+  dash_disk "$w" "$label" "DISK STRESS  $label" "$total" "$total"
+  wait "$pid"
+  return $?
 }

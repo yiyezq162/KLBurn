@@ -143,23 +143,6 @@ phase_avg_freq() {
     "$RUN_DIR/sys_metrics.csv" 2>/dev/null
 }
 
-# ---------------------------------------------------------------- 通用：跑一个后台任务并画进度
-# run_with_progress <pid> <总秒数> <标签>
-run_with_progress() {
-  local pid="$1" total="$2" label="$3"
-  local start now elapsed
-  start=$(date +%s)
-  while kill -0 "$pid" 2>/dev/null; do
-    now=$(date +%s); elapsed=$(( now - start ))
-    progress_bar "$elapsed" "$total" "$label"
-    sleep 2
-  done
-  progress_bar "$total" "$total" "$label"
-  printf '\n'
-  wait "$pid"
-  return $?
-}
-
 # ---------------------------------------------------------------- CPU
 #
 # 现在是从 factory-test.sh 里以 `( stress_cpu ... ) &` 的方式和内存/GPU
@@ -381,7 +364,7 @@ stress_disk() {
   } > "$jf"
   fio --output-format=json --output="$RAW_DIR/fio-seq.json" "$jf" \
       > "$STRESS_LOG_DIR/fio-seq.log" 2>&1 &
-  run_with_progress $! "$seq_secs" "DISK-SEQ" || rc_total=$?
+  run_disk_with_dashboard $! "$seq_secs" "SEQ WRITE" || rc_total=$?
 
   # ---- 随机读写 ----
   jf="$STRESS_LOG_DIR/fio-rand.job"
@@ -396,7 +379,7 @@ stress_disk() {
   fio --output-format=json --output="$RAW_DIR/fio-rand.json" "$jf" \
       > "$STRESS_LOG_DIR/fio-rand.log" 2>&1 &
   local rc2=0
-  run_with_progress $! "$rnd_secs" "DISK-RND" || rc2=$?
+  run_disk_with_dashboard $! "$rnd_secs" "RANDOM 4K" || rc2=$?
   (( rc2 != 0 )) && rc_total=$rc2
 
   monitor_stop

@@ -17,6 +17,7 @@ SUITES=(
   lint
   test-log-parsing
   test-hw-checks
+  test-screen-render
   test-report-render
   test-internal-report
   test-capture

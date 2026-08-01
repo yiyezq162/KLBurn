@@ -37,6 +37,8 @@ BURN_PIDS=()
 cleanup() {
   monitor_stop 2>/dev/null || true
   gpu_monitor_stop 2>/dev/null || true
+  # 异常退出时也要把内核消息放回控制台，否则收尾菜单那个 shell 是"聋"的
+  console_quiet_off 2>/dev/null || true
   # CPU/内存/GPU 压测现在是并发子 shell（见下面的 BURN_PIDS），
   # 异常退出时把它们也收一遍，避免留下孤儿压测进程。
   #
@@ -164,6 +166,16 @@ select_duration
 scan_disks
 collect_all
 
+# ---------------------------------------------------------------- 配置核对
+# 采集完、压测开始前，先让现场把"这台机器到底装了什么"过一遍。
+#
+# 以前这些只有出报告才看得到 —— 少一条内存、少一张网卡、少一块盘，
+# 要等三十分钟压测跑完才发现，白等一轮。
+#
+# 60 秒倒计时、按任意键立即继续、超时自动继续。**绝不能卡住流程**：
+# 现场最怕的就是插上去没反应，那会让人直接断电重来。
+config_review 60
+
 # ---------------------------------------------------------------- 破坏性写确认
 DISK_CONFIRMED=0
 if (( ${#DISK_CAND[@]} > 0 )); then
@@ -210,6 +222,14 @@ info "Time budget: $burn_label concurrently for $(fmt_dur "$DURATION_SECONDS")$(
 
 # ---------------------------------------------------------------- 压测：CPU / 内存 / GPU 并发
 stress_init
+
+# 仪表盘是"每 2 秒清屏 + 整屏重画"，前提是只有它一个人在往控制台上写。
+# 压测子进程的输出早就全部重定向进日志文件了，剩下的写入源就是内核 ——
+# PCIe AER / EDAC / nvme reset 这类消息会在压测期间随时插进来把面板顶花。
+# 只压 console 的 loglevel，ring buffer 一个字都不少（dmesg 采集和 OOM
+# 判定读的都是 ring buffer）。压测全部结束后原样恢复。
+console_quiet_on
+
 section "PHASE 2/4  BURN-IN: $burn_label CONCURRENTLY  ($(fmt_dur "$DURATION_SECONDS"))"
 
 BURN_PIDS=()
@@ -237,6 +257,10 @@ fi
 if (( gpu_will_run == 0 && GPU_USABLE > 0 )); then
   gpu_stress 0
 fi
+
+# 仪表盘到此为止，把内核消息放回控制台 —— 后面复查/出报告阶段本来就是
+# 正常滚动输出，而且这时候真出了内核错误，现场应该第一时间看见。
+console_quiet_off
 
 TEST_END_TS="$(date '+%Y-%m-%d %H:%M:%S')"
 TEST_ELAPSED=$(( $(date +%s) - TEST_START_EPOCH ))

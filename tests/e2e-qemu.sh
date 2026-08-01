@@ -410,11 +410,11 @@ elif (( DISK_STRESS )); then
   # 时刻发出去 —— 而这一轮的按键是"确认擦盘"。所以先验一遍它们现在都不在。
   preexist=""
   for n in "Report      :" "live media disks" "verify_dmesg_boot" \
-           "Disk stress test confirmed by operator"; do
+           "Configuration review done" "Disk stress test confirmed by operator"; do
     grep -aqF -- "$n" "$IMG" 2>/dev/null && preexist="$preexist [$n]"
   done
   if [[ -z "$preexist" ]]; then
-    ok "四个日志锚点在开机前都不在镜像里（不会在错误的时刻发出确认键）"
+    ok "五个日志锚点在开机前都不在镜像里（不会在错误的时刻发出确认键）"
   else
     bad "这些锚点在开机前就已经在镜像里了，轮询会立刻误命中：$preexist"
     printf '\n通过 %d 项，失败 %d 项\n' "$PASS" "$FAIL"; exit 1
@@ -439,18 +439,38 @@ elif (( DISK_STRESS )); then
   fi
   shot "boot"
 
+  # ---------------- 配置核对面板（1.7.0 新增，插在采集和写确认之间）----------------
+  # 这一屏有 60 秒倒计时、按任意键立即继续。它把原来那个"看到
+  # verify_dmesg_boot 就发 yes"的时序整个顶开了：现在 yes 的第一个字符会被
+  # 面板的单键读吃掉，剩下 "es" 进整行读 —— 不等于 "yes"，这一轮静默变成跳过。
+  #
+  # 所以改成：先等采集结束，按一下空格把面板放过去，再等面板**自己的**锚点，
+  # 确认已经走到写确认那一步了才发 yes。
+  #
+  # 空格这个键是特意选的：万一它落到了后面那个整行读上，confirm_disk_write
+  # 会先把空白全部去掉再比（norm="${answer//[[:space:]]/}"），一个前导空格
+  # 不会把 "yes" 变成别的东西。方向永远是安全的那一侧。
+  if wait_for_log "verify_dmesg_boot" 900 "采集跑完（下一步是配置核对面板）"; then
+    sleep 3
+    mon "sendkey spc"
+    shot "config-review"
+  else
+    bad "没等到采集结束的锚点 —— 按键一律不发（盲发按错方向就是真擦盘）"
+  fi
+
   # ---------------- 第 1 道：整行读，必须原样打出 yes ----------------
-  # 锚点用 collect_all 的**最后一条**日志（verify_dmesg_boot 的判定结果）。
-  # 它一落盘，紧接着就是 confirm_disk_write 把提示打出来（120s 超时）。
+  # 锚点用配置核对面板收尾那条日志。它一落盘，紧接着就是 confirm_disk_write
+  # 把提示打出来（120s 超时）。
+  # 等 90s：面板自己最多停 60 秒（没按到键就靠超时走），留够余量。
   disk_confirm_sent=0
-  if wait_for_log "verify_dmesg_boot" 900 "采集跑完（下一步就是破坏性写确认）"; then
+  if wait_for_log "Configuration review done" 90 "配置核对面板已过（下一步就是破坏性写确认）"; then
     sleep 3
     for c in y e s; do mon "sendkey $c"; done
     mon "sendkey ret"
     disk_confirm_sent=1
     info "第 1 道确认已发出（yes + 回车）"
   else
-    bad "没等到采集结束的锚点 —— 按键不敢发（盲发按错方向就是真擦盘）"
+    bad "没等到配置核对面板结束的锚点 —— 按键不敢发（盲发按错方向就是真擦盘）"
   fi
 
   # ---------------- 第 2 道：最终警告面板，单键 y ----------------
@@ -497,9 +517,12 @@ else
   sleep "$SELECT_START"
   # 时长菜单是 30 秒倒计时。这里在窗口里反复按 "1"+回车：
   #   - 打在时长菜单上 -> 选中 QUICK（要的就是这个）
+  #   - 打在配置核对面板上 -> 任意键都是"立即继续"，正合适（安全方向）
   #   - 打在硬盘破坏性写入确认上 -> "1" 不是 "yes" -> 跳过（安全方向）
   #   - 打在最终警告面板上 -> "1" 不是 "y" -> 跳过
   # 全都落在安全的一侧，多按几次不会把事情搞坏。
+  # 配置核对面板要是出现在这个窗口之后也没关系：它 60 秒自己就往下走了，
+  # **绝不会卡住流程**，最多让这一轮多花一分钟。
   t="$SELECT_START"
   while (( t < SELECT_UNTIL )); do
     kill -0 "$QEMU_PID" 2>/dev/null || break

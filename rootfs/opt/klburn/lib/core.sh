@@ -301,11 +301,200 @@ cpu_freq_avg_mhz() {
   fi
 }
 
+# 逐颗物理 CPU 的平均频率 -> 每行 "<封装号> <MHz>"
+#
+# 和 cpu_temp_per_pkg 配对用：温度按 hwmon 目录分颗，频率按 topology 分颗。
+# 两边的"第几颗"都是从 0 数起，仪表盘上就能并成一行。
+cpu_freq_per_pkg() {
+  cpu_pkg_map_init
+  local -A sum=() cnt=()
+  local d n p f v
+  for d in /sys/devices/system/cpu/cpu[0-9]*; do
+    n="${d##*/cpu}"
+    [[ "$n" =~ ^[0-9]+$ ]] || continue
+    f="$d/cpufreq/scaling_cur_freq"
+    [[ -r "$f" ]] || continue
+    v="$(<"$f")"
+    [[ "$v" =~ ^[0-9]+$ ]] || continue
+    p="${_PKG_OF_CPU[$n]:-0}"
+    sum[$p]=$(( ${sum[$p]:-0} + v / 1000 ))
+    cnt[$p]=$(( ${cnt[$p]:-0} + 1 ))
+  done
+  for p in $(printf '%s\n' "${!cnt[@]}" | sort -n); do
+    printf '%s %s\n' "$p" $(( sum[$p] / cnt[$p] ))
+  done
+}
+
+# 逻辑 CPU -> 物理封装号 的映射，只建一次。
+# 取不到 topology（虚拟机里常见）时一律算第 0 颗 —— 宁可把两颗并成一颗显示，
+# 也不要因为读不到就整块不画。
+declare -A _PKG_OF_CPU=()
+_PKG_MAP_DONE=0
+cpu_pkg_map_init() {
+  (( _PKG_MAP_DONE )) && return 0
+  local d n p
+  for d in /sys/devices/system/cpu/cpu[0-9]*; do
+    n="${d##*/cpu}"
+    [[ "$n" =~ ^[0-9]+$ ]] || continue
+    p=0
+    if [[ -r "$d/topology/physical_package_id" ]]; then
+      p="$(<"$d/topology/physical_package_id")"
+      [[ "$p" =~ ^[0-9]+$ ]] || p=0
+    fi
+    _PKG_OF_CPU[$n]="$p"
+  done
+  _PKG_MAP_DONE=1
+}
+
+# 逐颗物理 CPU 的占用率 -> 每行 "<封装号> <百分比>"
+#
+# 只读一次 /proc/stat（一个文件，很便宜），按封装把各逻辑核的时间片加起来。
+# 占用率是两次采样之间的**差值**，所以第一次调用给不出数字、什么都不输出 ——
+# 调用方要能接受空（读不到 ≠ 0%，更不是故障）。
+declare -A _PKG_PREV_TOT=() _PKG_PREV_IDLE=()
+cpu_pkg_busy_pct() {
+  cpu_pkg_map_init
+  local -A tot=() idl=()
+  local cpu us ni sy id io ir sq st rest n p have=0
+  while read -r cpu us ni sy id io ir sq st rest; do
+    [[ "$cpu" == cpu[0-9]* ]] || continue
+    n="${cpu#cpu}"
+    [[ "$n" =~ ^[0-9]+$ ]] || continue
+    [[ "$us$ni$sy$id" =~ ^[0-9]+$ ]] || continue
+    p="${_PKG_OF_CPU[$n]:-0}"
+    tot[$p]=$(( ${tot[$p]:-0} + us + ni + sy + id + io + ir + sq + st ))
+    idl[$p]=$(( ${idl[$p]:-0} + id + io ))
+    have=1
+  done < /proc/stat
+  (( have )) || return 0
+
+  local dt di
+  for p in $(printf '%s\n' "${!tot[@]}" | sort -n); do
+    if [[ -n "${_PKG_PREV_TOT[$p]:-}" ]]; then
+      dt=$(( tot[$p] - _PKG_PREV_TOT[$p] ))
+      di=$(( idl[$p] - _PKG_PREV_IDLE[$p] ))
+      (( dt > 0 )) && printf '%s %s\n' "$p" $(( (dt - di) * 100 / dt ))
+    fi
+    _PKG_PREV_TOT[$p]="${tot[$p]}"
+    _PKG_PREV_IDLE[$p]="${idl[$p]}"
+  done
+}
+
+# CPU 型号，给屏幕用（不是文件名，所以保留空格）
+cpu_model_display() {
+  local m
+  m="$(awk -F': ' '/^model name/{print $2; exit}' /proc/cpuinfo 2>/dev/null)"
+  [[ -n "$m" ]] || m="Unknown CPU"
+  m="${m//(R)/}"; m="${m//(TM)/}"; m="${m//(tm)/}"
+  printf '%s' "$m" \
+    | sed -E 's/@.*$//; s/\bCPU\b//g; s/\bProcessor\b//g; s/[[:space:]]+/ /g; s/^ +| +$//g'
+}
+
+# 内存占用 -> "<已用MB> <总量MB>"
+mem_used_total_mb() {
+  awk '/MemTotal/{tot=$2} /MemAvailable/{av=$2}
+       END{ if (tot > 0) printf "%d %d", (tot-av)/1024, tot/1024 }' /proc/meminfo 2>/dev/null
+}
+
+# 内存 ECC 计数 -> "<可纠正> <不可纠正>"，读不到给 "-- --"
+#
+# 走内核自带的 EDAC sysfs，不需要任何额外工具 —— 现场那一屏必须便宜。
+# 结构化的逐 DIMM 计数（rasdaemon）在采集阶段单独取，那份进报告。
+#
+# ⚠️ 读不到就是读不到（这台机器的内存控制器没有 EDAC 驱动，很常见），
+# 绝不能当成 0，更不能当成故障。
+mem_ecc_counts() {
+  local ce=0 ue=0 f v got=0
+  for f in /sys/devices/system/edac/mc/mc[0-9]*/ce_count \
+           /sys/devices/system/edac/mc/mc[0-9]*/ce_noinfo_count; do
+    [[ -r "$f" ]] || continue
+    v="$(<"$f")"; [[ "$v" =~ ^[0-9]+$ ]] || continue
+    ce=$(( ce + v )); got=1
+  done
+  for f in /sys/devices/system/edac/mc/mc[0-9]*/ue_count \
+           /sys/devices/system/edac/mc/mc[0-9]*/ue_noinfo_count; do
+    [[ -r "$f" ]] || continue
+    v="$(<"$f")"; [[ "$v" =~ ^[0-9]+$ ]] || continue
+    ue=$(( ue + v )); got=1
+  done
+  if (( got )); then printf '%s %s' "$ce" "$ue"; else printf -- '-- --'; fi
+}
+
+# 单块盘的温度（摄氏整数），读不到输出空。
+#
+# /sys/block/<盘>/device/hwmon*/temp1_input 一条路同时覆盖 SATA（drivetemp，
+# 内核 5.5+）和 NVMe（nvme 驱动自带 hwmon）。压测期间不能去跑 smartctl ——
+# 那会和 fio 抢同一块盘的队列，把带宽数字搞脏。
+disk_temp_c() {
+  local base="${1:-}" f v
+  [[ -n "$base" ]] || return 0
+  for f in /sys/block/"$base"/device/hwmon*/temp1_input \
+           /sys/block/"$base"/device/device/hwmon*/temp1_input; do
+    [[ -r "$f" ]] || continue
+    v="$(<"$f")"
+    [[ "$v" =~ ^-?[0-9]+$ ]] || continue
+    v=$(( v / 1000 ))
+    (( v > 0 && v < 150 )) || continue
+    printf '%s' "$v"
+    return 0
+  done
+}
+
+# 逐盘的读写速率 -> 每行 "<盘名> <读MB/s> <写MB/s> <IOPS>"
+#
+# 读 /proc/diskstats 两次求差。和 RAPL 一样是累计计数器，第一次调用只记基准、
+# 不输出任何行。字段（内核文档 iostats.rst）：
+#   $1 major $2 minor $3 name $4 读完成数 $6 读扇区 $8 写完成数 $10 写扇区
+# 扇区一律按 512 字节算（这是块层的固定单位，和盘的物理扇区大小无关）。
+declare -A _DSTAT_PREV=()
+_DSTAT_PREV_TS=""
+disk_io_rates() {
+  local now dt line name rs ws rio wio prev
+  now="$(date +%s)"
+  local -A cur=()
+  while read -r _ _ name rio _ rs _ wio _ ws _; do
+    [[ "$name" =~ ^(sd[a-z]+|nvme[0-9]+n[0-9]+|vd[a-z]+|hd[a-z]+)$ ]] || continue
+    [[ "$rs$ws$rio$wio" =~ ^[0-9]+$ ]] || continue
+    cur[$name]="$rs $ws $rio $wio"
+  done < /proc/diskstats
+
+  if [[ -n "$_DSTAT_PREV_TS" ]]; then
+    dt=$(( now - _DSTAT_PREV_TS ))
+    (( dt < 1 )) && dt=1
+    for name in "${!cur[@]}"; do
+      prev="${_DSTAT_PREV[$name]:-}"
+      [[ -n "$prev" ]] || continue
+      # shellcheck disable=SC2086
+      set -- $prev
+      local prs="$1" pws="$2" prio="$3" pwio="$4"
+      # shellcheck disable=SC2086
+      set -- ${cur[$name]}
+      local crs="$1" cws="$2" crio="$3" cwio="$4"
+      (( crs < prs || cws < pws )) && continue     # 计数器重置，这一轮跳过
+      printf '%s %s %s %s\n' "$name" \
+        $(( (crs - prs) * 512 / 1048576 / dt )) \
+        $(( (cws - pws) * 512 / 1048576 / dt )) \
+        $(( (crio - prio + cwio - pwio) / dt ))
+    done | sort
+  fi
+
+  _DSTAT_PREV=()
+  for name in "${!cur[@]}"; do _DSTAT_PREV[$name]="${cur[$name]}"; done
+  _DSTAT_PREV_TS="$now"
+}
+
 # ---------------------------------------------------------------- 杂项
 # 秒 -> 人类可读
 fmt_dur() {
   local s="$1"
   printf '%dh%02dm%02ds' $((s/3600)) $((s%3600/60)) $((s%60))
+}
+
+# 秒 -> HH:MM:SS（仪表盘上等宽好对齐，fmt_dur 那种变长的对不齐）
+fmt_hms() {
+  local s="${1:-0}"
+  [[ "$s" =~ ^[0-9]+$ ]] || s=0
+  printf '%02d:%02d:%02d' $((s/3600)) $((s%3600/60)) $((s%60))
 }
 
 # ---------------------------------------------------------------- 机器标识

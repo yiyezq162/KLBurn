@@ -140,12 +140,18 @@ PHASE 1  硬件采集                collect_all()
          → collect_deep（只留档，不判定）
          → dmesg-pre → verify_dmesg_boot（开机就有硬伤的话，现在就要知道）
 
+REVIEW   config_review()          配置核对面板，60 秒倒计时，任意键继续
+         └─ 全部读已经采好的 raw/，不重跑采集；超时自动往下，绝不卡住流程
+
          confirm_disk_write()     破坏性写入两道确认，默认跳过
 
 PHASE 2  CPU / 内存 / GPU 并发压测   三个子 shell 同时跑满所选时长
-         progress_bar_concurrent() 画合并进度条 + 定期打整块实时读数
+         console_quiet_on()        先把内核消息从控制台上压下去
+         progress_bar_concurrent() 每 2 秒整屏重绘一次仪表盘
 
 PHASE 3  硬盘压测（单独跑，不并发） 只在两道确认都过了才有
+         run_disk_with_dashboard() 同样是整屏重绘，换成逐盘带宽/IOPS/温度视角
+         console_quiet_off()       压测全部结束后恢复
 
 PHASE 4  测后复查                verify_all()
          collect_smart post → verify_smart → verify_disk_temp
@@ -178,7 +184,8 @@ rootfs/opt/klburn/
 ├── factory-test.sh          主流程编排（上面那张时序图就是它）
 ├── lib/
 │   ├── core.sh              日志、capture()、result_add()、温度/功耗读取、机器标识
-│   ├── ui.sh                控制台界面、倒计时菜单、进度条、实时读数块
+│   ├── ui.sh                控制台界面：倒计时菜单、配置核对面板、压测仪表盘
+│   │                        （框线纯 ASCII、文案全英文、整屏重绘，见 §11-14）
 │   ├── storage.sh    ★★★   数据分区发现 + 裸盘排除（全项目最危险的一块）
 │   ├── collect.sh           硬件采集 + 内存核对 / PCIe 链路 / 阵列卡 / 电源判定
 │   ├── network.sh           网口拉起、联网校时、DHCP+ping 连通性、协商速率核对
@@ -747,8 +754,31 @@ check_fans() {
 
 14. **不要用 `\033[A` 做粘滞刷新区。** 只要有别的东西往控制台上写
     （内核 OOM 消息、bash 的 `Killed`、并发子 shell 的日志），光标就不在预期位置，
-    之后每次 `\r` 都回到错的行，看着就像整个程序卡死。现在是"进度条单行 `\r` +
-    读数整块正常滚动"。
+    之后每次 `\r` 都回到错的行，看着就像整个程序卡死。
+
+    1.7.0 起改成**整屏定期重绘**：每 2 秒 `ESC[H ESC[2J` + 从第一行画一遍。
+    被别人写脏了下一次重绘自动修好，不跟光标较劲。**但这有前提**，三条都要成立：
+    - 压测子进程的 stdout/stderr 全部重定向进日志文件，一个字都不上屏
+    - 进仪表盘前 `console_quiet_on`（`dmesg -n 1`）把内核消息压下去，
+      退出时 `console_quiet_off` 恢复；只动 console loglevel，**不动 ring buffer**
+      （dmesg 采集和 OOM 判定读的都是 ring buffer）
+    - `capture()` 里吃掉 bash `Killed` 的那层不能动
+
+    单行 `\r` 只剩两处，都是"这时候屏幕上没有别的写入者"的场景：
+    时长选择菜单、配置核对面板的倒计时。
+
+23. **框线只用 ASCII（`+ - | =`），屏幕上不许出现任何非 ASCII 字节。**
+    现场是通过 BMC 的 KVM 或串口看这块屏幕的，字体和字符集都不受我们控制，
+    一个 Unicode 制表符就能把整屏顶成乱码 —— 而那块屏幕是操作员判断
+    "机器现在什么状态"、以及"要不要擦这几块盘"的唯一依据。
+    所有进面板的文本都过 `ascii_clean()`（`ui.sh`），那是唯一的收口处：
+    型号串来自 dmidecode / nvidia-smi，理论上带得进非 ASCII 字节。
+    `tests/test-screen-render.sh` 逐行扫渲染输出，一个字节都不放过。
+
+24. **面板每一行都必须正好等于面板宽度。** 多一列就折行，折行之后整屏重绘的
+    行数就对不上，画出来是滚动的碎片。宽度跟着 `tput cols` 走但夹在 80~120 之间
+    （下限是串口/BMC 的 80 列，上限是"再宽一行扫不过来"）。
+    列宽靠 `printf '%-*.*s'` 同时补齐和截断，不许只补不截。
 15. **并发压测期间只能有一个采样器。** CPU 和内存各起一个会同时往
     `sys_metrics.csv` 里写，同一时刻的数据记两遍，报告曲线每个点画两次，
     还可能撞出两行表头。
@@ -788,6 +818,7 @@ check_fans() {
 | `lint.sh` | shellcheck 静态检查。build/（开了 `set -Eeuo pipefail`、以 root 跑）和 rootfs+tests（不开 `-e`）两套豁免规则，**豁免类数本身也有断言守着**。没装 shellcheck 就跳过 | 任何 `.sh` |
 | `test-log-parsing.sh` | 压测日志判读、OOM 不判故障、**显卡驱动不匹配不判成坏卡** | `lib/stress.sh`、`lib/gpu.sh` |
 | `test-hw-checks.sh` | 内存核对、电源判定、网卡判读、阵列卡 BMC 交叉核对、硬盘温度、PCIe 链路、开机内核日志、dm 设备枚举、**客户文案不许有内部用语**、**计数不能算出 `0\n0`**、**汇总入口调用链不能少人**、**整机结论必须解析 JSON 而不是匹配文本** | `lib/collect.sh`、`lib/network.sh`、`lib/verify.sh`、`lib/core.sh`、`lib/storage.sh`、`factory-test.sh` |
+| `test-screen-render.sh` | 现场界面：**屏幕输出里不许有非 ASCII 字节**、每行正好等于面板宽度（80/100/120 三档）、8 卡全显示 / 9 卡显示 8 + `and 1 more`、缺硬件整块不渲染、读不到数据画 `--` 不画 0、配置面板装不下时砍最长的那段而不是滚屏；另有一组源码守卫（不许再出现 `\033[A`、不许有 Unicode 制表符、`console_quiet_on/off` 要成对） | `lib/ui.sh`、`lib/core.sh` 的读数函数、`factory-test.sh` |
 | `test-report-render.sh` | 客户报告渲染：不泄露通电时间/git hash/内部用语、`Unknown!` 归一化、二级编号不跳号、空 run-dir 不崩 | `report/generate_report.py` |
 | `test-internal-report.sh` | 内部报告**必须**含通电时间/commit/内部工具名；内部评估要抓得住温差/混插/磨损/不匹配/链路降级；**内部评估不改变整机结论**；老 run-dir 不崩 | `report/generate_internal.py` |
 | `test-capture.sh` | 采集超时不把 bash 的 `Killed` 漏到屏幕上，且要留下 TIMEOUT 记录 | `lib/core.sh` |
@@ -854,8 +885,16 @@ U 盘那块**没有** `cache=unsafe`，flush 是真会落盘的）。四个锚�
 |---|---|---|
 | `Report      :` | 开机完成，时长菜单要出来了 | 发**一次** `1`（菜单是单键读，多发的会漏进下一个提示的整行读取，`1yes` ≠ `yes`） |
 | `live media disks` | 选档生效、`scan_disks` 开始了 | 等采集 |
-| `verify_dmesg_boot` | `collect_all` 的最后一条日志 | 等 3 秒，发 `y` `e` `s` `ret` |
+| `verify_dmesg_boot` | `collect_all` 的最后一条日志 | 等 3 秒，发一个 `spc` 把配置核对面板放过去 |
+| `Configuration review done` | 配置核对面板已过 | 等 3 秒，发 `y` `e` `s` `ret` |
 | `Disk stress test confirmed by operator` | 两道确认都过了 | 等 fio 跑完 |
+
+> `Configuration review done` 是 1.7.0 加的。在那之前 `verify_dmesg_boot` 之后
+> 紧接着就是写确认，直接发 `yes` 就行；加了配置核对面板以后，`y` 会被面板的
+> **单键读**吃掉，剩下 `es` 进整行读 —— 不等于 `yes`，这一轮就静默变成了跳过，
+> 而表面上看像是确认机制不灵。放过面板用的那个 `spc` 是特意选的：
+> 万一它落到后面那个整行读上，`confirm_disk_write` 会先把空白全部去掉再比
+> （`norm="${answer//[[:space:]]/}"`），一个前导空格不会把 `yes` 变成别的东西。
 
 第二道（最终警告面板）没有自己的日志锚点（面板只是 `printf`），
 但它紧跟第一道、中间不做任何硬件动作，时间窗是确定的，而且面板本身有 60s 超时；
