@@ -298,6 +298,15 @@ else
   bad "空 run-dir 把内部报告生成器搞崩了"
 fi
 
+# 三处结论必须同口径：屏幕（factory-test.sh）、交付报告、内部报告。
+# 一条判定都没有时，内部这份以前会写"无 FAIL 项，整机结论 PASS" ——
+# 而我们正是拿它来查"这轮到底出了什么事"的，它先说了 PASS 就没人往下查了。
+EI="$TMP/empty.html"
+has_no "$EI" "verdict v-PASS" "一条判定都没有时内部报告也不许打 PASS"
+has    "$EI" "verdict v-FAIL" "一条判定都没有时内部报告结论必须是 FAIL"
+has    "$EI" "一条判定都没有" "内部评估要点明这轮没跑成，而不是说它通过了"
+has_no "$EI" "无 FAIL 项，整机结论 PASS" "没有结果 != 无 FAIL 项"
+
 # 老版本的 run-dir：sys_metrics.csv 没有 cpu_pkg_temps 那一列
 OLD="$TMP/old"; mkdir -p "$OLD/raw"
 cp "$RD/meta.json" "$OLD/meta.json"

@@ -379,6 +379,8 @@ check "候选校时服务器列表不能是空的" \
       "over" "$( ((${#NET_TIME_SERVERS[@]} > 0)) && echo over || echo within )"
 
 if have chronyd; then
+  # 中文引号是文案的一部分，不是打错的 shell 引号
+  # shellcheck disable=SC1111
   echo "  (本机装了 chronyd，跳过“客户端缺失应返回失败”这条——环境不对，不是用例本身的问题)"
 else
   check "本机没装 chronyd 时 sync_clock_now 应直接返回失败，不报错、不挂起" \
@@ -1040,6 +1042,11 @@ check "试探次数 = 候选个数（没有退回全范围扫描）" "2" "$(grep
 megaraid_pd_candidates() { :; }
 megaraid_pd_probe() { echo x >> "$PROBE_COUNT"; return 1; }
 MEGARAID_SCAN_MAX=32 MEGARAID_SCAN_MISS=12
+# 这里调的是 collect.sh 里真的那个 megaraid_pd_ids（本文件后面才把它换成桩，
+# 那是给 smart_targets_build 那组用例用的）。shellcheck 只看文件、看不到 source
+# 进来的定义，于是把"先调用、后定义"当成了错误。
+# ⚠️ 后面那个桩一旦被挪到这行之前，这三组有界试探的用例就全在测桩，会静悄悄地绿。
+# shellcheck disable=SC2218
 megaraid_pd_ids /dev/sda >/dev/null
 check "一个都读不到时最多试 MEGARAID_SCAN_MISS 次就停" "12" \
       "$(grep -c . "$PROBE_COUNT" || true)"
@@ -1187,6 +1194,65 @@ check "dmesg-pre.txt 的采集必须排在 verify_dmesg_boot 之前" \
       "$(if [[ "$(grep -n 'dmesg-pre.txt' <<<"$chain" | head -1 | cut -d: -f1)" \
                -lt "$(grep -n 'verify_dmesg_boot' <<<"$chain" | head -1 | cut -d: -f1)" ]]; \
          then echo yes; else echo no; fi)"
+
+# ================================================================
+echo
+echo "=== 整机结论：全程最不该出错的那一次判定 ==="
+# 屏幕上那个 PASS/FAIL 大字，1.3.0 之前是
+#     grep -q '"status":"FAIL"' results.jsonl
+# 判出来的。它能用，纯粹因为 jq -cn 的紧凑输出恰好没有空格。格式一变就永远
+# 匹配不上，不会有任何报错，表现是**每台机器都显示绿色 PASS** —— 判错方向
+# 是把坏机器放出厂，比误伤好机器还糟。这正是 §11 一号不变量
+# （不要拿关键字匹配当判定）自己没守住的地方。
+#
+# 下面**从 factory-test.sh 里把那句 jq 抠出来**再喂样本，而不是在测试里另抄
+# 一份 —— 抄一份的话，改坏了生产代码这里照样绿。
+FT="$(dirname "${BASH_SOURCE[0]}")/../rootfs/opt/klburn/factory-test.sh"
+
+check "整机结论不许再用 grep 匹配 results.jsonl（不算注释）" "0" \
+      "$(grep -n "grep -q .*status.*FAIL" "$FT" | grep -vE '^[0-9]+:[[:space:]]*#' | grep -c .)"
+
+mapfile -t VERDICT_FILTERS < <(grep -oE "jq -e -s '[^']+'" "$FT" | sed -E "s/^jq -e -s '//; s/'$//")
+check "抠得到 factory-test.sh 里那两句 jq（一句找 FAIL，一句看有没有结果）" "2" \
+      "${#VERDICT_FILTERS[@]}"
+
+# 照抄 factory-test.sh 的两步：有 FAIL -> FAIL；一条判定都没有 -> 也 FAIL
+verdict_of() {
+  local f="$1"
+  jq -e -s "${VERDICT_FILTERS[0]}" "$f" >/dev/null 2>&1 && { echo FAIL; return; }
+  jq -e -s "${VERDICT_FILTERS[1]}" "$f" >/dev/null 2>&1 || { echo FAIL; return; }
+  echo PASS
+}
+
+printf '%s\n' '{"id":"a","status":"PASS"}' '{"id":"b","status":"SKIP"}' \
+              '{"id":"c","status":"WARN"}' > "$TMP/v-clean.jsonl"
+check "全是 PASS/SKIP/WARN -> 整机 PASS（SKIP 和 WARN 都不拉低结论）" \
+      "PASS" "$(verdict_of "$TMP/v-clean.jsonl")"
+
+printf '%s\n' '{"id":"a","status":"PASS"}' '{"id":"b","status":"FAIL"}' > "$TMP/v-fail.jsonl"
+check "有一条 FAIL -> 整机 FAIL" "FAIL" "$(verdict_of "$TMP/v-fail.jsonl")"
+
+# 这条就是老写法会栽的地方：同样的语义，只是 JSON 里多了空格
+printf '%s\n' '{"id": "a", "status": "FAIL"}' > "$TMP/v-spaced.jsonl"
+check "JSON 里带空格照样要判出 FAIL（老的文本匹配在这里会漏判成 PASS）" \
+      "FAIL" "$(verdict_of "$TMP/v-spaced.jsonl")"
+
+# 反过来也不能误伤：中文 detail 里出现这串字样时不许当成真有 FAIL
+jq -cn '{id:"a",name:"n",status:"WARN",detail:"日志里带 \"status\":\"FAIL\" 字样"}' \
+   > "$TMP/v-tricky.jsonl"
+check "detail 文案里出现 status/FAIL 字样不算数（只看真正的 status 字段）" \
+      "PASS" "$(verdict_of "$TMP/v-tricky.jsonl")"
+
+# 一条判定都没有 != 全都通过。采集阶段就崩了、U 盘写满了、进程被收掉都会走到这里，
+# 1.3.0 之前这三种情况全都打出绿色大字 PASS —— 一台什么都没测过的机器看着是合格的。
+: > "$TMP/v-empty.jsonl"
+check "results.jsonl 是空的 -> 不许判 PASS（这一轮根本没测过）" \
+      "FAIL" "$(verdict_of "$TMP/v-empty.jsonl")"
+check "results.jsonl 压根不存在 -> 不许判 PASS" \
+      "FAIL" "$(verdict_of "$TMP/v-nonexistent.jsonl")"
+printf '%s\n' '{"id":"a","status":"PASS"' > "$TMP/v-broken.jsonl"   # 少个右括号
+check "results.jsonl 解析不了 -> 不许判 PASS（写到一半断电就是这样）" \
+      "FAIL" "$(verdict_of "$TMP/v-broken.jsonl")"
 
 # ================================================================
 # 收尾自检：这个脚本会 source 被测的 lib，而 lib 里也有 ok()。
