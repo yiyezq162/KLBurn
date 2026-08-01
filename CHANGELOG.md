@@ -173,6 +173,18 @@ git tag -l --sort=version:refname
 
   > 只验"分区还挂得上"远远不够：分区表没被动、文件全没了，照样挂得上。
 
+  **这条端到端不是摆设，是验过的。** 把 `scan_disks` 的排除判断整个反过来
+  （`if [[ -n "$why" ]]` → `if [[ -z "$why" ]]`，于是启动 U 盘变成 fio 的目标），
+  出一张变异 ISO 跑了一次 —— **它跑红了**（7 项通过、2 项失败，退出码 1）。
+  红的方式还很说明问题：
+
+  ```
+  FAIL 日志里没有 fio 启动的痕迹      <- fio 把 klburn.log 所在的分区写掉了
+  FAIL 第 4 个分区挂不上              <- 连文件系统都没了
+  ```
+
+  第一条正是"写穿"的指纹：harness 读的那份日志，本身就在被 fio 写的那块盘上。
+
 - **`test-hw-checks.sh` 补一组"Ventoy 形状的启动盘必须被排除"**，并加变异
   `media-blind`。排除有三层（`rm=1` / 有分区挂载 / `live_media_disks`），
   而 **Ventoy 场景下前两层同时落空** —— 它拿 dm-mapper 把 ISO 和 exFAT 包了一层，
