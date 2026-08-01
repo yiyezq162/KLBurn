@@ -653,6 +653,12 @@ check_fans() {
 4. **dmesg 关键字不能用裸 `NMI`**（会命中每台机器开机都有的三行正常日志），
    也不能用 `EDAC.*(CE|UE)`（"CE" 在 SOURCE/DEVICE/INTERFACE 里都有）。
    加新关键字必须同时在真故障日志和健康机日志上各跑一遍。
+
+   **豁免噪声时反过来也要卡死。** 漏豁免会误伤好机器，至少看得见；
+   **豁免扩大化会把真故障一起吃掉，而且永远不会有人发现**。
+   `dev fd[0-9]`（软驱，BMC 虚拟媒体挂的那种真机上也有）是唯一按设备名豁免的，
+   写成 `dev [a-z]` 就会把 `sda`/`nvme0n1` 的 I/O error 一起放过。
+   每加一条设备名豁免，都要同时补一组"真盘必须照常命中"的成对断言。
 5. **PCIe 链路只查端点，绝对不能查 PCI bridge。** 桥的 LnkCap 是槽位能力、
    LnkSta 是与对端协商的结果，对端是张老卡就必然降速，这是设计如此。
    用**白名单**挑设备类而不是"排除桥"：白名单漏一类顶多少查一个设备，
@@ -732,6 +738,38 @@ check_fans() {
 | `test-capture.sh` | 采集超时不把 bash 的 `Killed` 漏到屏幕上，且要留下 TIMEOUT 记录 | `lib/core.sh` |
 | `test-concurrent-burn.sh` | CPU/内存/GPU 是真并发不是排队、并发期间只能有一个采样器、cleanup 要连孙进程一起收 | `factory-test.sh`、`lib/ui.sh`、`lib/gpu.sh`、`lib/stress.sh` |
 | `test-disk-exclusion.sh` | U 盘反查排除（Ventoy 同构设备链）。**需要 root** | `lib/storage.sh` |
+
+上面这些都在 `run-all.sh` 里。下面两条**不在**，要单独跑：
+
+| 测试 | 锁住什么 | 什么时候跑 |
+|---|---|---|
+| `e2e-qemu.sh` | **把出好的 ISO 在 QEMU 里真的启动一次**：能不能引导、数据分区认不认得出、报告有没有真的落到"U 盘"上、盘里跑的是不是这次构建的代码。**需要 root**（losetup / 挂 exFAT / KVM） | 出盘之后、发货之前 |
+| `mutate.sh` | 把已修好的 bug 逐个塞回代码，确认对应的用例真的会跑红。**逃掉 = 那条守卫是摆设** | 改了任何判定逻辑或守卫之后 |
+
+```bash
+sudo ./tests/e2e-qemu.sh                 # 冒烟，约 3 分钟
+sudo ./tests/e2e-qemu.sh --stage full    # 完整跑一遍 QUICK 档，约 20 分钟
+./tests/mutate.sh                        # 全部变异，约 3~5 分钟
+./tests/mutate.sh --list                 # 看有哪些变异、各由谁守
+```
+
+**`mutate.sh` 绝对不能挂进 `run-all.sh`** —— 它自己会去调各个测试套件，
+挂进去就成了递归。
+
+### e2e 怎么模拟一根 U 盘
+
+Rufus 的 DD 模式就是把 ISO 原样写进 U 盘再在剩余空间建 exFAT 分区，脚本对着
+一个文件做同一件事：`cp ISO` → `truncate` 撑大 → `sgdisk -e` 把 GPT 备份头挪到
+新末尾 → 建第 4 个分区（ISO 自带 3 个）→ `mkfs.exfat -n KLBURN`。
+
+`klburn.service` 钉死在 tty1 上，串口读不到 UI，所以按键走 QEMU monitor 的
+`sendkey` —— 和现场工程师按键盘是同一条路径，**不需要给产品加"无人值守模式"**。
+断言则全部落在磁盘产物上：跑完把第 4 个分区挂起来看。
+
+两个踩过的坑写在脚本里，改的时候别退回去：**U 盘那块不能加 `cache=unsafe`**
+（QEMU 会忽略 flush，虚拟机一停写入就没了，现象和"产品没落盘"一模一样），
+**USB 设备必须给 `bootindex=0`**（挂了空白盘之后 SeaBIOS 会先去试那几块 virtio 盘，
+失败后不会回落到 USB，直接 "No bootable device"）。
 
 **这套测试做过变异验证**：把每个已修复的 bug 逐个塞回代码里，确认对应的用例真的会跑红
 （一个从没红过的测试等于没写）。其中两次变异一开始没被抓住：

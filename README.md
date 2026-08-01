@@ -198,12 +198,24 @@ CUDA 运行时库不在显卡驱动里，直接打包动态链接的版本一跑
 `error while loading shared libraries`，然后被判成"显卡故障"。
 用 `nvprune` 裁剪静态库再静态链接，330MB 出头，装完还用 `ldd` 自检。
 
-**⑨ 355 项回归测试，全都不需要真实硬件**
-而且做过**变异验证**：把每个已修复的 bug 逐个塞回代码里，确认对应的用例真的会跑红
-——一个从没红过的测试等于没写。跑全套的同时还会过一遍 shellcheck。
+**⑨ 361 项回归测试，全都不需要真实硬件**
+跑全套的同时还会过一遍 shellcheck。
 
 ```bash
 ./tests/run-all.sh
+```
+
+**变异验证是脚本，不是一次性人工活。** 把每个已修复的 bug 逐个塞回代码里，
+确认对应的用例真的会跑红 —— 一个从没红过的测试等于没写：
+
+```bash
+./tests/mutate.sh
+```
+
+**出好的盘会在 QEMU 里真的开机跑一遍**，报告从虚拟"U 盘"里挖出来验：
+
+```bash
+sudo ./tests/e2e-qemu.sh --stage full
 ```
 
 ---
@@ -460,7 +472,9 @@ KLBurn/
 │           └── generate_internal.py  ★ 内部工程报告
 ├── tests/                       7 个回归测试 + 1 条 shellcheck，都不需要真实硬件
 │   ├── lint.sh                  shellcheck 静态检查（没装就跳过）
-│   └── run-all.sh               一次跑完
+│   ├── run-all.sh               一次跑完上面这些
+│   ├── mutate.sh            ★   变异测试：把修好的 bug 塞回去，守卫必须跑红
+│   └── e2e-qemu.sh          ★   把 ISO 在 QEMU 里真开机跑一遍（要 root）
 ├── vendor/                      离线包（不进版本库，见 vendor/README.md）
 └── out/                         构建产物 ISO
 ```

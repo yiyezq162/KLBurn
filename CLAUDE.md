@@ -49,6 +49,11 @@ wsl -d Ubuntu-24.04 -u root -e bash -c "cd /mnt/c/Users/li/Desktop/project/KLBur
    查不到那个版本干了什么就等于没有可追溯性
 2. `./tests/run-all.sh` 全绿（里面已经包含 `lint.sh` 的 shellcheck）
 3. 改了会进客户报告的文案 → 一定跑 `test-hw-checks.sh` + `test-report-render.sh`
+4. 改了**判定逻辑或守卫** → 再跑 `./tests/mutate.sh`（把修好的 bug 塞回去，
+   守卫必须跑红；逃掉 = 那条守卫是摆设）。它不在 `run-all.sh` 里，
+   也**不能**放进去 —— 它自己要调各个套件，挂进去就是递归
+5. 出盘之后 → `sudo ./tests/e2e-qemu.sh`（冒烟约 3 分钟）。发货前跑
+   `--stage full`（约 20 分钟）。软驱那条误判就是它跑出来的，单元测试造不出来
 
 ## 三条最容易踩的红线
 
