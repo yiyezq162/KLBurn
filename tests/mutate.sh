@@ -58,6 +58,8 @@ MUTATIONS=(
 "net-servers${S}NET_TIME_SERVERS 改回裸赋值（现场在 klburn.conf 里换内网 NTP 会被静默顶掉）${S}test-hw-checks${S}$RT/lib/network.sh${S}mut_net_servers"
 "fd0-overreach${S}把软驱豁免扩大成所有设备（真盘的 I/O error 会被一起吃掉，坏盘查不出来）${S}test-hw-checks${S}$RT/lib/verify.sh${S}mut_fd0_overreach"
 "disk-none-fail${S}没装硬盘时判 FAIL 而不是 WARN（§2-2：能力缺失 ≠ 硬件故障，会把无盘机器拦在出货前）${S}test-hw-checks${S}$RT/lib/collect.sh${S}mut_disk_none_fail"
+"counter-postfix${S}断言计数改回 (( PASS++ ))（X=0 时返回 1，让 cond && ok || bad 两边都跑）${S}lint${S}tests/lint.sh${S}mut_counter_postfix"
+"media-blind${S}scan_disks 不再反查启动 U 盘（Ventoy 下前两层同时落空，fio 会把测试盘写穿）${S}test-hw-checks${S}$RT/lib/storage.sh${S}mut_media_blind"
 )
 
 # ================================================================
@@ -70,6 +72,28 @@ MUTATIONS=(
 
 anchor_count() { grep -cF -- "$2" "$1" 2>/dev/null || echo 0; }
 
+# ⚠️ 锚点和替换文本一律走 ENVIRON 传给 awk，**绝不能用 `awk -v`**。
+#    `-v` 会对值做一遍反斜杠转义处理：锚点里的 `\033` 会在 awk 里变成一个真的
+#    ESC 字节，而文件里是 `\`+`0`+`3`+`3` 四个字符，于是 index() 永远匹配不上。
+#    表现极其难查 —— 上面 anchor_count 用的是 grep -F，它照样报"命中 1 次"，
+#    于是变异**静默没施加**、对应套件照常全绿，最后被报成"这条守卫逃掉了"。
+#    假警报比漏报还难查：人会去改一条本来就没问题的守卫。
+#    （counter-postfix 就是这么栽的，它的锚点里正好有 \033。）
+#
+# 再加一道后置检查：施加完文件必须真的变了。锚点匹配得上、替换却没生效
+# 这件事只要发生过一次，就说明"逃掉"这个结论本身不可信。
+_apply_awk() {
+  local f="$1" prog="$2"
+  MUT_NEEDLE="${3:-}" MUT_NEW="${4:-}" awk "$prog" "$f" > "$f.mut" \
+    || { rm -f "$f.mut"; printf 'awk 执行失败（%s）' "$f"; return 1; }
+  if cmp -s "$f" "$f.mut"; then
+    rm -f "$f.mut"
+    printf '变异没有真的改到 %s —— 锚点匹配得上、替换却没生效' "$f"
+    return 1
+  fi
+  mv "$f.mut" "$f"
+}
+
 replace_line() {
   local f="$1" needle="$2" new="$3" n
   n="$(anchor_count "$f" "$needle")"
@@ -77,8 +101,9 @@ replace_line() {
     printf '锚点在 %s 里命中 %s 次（要求恰好 1 次），变异无法可靠施加' "$f" "$n"
     return 1
   fi
-  awk -v needle="$needle" -v new="$new" \
-      'index($0, needle) { print new; next } { print }' "$f" > "$f.mut" && mv "$f.mut" "$f"
+  _apply_awk "$f" \
+    'index($0, ENVIRON["MUT_NEEDLE"]) { print ENVIRON["MUT_NEW"]; next } { print }' \
+    "$needle" "$new"
 }
 
 delete_line() {
@@ -88,7 +113,7 @@ delete_line() {
     printf '锚点在 %s 里命中 %s 次（要求恰好 1 次），变异无法可靠施加' "$f" "$n"
     return 1
   fi
-  awk -v needle="$needle" 'index($0, needle) { next } { print }' "$f" > "$f.mut" && mv "$f.mut" "$f"
+  _apply_awk "$f" 'index($0, ENVIRON["MUT_NEEDLE"]) { next } { print }' "$needle"
 }
 
 # ================================================================
@@ -124,6 +149,15 @@ mut_oom_fail() {
     "  (( rc == 1370 )) || return 1"
 }
 
+# tests/ 里到处是 `cond && ok "..." || bad "..."`（-S info 下 26 条 SC2015）。
+# 它们安全**只依赖一件事**：ok()/bad() 返回 0。改成后缀 ++ 之后，PASS 为 0 的
+# 那一次算术命令返回 1，"断言通过"接着又把 bad 跑一遍 —— 同一条既记通过又记失败。
+mut_counter_postfix() {
+  replace_line "tests/lint.sh" \
+    "ok()  { printf '  \\033[32mOK\\033[0m   %s\\n' \"\$1\"; PASS=\$((PASS+1)); }" \
+    "ok()  { printf '  \\033[32mOK\\033[0m   %s\\n' \"\$1\"; (( PASS++ )); }"
+}
+
 mut_lint_exempt() {
   replace_line "tests/lint.sh" \
     'EXCLUDE_RUNTIME="SC2034,SC2155,SC2120"' \
@@ -146,6 +180,16 @@ mut_disk_none_fail() {
   replace_line "$RT/lib/collect.sh" \
     '"硬盘信息采集" "$ST_WARN"' \
     '      result_add "collect_disk" "硬盘信息采集" "$ST_FAIL" \'
+}
+
+# 整个项目最危险的一条路径：反查不出启动 U 盘 -> fio 把它当空盘写穿 ->
+# 测试盘当场报废、历史报告全丢，不可逆。
+# 排除有三层，但 Ventoy 场景下前两层（rm=1 / 有分区挂载）**同时**落空 ——
+# 那时候只剩这一层。所以它必须有人守。
+mut_media_blind() {
+  replace_line "$RT/lib/storage.sh" \
+    'media_list="$(live_media_disks' \
+    '  media_list=""   # 变异：反查不出启动 U 盘'
 }
 
 mut_net_servers() {

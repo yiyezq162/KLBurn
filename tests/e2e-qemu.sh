@@ -63,6 +63,7 @@ NET=0
 WORKDIR=""
 FIRMWARE="bios"
 NO_DATA=0
+DISK_STRESS=0
 
 usage() {
   cat <<'EOF'
@@ -75,6 +76,9 @@ usage() {
   --no-data-partition  把第 4 个分区格成 ext4 而不是 exFAT，模拟"U 盘上没有
                        可用数据分区"。验的是：报告不会被写到不该写的地方、
                        而且流程照常跑完不卡死（现场应看到黄色大框警告）
+  --disk-stress        真的过掉两道破坏性写确认，让 fio 往那两块空白盘上写。
+                       **只在 --stage full 下有效，默认关。**
+                       验的是全项目最危险的一条：fio 不会写穿启动 U 盘
   --iso PATH           用指定 ISO（默认取 out/ 里 mtime 最新的）
   --net                给虚拟机接一块网卡（默认不接，网卡项会判 SKIP）
   --keep               跑完保留磁盘镜像和截图，方便手工看
@@ -92,6 +96,7 @@ while (( $# )); do
     --keep)        KEEP=1;     shift ;;
     --firmware)    FIRMWARE="$2"; shift 2 ;;
     --no-data-partition) NO_DATA=1; shift ;;
+    --disk-stress) DISK_STRESS=1; shift ;;
     --workdir)     WORKDIR="$2"; shift 2 ;;
     --spare-disks) SPARE_N="$2"; shift 2 ;;
     -h|--help)     usage; exit 0 ;;
@@ -116,6 +121,18 @@ command_not_found_handle() {
   kill -TERM $$
   return 127
 }
+
+# --disk-stress 只有在真跑完一轮的时候才有意义：冒烟档根本走不到压测阶段。
+# 这里直接停下而不是"静默忽略"—— 静默忽略的结果是有人以为验过了，其实没有。
+if (( DISK_STRESS )) && [[ "$STAGE" != "full" ]]; then
+  printf '致命: --disk-stress 只能配 --stage full（冒烟档走不到压测阶段）\n' >&2
+  exit 2
+fi
+if (( DISK_STRESS )) && (( NO_DATA )); then
+  printf '致命: --disk-stress 和 --no-data-partition 不能一起用\n' >&2
+  printf '      后者故意让报告落不到"U 盘"上，那正是前者要检查的东西\n' >&2
+  exit 2
+fi
 
 # ---------------------------------------------------------------- 前置检查
 (( EUID == 0 )) || die "要 root：要 losetup 造分区、要挂 exFAT、还要用 /dev/kvm"
@@ -211,16 +228,44 @@ else
                            || bad "卷标不对：拿到 [$lbl]，要的是 KLBURN"
 fi
 
+# --disk-stress：先往「U 盘」里放一份**上一轮的报告**。
+#
+# 这是三条验收里最要紧那条的锚：fio 一旦写穿启动 U 盘，最先没的就是历史报告
+# —— 而那是这根盘上唯一不可再生的东西（客户半年后说盘坏了，我们要拿它出来）。
+# 只验「分区还挂得上」远远不够：分区表没被动、文件全没了，照样挂得上。
+SENTINEL_DIR="out/20250101_000000_PREVIOUS_RUN"
+SENTINEL_TEXT="KLBURN-E2E-SENTINEL-DO-NOT-TOUCH-上一轮的报告"
+if (( DISK_STRESS )); then
+  if mount "${LOOP}p4" "$MNT" 2>/dev/null; then
+    mkdir -p "$MNT/$SENTINEL_DIR"
+    printf '%s\n' "$SENTINEL_TEXT" > "$MNT/$SENTINEL_DIR/report.html"
+    sync
+    umount "$MNT"
+    ok "已在「U 盘」里放好一份上一轮的报告（$SENTINEL_DIR）"
+  else
+    bad "放不进上一轮的报告 —— 那条「没写穿」的断言就没有锚了"
+  fi
+fi
+
 losetup -d "$LOOP"; LOOP=""
 
 # "本机硬盘"：稀疏文件，不占真实空间
 SPARE_ARGS=()
+SPARES=()
 for (( i = 0; i < SPARE_N; i++ )); do
   d="$WORK/spare$i.img"
   truncate -s "${SPARE_GB}G" "$d"
+  SPARES+=("$d")
   SPARE_ARGS+=(-drive "file=$d,format=raw,if=virtio,cache=unsafe")
 done
 info "另挂 $SPARE_N 块 ${SPARE_GB}G 空白盘当本机硬盘"
+
+# 空白盘现在是稀疏文件：apparent size 是 2G，**实际占用**几乎为 0。
+# fio 真写过之后实际占用会涨上去 —— 这是「fio 确实动过这块盘」最便宜的证据，
+# 不用去 md5 两遍 2GB。
+spare_alloc() { du -B1 -- "$1" 2>/dev/null | cut -f1; }
+SPARE_ALLOC_BEFORE=()
+for d in "${SPARES[@]}"; do SPARE_ALLOC_BEFORE+=("$(spare_alloc "$d")"); done
 
 # ---------------------------------------------------------------- 2. 起虚拟机
 printf '\n\033[1m[2/4] 启动虚拟机\033[0m\n'
@@ -301,6 +346,38 @@ mon() {
 
 shot() { mon "screendump $WORK/shot-$1.ppm"; }
 
+# ---------------------------------------------------------------- 等一行日志出现
+# wait_for_log <日志里的字串> <最多等几秒> [人话标签]
+#
+# 虚拟机把 klburn.log 写在 exFAT 数据分区上，而那个分区就是 usb.img 里的一段
+# 字节 —— **虚拟机还在跑的时候，宿主机直接 grep 这个镜像就能看到**。
+# 实测：虚拟机写下去到宿主机 grep 得到，延迟在 3 秒以内（U 盘那块**没有**
+# cache=unsafe，flush 是真的会落盘的）；2.4GB 的镜像 grep 一遍约 3 秒。
+#
+# 这是整条 --disk-stress 的地基。两道确认提示出现的时刻随机器而变（采集快慢
+# 差很多），**按时间盲发按键不可接受 —— 按错方向就是真擦盘**。
+# 有了锚点才敢发第一个 y。
+# ⚠️ 计时必须走 date，不能拿"sleep 了几次 × 3"当秒数。
+#    每轮里那次 grep 自己就要扫 2.4GB、花掉 3 秒左右，累加出来的数字只有真实
+#    耗时的一半 —— 于是 limit=900 实际能等 1800 秒，日志里"第 252s"其实是第
+#    600 秒。超时和读数一旦对不上，排查的人会从完全错误的地方开始找。
+wait_for_log() {
+  local needle="$1" limit="$2" label="${3:-$1}" start now
+  start="$(date +%s)"
+  while :; do
+    now="$(date +%s)"
+    (( now - start >= limit )) && break
+    kill -0 "$QEMU_PID" 2>/dev/null || { info "等「$label」时虚拟机已经退出"; return 1; }
+    if grep -aqF -- "$needle" "$IMG" 2>/dev/null; then
+      info "看到「$label」（第 $(( now - start ))s）"
+      return 0
+    fi
+    sleep 3
+  done
+  info "等了 ${limit}s 也没等到「$label」"
+  return 1
+}
+
 # ---------------------------------------------------------------- 3. 驱动它
 printf '\n\033[1m[3/4] 操作虚拟机\033[0m\n'
 
@@ -321,6 +398,99 @@ if [[ "$STAGE" == "smoke" ]]; then
     kill -0 "$QEMU_PID" 2>/dev/null || { bad "虚拟机在第 ${t}s 意外退出了"; break; }
     shot "$t"
     printf '       ... %ss\n' "$t"
+  done
+elif (( DISK_STRESS )); then
+  # ================================================================
+  # 完整档 + 真写盘：全程按**日志锚点**走，一次盲发按键都没有
+  # ================================================================
+  info "完整档 + 破坏性写：选 QUICK -> 过两道确认 -> fio 真写盘 -> 关机"
+
+  # 锚点必须是"虚拟机写出来的"，不能是 ISO 里本来就有的字节。
+  # 万一某个字串在镜像里一开始就有，轮询会在第 0 秒命中，按键就在完全错误的
+  # 时刻发出去 —— 而这一轮的按键是"确认擦盘"。所以先验一遍它们现在都不在。
+  preexist=""
+  for n in "Report      :" "live media disks" "verify_dmesg_boot" \
+           "Disk stress test confirmed by operator"; do
+    grep -aqF -- "$n" "$IMG" 2>/dev/null && preexist="$preexist [$n]"
+  done
+  if [[ -z "$preexist" ]]; then
+    ok "四个日志锚点在开机前都不在镜像里（不会在错误的时刻发出确认键）"
+  else
+    bad "这些锚点在开机前就已经在镜像里了，轮询会立刻误命中：$preexist"
+    printf '\n通过 %d 项，失败 %d 项\n' "$PASS" "$FAIL"; exit 1
+  fi
+
+  # ---------------- 选档：只按一次 ----------------
+  # 时长菜单是**单键**读（read -n 1），一个 "1" 就选中了。
+  # **绝不能像下面那个分支那样反复按**：多按出来的键会留在 tty 缓冲里，
+  # 被后面 confirm_disk_write 的整行读取吃掉 —— "1yes" 不等于 "yes"，
+  # 于是本该擦盘的这一轮又静默变成了跳过，而且看起来像是机制不灵。
+  if wait_for_log "Report      :" 240 "开机完成，时长菜单要出来了"; then
+    sleep 2
+    mon "sendkey 1"
+    if ! wait_for_log "live media disks" 60 "选档已生效、开始采集"; then
+      # 还没进采集说明还卡在菜单上（这时候补一下键是安全的，
+      # 因为除了菜单没有别的读取者）
+      mon "sendkey 1"
+      wait_for_log "live media disks" 60 "选档已生效、开始采集" || true
+    fi
+  else
+    bad "开机 240s 都没写出第一批日志 —— 后面的按键一律不发"
+  fi
+  shot "boot"
+
+  # ---------------- 第 1 道：整行读，必须原样打出 yes ----------------
+  # 锚点用 collect_all 的**最后一条**日志（verify_dmesg_boot 的判定结果）。
+  # 它一落盘，紧接着就是 confirm_disk_write 把提示打出来（120s 超时）。
+  disk_confirm_sent=0
+  if wait_for_log "verify_dmesg_boot" 900 "采集跑完（下一步就是破坏性写确认）"; then
+    sleep 3
+    for c in y e s; do mon "sendkey $c"; done
+    mon "sendkey ret"
+    disk_confirm_sent=1
+    info "第 1 道确认已发出（yes + 回车）"
+  else
+    bad "没等到采集结束的锚点 —— 按键不敢发（盲发按错方向就是真擦盘）"
+  fi
+
+  # ---------------- 第 2 道：最终警告面板，单键 y ----------------
+  # 这一道没有自己的日志锚点（面板只是 printf），但它**紧跟着**第 1 道，
+  # 中间不做任何硬件动作，时间窗是确定的，而且面板本身有 60s 超时。
+  # 发完之后有锚点可验：两道都过了 confirm_disk_write 会打一条 ok。
+  if (( disk_confirm_sent )); then
+    sleep 4
+    mon "sendkey y"
+    if wait_for_log "Disk stress test confirmed by operator" 90 "两道确认都通过"; then
+      ok "两道破坏性写确认都通过了（fio 会真的往裸盘上写）"
+    else
+      mon "sendkey y"
+      if wait_for_log "Disk stress test confirmed by operator" 60 "两道确认都通过"; then
+        ok "两道破坏性写确认都通过了（第 2 道补发了一次 y）"
+      else
+        bad "没能通过破坏性写确认 —— 这一轮 fio 不会写盘，下面几条必然红"
+      fi
+    fi
+  fi
+  shot "confirmed"
+
+  # ---------------- 等它跑完 ----------------
+  # QUICK 是 CPU/内存并发 600s，硬盘再单独 180s（30%），加上采集/复查/出报告。
+  # 这里不再盲等固定秒数，而是等最后那条 "Report written:"。
+  info "等压测 + 出报告（QUICK 600s 并发 + 硬盘 180s + 余量）"
+  if wait_for_log "Sequential write" 900 "fio 开始跑了"; then
+    ok "fio 真的启动了（日志里有顺序写那一段）"
+  else
+    bad "日志里没有 fio 启动的痕迹"
+  fi
+  wait_for_log "Report written:" 1500 "报告已生成，可以关机了" || \
+    info "没等到出报告，照常往下走（下面的断言会说明发生了什么）"
+  shot "burn-done"
+
+  info "发关机键"
+  for (( t = 0; t < 300; t += 10 )); do
+    kill -0 "$QEMU_PID" 2>/dev/null || { ok "收尾菜单按 p 之后虚拟机正常关机"; break; }
+    mon "sendkey p"
+    sleep 10
   done
 else
   info "完整档：等开机 -> 选 QUICK -> 跑完 -> 关机"
@@ -436,7 +606,11 @@ if (( NO_DATA )); then
 fi
 
 # --- 报告目录 ---
-RUNDIR="$(find "$MNT/out" -maxdepth 1 -mindepth 1 -type d 2>/dev/null | head -1)"
+# ⚠️ --disk-stress 会先在 out/ 里放一份"上一轮的报告"当哨兵。它也是个目录，
+#    不排掉的话 head -1 有一半概率挑中它，然后下面每一条断言都对着一个假目录跑
+#    —— 全红，而且原因指向完全不相干的地方。
+RUNDIR="$(find "$MNT/out" -maxdepth 1 -mindepth 1 -type d ! -name '*_PREVIOUS_RUN' \
+          2>/dev/null | head -1)"
 if [[ -n "$RUNDIR" ]]; then
   ok "U 盘里出现了报告目录：out/$(basename "$RUNDIR")"
 else
@@ -510,6 +684,89 @@ else
     jq -e -s 'any(.[]; .id == "collect_disk")' "$RUNDIR/results.jsonl" >/dev/null 2>&1 \
       && ok "collect_disk 有结论（单元测试覆盖不到的那一项）" \
       || bad "collect_disk 这一项没出现在结论里"
+  fi
+
+  # ================================================================
+  # --disk-stress 的三条验收
+  # ================================================================
+  # 这一段守的是**全项目最危险的一条路径**：fio 往裸盘上写随机数据，
+  # 而启动 U 盘就在同一台机器上。反查排除一旦退化，测试盘当场报废、
+  # 历史报告全丢 —— 而且是不可逆的。
+  #
+  # 以前只有 test-disk-exclusion.sh 用 loop + dm-linear 搭同构设备链验反查逻辑，
+  # **从来没真让 fio 跑起来写过一次盘**。三条一起才说明问题：
+  #   1. 空白盘真被写了       —— 否则这一轮什么都没验证（SKIP 也能"全绿"）
+  #   2. U 盘还在、历史报告还在 —— 这才是"没写穿"
+  #   3. stress_disk 判 PASS   —— 确认键真打中了，不是又静默跳过了
+  if (( DISK_STRESS )); then
+    printf '\n'
+    # ---- 1. fio 真写了 ----
+    for (( i = 0; i < ${#SPARES[@]}; i++ )); do
+      after="$(spare_alloc "${SPARES[$i]}")"
+      before="${SPARE_ALLOC_BEFORE[$i]:-0}"
+      # 写过之后稀疏文件的实际占用会从 ~0 涨到几百 MB 以上。
+      # 阈值取 64MB：fio 顺序写 180s 的 30% 再怎么慢也不止这个数，
+      # 而"文件系统元数据"之类的噪声远到不了。
+      if (( after > before + 64*1024*1024 )); then
+        ok "$(basename "${SPARES[$i]}")：实际占用 $(numfmt --to=iec "$before") -> $(numfmt --to=iec "$after")，fio 真写了"
+      else
+        bad "$(basename "${SPARES[$i]}")：实际占用还是 $(numfmt --to=iec "$after") —— fio 根本没往它上面写"
+      fi
+      # 再直接看头 1MB 有没有非零字节。占用涨了但全是零（比如被谁 fallocate 了一下）
+      # 也算没写 —— 这条是上面那条的独立佐证，两条查的不是同一件事。
+      nz="$(head -c 1048576 "${SPARES[$i]}" 2>/dev/null | tr -d '\0' | wc -c)"
+      if (( nz > 0 )); then
+        ok "$(basename "${SPARES[$i]}")：头 1MB 里有 $nz 个非零字节（真是数据，不是空洞）"
+      else
+        bad "$(basename "${SPARES[$i]}")：头 1MB 全是零 —— 没有真正写入的数据"
+      fi
+    done
+
+    # ---- 2. 没写穿 U 盘 ----
+    # 分区挂得上（上面已经断言过）+ 上一轮的报告一个字节都没变。
+    # 只验前者是不够的：分区表没被动、文件全没了，照样挂得上。
+    sent="$MNT/$SENTINEL_DIR/report.html"
+    if [[ -f "$sent" ]]; then
+      if [[ "$(cat "$sent" 2>/dev/null)" == "$SENTINEL_TEXT" ]]; then
+        ok "上一轮的报告原封不动（fio 没写穿启动 U 盘）"
+      else
+        bad "上一轮的报告内容被改了 —— 有东西写到 U 盘上了"
+      fi
+    else
+      bad "上一轮的报告没了 —— fio 很可能把启动 U 盘一起擦了"
+    fi
+    # 本轮自己的报告也还在（前面已断言 RUNDIR 存在，这里确认它和历史那份并存）
+    n_runs="$(find "$MNT/out" -maxdepth 1 -mindepth 1 -type d 2>/dev/null | wc -l)"
+    if (( n_runs >= 2 )); then
+      ok "U 盘的 out/ 下有 $n_runs 个报告目录（历史那份和这一轮的并存）"
+    else
+      bad "U 盘的 out/ 下只剩 $n_runs 个报告目录 —— 历史记录被冲掉了"
+    fi
+
+    # ---- 3. stress_disk 判 PASS，不是 SKIP ----
+    # SKIP 也能让整轮"全绿"，所以必须明确要求 PASS：
+    # SKIP 意味着确认键没打中，这一轮压根没写过盘，上面两条也就无从谈起。
+    if [[ -s "$RUNDIR/results.jsonl" ]] && command -v jq >/dev/null 2>&1; then
+      st="$(jq -r -s '[.[]|select(.id=="stress_disk")]|.[0].status // "(没有这一项)"' \
+            "$RUNDIR/results.jsonl" 2>/dev/null)"
+      if [[ "$st" == "PASS" ]]; then
+        ok "stress_disk 判 PASS（确认键真打中了，不是又静默跳过）"
+      else
+        bad "stress_disk 是 [$st]，要的是 PASS —— SKIP 等于这一轮根本没写盘"
+      fi
+    fi
+    if [[ -s "$RUNDIR/meta.json" ]]; then
+      grep -q '"disk_confirmed": *1' "$RUNDIR/meta.json" \
+        && ok "meta.json 记着 disk_confirmed=1" \
+        || bad "meta.json 里 disk_confirmed 不是 1"
+      dt="$(grep -oE '"disk_tested":[^,]*' "$RUNDIR/meta.json" | cut -d'"' -f4)"
+      if [[ -n "$dt" ]]; then
+        ok "meta.json 记下了真被写过的盘：$dt"
+      else
+        bad "meta.json 的 disk_tested 是空的 —— 报告里会说没测过硬盘"
+      fi
+    fi
+    printf '\n'
   fi
 
   # --- 交付边界：报告里不许有内部用语 ---

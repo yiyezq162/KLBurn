@@ -911,6 +911,57 @@ check "dm 候选必须用 blkid -p 低层探测（刚 mknod 的设备不在 blki
 
 # ================================================================
 echo
+echo "=== 启动 U 盘的排除：三层里只有一层挡得住 Ventoy ==="
+# scan_disks 把盘分成"可以交给 fio 写"和"绝对不碰"。判错方向只有一个后果：
+# **fio 把启动 U 盘写穿** —— 测试盘当场报废、历史报告全丢，而且不可逆。
+#
+# 排除有三层，看着重复，其实各管一段：
+#   rm=1（可移动）        普通 U 盘
+#   有分区被挂载          正在用的系统盘
+#   live_media_disks      ← Ventoy 专属。它拿 dm-mapper 把 ISO 和 exFAT 包了一层，
+#                           而那个 dm 设备 udev 不处理、lsblk 完全看不见，
+#                           于是**前两层同时落空**：U 盘的 rm 报 0、
+#                           分区也不显示为已挂载。这时候只剩走 sysfs slaves 链的
+#                           live_media_disks 还认得出来。
+#
+# 下面的 fixture 就照 Ventoy 那个形状造：rm=0、hotplug=0、没有挂载点、有分区表。
+# 这块盘在 lsblk 眼里和一块普通的空盘一模一样。
+KLB_LIB="$LIB"    # core.sh 里写死 /opt/klburn/lib，测试环境里没有那个路径
+
+cat > "$TMP/lsblk-ventoy.json" <<'EOF'
+{"blockdevices":[
+ {"name":"sda","path":"/dev/sda","type":"disk","size":32000000000,"model":"Ventoy USB",
+  "serial":"VT001","rota":false,"tran":"usb","rm":false,"hotplug":false,"pttype":"gpt",
+  "children":[{"name":"sda1","type":"part","mountpoints":[null]}]},
+ {"name":"vda","path":"/dev/vda","type":"disk","size":2000000000000,"model":"REAL DISK",
+  "serial":"RD001","rota":true,"tran":"sata","rm":false,"hotplug":false,"pttype":null,
+  "children":[]}
+]}
+EOF
+lsblk() { cat "$TMP/lsblk-ventoy.json"; }
+
+excluded_why() {   # <盘名> -> 排除理由；没被排除就是空
+  local want="$1" e
+  for e in "${DISK_EXCLUDED[@]:-}"; do
+    [[ "$e" == "/dev/$want|"* ]] && { printf '%s' "${e##*|}"; return; }
+  done
+}
+
+live_media_disks() { printf 'sda\n'; }
+scan_disks >/dev/null 2>&1
+check "Ventoy 形状的启动盘（rm=0、没挂载）必须被排除" \
+      "the KLBurn USB stick itself" "$(excluded_why sda)"
+check "排除掉启动盘之后，真实盘还得留在可测列表里" "/dev/vda" "${DISK_CAND[*]:-}"
+check "被排除的盘绝不能同时出现在 fio 的目标里" "0" \
+      "$(printf '%s' "${DISK_CAND[*]:-}" | grep -c 'sda' || true)"
+# 已挂载的真实盘不压测，但 SMART 还是要采 —— 启动 U 盘则连 SMART 都不进
+check "启动 U 盘不进 SMART 采集列表（它不是被测机器的硬件）" "0" \
+      "$(printf '%s' "${DISK_SMART[*]:-}" | grep -c 'sda' || true)"
+
+unset -f lsblk live_media_disks
+
+# ================================================================
+echo
 echo "=== 阵列卡文案：报告是给客户看的，不能出现开发者指令 ==="
 RAW_DIR="$TMP/raidtxt"; RUN_DIR="$TMP/raidtxt"
 rm -rf "$RAW_DIR"; mkdir -p "$RAW_DIR"

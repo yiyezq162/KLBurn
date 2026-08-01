@@ -591,6 +591,7 @@ HP Gen8-9 上到处都是）必须先加载固件才能起来；固件不在 →
 | `vendor/nvidia/NVIDIA-Linux-x86_64-*.run` | 出一张不含显卡驱动的盘，有卡的机器 GPU 项记 SKIP |
 | `vendor/gpu_burn/{gpu_burn,compare.fatbin}` | 显卡型号/显存/驱动版本照常进报告，但不做满载压测 |
 | `vendor/storcli/storcli64` | 阵列卡只能报 PCI 型号，读不到固件版本和逻辑盘状态 |
+| `vendor/{perccli,arcconf,ssacli,sas3ircu}/` | 同上，对应 Dell PERC / Adaptec / HPE Smart Array / IT 模式 HBA。采集时挨个试、命中即用；一个都不放也正常，那一项判 SKIP **不判 FAIL** |
 | `vendor/logo.png` | 报告抬头不显示 logo |
 
 `INCLUDE_NVIDIA` **默认按 `vendor/nvidia/` 里有没有驱动自动决定**；
@@ -806,6 +807,7 @@ sudo ./tests/e2e-qemu.sh                          # BIOS 冒烟，约 3 分钟
 sudo ./tests/e2e-qemu.sh --firmware uefi          # UEFI（OVMF + q35）
 sudo ./tests/e2e-qemu.sh --no-data-partition      # U 盘上没有可用 exFAT 分区
 sudo ./tests/e2e-qemu.sh --stage full             # 完整跑一遍 QUICK 档，约 20 分钟
+sudo ./tests/e2e-qemu.sh --stage full --disk-stress   # 再加上"fio 真写盘"，约 20 分钟
 ./tests/check-firmware.sh                         # 固件对账，几秒
 ./tests/mutate.sh                                 # 全部变异，约 3~5 分钟
 ./tests/mutate.sh --list                          # 看有哪些变异、各由谁守
@@ -830,12 +832,53 @@ sudo ./tests/e2e-qemu.sh --stage full             # 完整跑一遍 QUICK 档，
 验的是**报告不会被写到不该写的地方、流程也不卡死**；
 "屏幕上有没有打黄色大框警告"程序断言不了，看 `shot-15.ppm`（那个框只停 8 秒）。
 
-### e2e 目前**没有**覆盖的两个场景
+### 破坏性 fio 真写盘（`--disk-stress`）
+
+```bash
+sudo ./tests/e2e-qemu.sh --stage full --disk-stress --workdir /home/li/e2e-ds   # 约 20 分钟
+```
+
+守的是**全项目最危险的一条路径**：fio 往裸盘写随机数据，而启动 U 盘就插在
+同一台机器上。反查排除一旦退化，测试盘当场报废、历史报告全丢，不可逆。
+在这之前，守它的只有 `test-disk-exclusion.sh` 用 loop + dm-linear 搭的设备链，
+**一次都没真让 fio 跑起来写过盘**。
+
+难点是那两道确认提示出现的时刻不固定（在 `collect_all` 之后，采集耗时随机器变），
+**按时间盲发按键不可接受 —— 按错方向就是真擦盘**。
+
+解法是**轮询 `usb.img`**：虚拟机写进 exFAT 的 `klburn.log`，在宿主机看来就是
+镜像里的一段字节，跑着的时候直接 `grep -a` 就能看到（实测延迟 3 秒以内；
+U 盘那块**没有** `cache=unsafe`，flush 是真会落盘的）。四个锚点：
+
+| 锚点（`klburn.log` 里的字串） | 意思 | 接着做什么 |
+|---|---|---|
+| `Report      :` | 开机完成，时长菜单要出来了 | 发**一次** `1`（菜单是单键读，多发的会漏进下一个提示的整行读取，`1yes` ≠ `yes`） |
+| `live media disks` | 选档生效、`scan_disks` 开始了 | 等采集 |
+| `verify_dmesg_boot` | `collect_all` 的最后一条日志 | 等 3 秒，发 `y` `e` `s` `ret` |
+| `Disk stress test confirmed by operator` | 两道确认都过了 | 等 fio 跑完 |
+
+第二道（最终警告面板）没有自己的日志锚点（面板只是 `printf`），
+但它紧跟第一道、中间不做任何硬件动作，时间窗是确定的，而且面板本身有 60s 超时；
+发完之后有锚点可验，没过就补发一次。
+
+开跑前还有一条断言：**四个锚点在开机前都不能已经在镜像里**。
+否则轮询会在第 0 秒误命中，确认键就在完全错误的时刻发出去 —— 而这一轮的按键
+是"确认擦盘"。
+
+三条验收缺一不可：
+
+1. 两块 `spare*.img` 的**实际占用**从 ~0 涨到 GB 级，且头 1MB 有非零字节 —— fio 真写了
+2. `usb.img` 第 4 分区还挂得上，**而且开跑前预埋的"上一轮的报告"一个字节没变** ——
+   只验"挂得上"不够：分区表没被动、文件全没了照样挂得上
+3. `results.jsonl` 里 `stress_disk` 是 **PASS 不是 SKIP** —— SKIP 也能让整轮"全绿"，
+   而它意味着确认键没打中、这一轮根本没写过盘
+
+### e2e 仍然**没有**覆盖的场景
 
 | 场景 | 为什么没做 | 怎么补 |
 |---|---|---|
-| **破坏性 fio 真写盘** | 要 sendkey 打出 `yes`+回车再打 `y`，而这两个提示出现在 `collect_all` 之后、时刻不固定，盲发按键很难稳定命中。**这是最有价值的一条**（验证 U 盘不被写穿） | 先给 e2e 加一个"等某个提示出现"的机制（截图比对或让产品往数据分区写阶段标记），再补。真机上按 [`first-run-checklist.md` 第二节](first-run-checklist.md) 手工过一次 |
-| **Ventoy 的 dm 设备链** | QEMU 里没法真装 Ventoy；而反查逻辑 `test-disk-exclusion.sh` 已经用 loop + dm-linear 搭同构设备链覆盖了 | 真机上用 Ventoy 盘跑一次 |
+| **Ventoy 的 dm 设备链** | QEMU 里没法真装 Ventoy。反查逻辑由 `test-disk-exclusion.sh`（loop + dm-linear 同构设备链）和 `test-hw-checks.sh` 里那组"Ventoy 形状的启动盘必须被排除"覆盖，后者还有 `media-blind` 变异守着 | 真机上用 Ventoy 盘跑一次 |
+| **厂商管理工具的真实输出** | `perccli64` / `arcconf` / `ssacli` / `sas3ircu` 这几个闭源二进制我们手上没有，测试里全是桩 | 拿到真卡时核 `raw/raid/` 下的原始输出 |
 
 > 顺带：那张排除表的措辞是 e2e 截图看出问题的 —— 软驱 `/dev/fd0` 原来被标成
 > "virtual / software RAID device"。那块屏幕是操作员决定"要不要擦这些盘"时

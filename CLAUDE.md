@@ -65,6 +65,12 @@ wsl -d Ubuntu-24.04 -e bash -c "cd /mnt/c/Users/li/Desktop/project/KLBurn && KLB
 驱动起不来，`ip link` 里那块网卡就是不存在，报告写着这台机器没网卡。
 它也不在 `run-all.sh` 里（要一个已构建的 rootfs）。
 
+发货前那一遍还要加上「fio 真写盘」这条（约 20 分钟，验的是 U 盘不被写穿）：
+
+```
+wsl -d Ubuntu-24.04 -u root -e bash -c "cd /mnt/c/Users/li/Desktop/project/KLBurn && ./tests/e2e-qemu.sh --stage full --disk-stress --workdir /home/li/klburn-e2e-ds"
+```
+
 `e2e-qemu.sh` 要 root（losetup / 挂 exFAT / KVM）。它会**断言盘里的版本号和
 `config.sh` 一致** —— 所以 bump 完版本必须先重新构建再跑 e2e，否则它会红在
 "版本对不上"。那不是 bug，那正是它要拦的事（改完代码拿旧 ISO 跑）。
