@@ -9,27 +9,19 @@
 服务器出厂老化测试 U 盘。源码在 Windows 上编辑、在 **WSL（Ubuntu-24.04）里构建**、
 产物是一个能自启动的 ISO，最终跑在被测服务器上。
 
-## 跑测试
+## 构建 ISO —— **自己构建，别丢给用户**
 
-在 WSL 里跑，不要在 Git Bash 里跑（Git Bash 的 sed/awk 在多字节场景下行为和目标环境不同）：
-
-```bash
-wsl -d Ubuntu-24.04 -e bash -c "cd /mnt/c/Users/li/Desktop/project/KLBurn && ./tests/run-all.sh"
-```
-
-`tests/test-disk-exclusion.sh` 需要 root，`run-all.sh` 在非 root 下会自动跳过它。
-改了 `lib/storage.sh` 就单独补一次：
-
-```bash
-wsl -d Ubuntu-24.04 -u root -e bash -c "cd /mnt/c/Users/li/Desktop/project/KLBurn && ./tests/test-disk-exclusion.sh"
-```
-
-## 构建 ISO
+这台机器上构建 ISO 是**你能做也应该做**的事：WSL 装好了、源 ISO（3.4GB）已缓存、
+`/home` 还有 900G+。不要把 `sudo ./build/build-iso.sh` 当成"请用户去跑"的东西
+甩回去 —— 改完代码就自己构建、自己验，然后把结果告诉用户。
 
 **要 root，而且必须显式指定 `KLBURN_WORK`** —— 以 root 身份进 WSL 时 `$HOME` 是
-`/root`，不指定的话工作区会跑到 `/root/klburn-build`，那 3GB 的源 ISO 缓存就白下了：
+`/root`，不指定的话工作区会跑到 `/root/klburn-build`，那 3GB 的源 ISO 缓存就白下了。
 
-```bash
+用 **PowerShell 工具**（不是 Bash 工具，理由见下面「调 WSL 的坑」），
+并且**挂后台**（增量也要 5~8 分钟，前台会一直卡住）：
+
+```
 wsl -d Ubuntu-24.04 -u root -e bash -c "cd /mnt/c/Users/li/Desktop/project/KLBurn && KLBURN_WORK=/home/li/klburn-build ./build/build-iso.sh"
 ```
 
@@ -37,9 +29,48 @@ wsl -d Ubuntu-24.04 -u root -e bash -c "cd /mnt/c/Users/li/Desktop/project/KLBur
 - 首次约 10~15 分钟，增量约 5~8 分钟；产物自动拷回项目的 `out/`
 - 带显卡驱动是**自动**的：`vendor/nvidia/*.run` 在就带上。
   `--without-nvidia` 强制不带，`--with-nvidia` 强制带（缺驱动会直接报错）
+- 构建第一步会强制校验源 ISO 的 sha256（`config.sh` 里钉着官方值），
+  每次构建都跑，没有 stamp 跳过
 
-从 PowerShell 调 `wsl -e bash -c "..."` 时引号很容易被吃掉。命令一复杂就先把脚本
-写到文件里再执行，别在命令行上硬拼。
+**构建要串一串事的时候（构建 + 跑 e2e + 收结果），把整串写成一个 `.sh` 放进
+scratchpad，再一次性挂后台执行。** 别拆成好几轮前台命令。
+
+## 跑测试
+
+在 WSL 里跑，不要在 Git Bash 里跑（Git Bash 的 sed/awk 在多字节场景下行为和目标环境不同）：
+
+```
+wsl -d Ubuntu-24.04 -e bash -c "cd /mnt/c/Users/li/Desktop/project/KLBurn && ./tests/run-all.sh"
+```
+
+要 root 的两个（`run-all.sh` 在非 root 下自动跳过第一个，第二个本来就不在里面）：
+
+```
+wsl -d Ubuntu-24.04 -u root -e bash -c "cd /mnt/c/Users/li/Desktop/project/KLBurn && ./tests/test-disk-exclusion.sh"
+wsl -d Ubuntu-24.04 -u root -e bash -c "cd /mnt/c/Users/li/Desktop/project/KLBurn && ./tests/e2e-qemu.sh --stage smoke"
+```
+
+`e2e-qemu.sh` 要 root（losetup / 挂 exFAT / KVM）。它会**断言盘里的版本号和
+`config.sh` 一致** —— 所以 bump 完版本必须先重新构建再跑 e2e，否则它会红在
+"版本对不上"。那不是 bug，那正是它要拦的事（改完代码拿旧 ISO 跑）。
+
+排查 e2e 时一定加 `--workdir /home/li/某个目录`：默认落 `mktemp -d`，
+而 **WSL 的 `/tmp` 跨 `wsl -e` 调用不保留**，`--keep` 也留不住，
+截图和镜像下一条命令就没了。
+
+## 从 Windows 调 WSL 的几个坑（都实际踩过）
+
+1. **用 PowerShell 工具，别用 Bash 工具跑 `wsl ... /mnt/c/...`。**
+   Git Bash 会把 `/mnt/c/...` 重写成 `C:/Program Files/Git/mnt/c/...`，
+   脚本直接找不到。
+2. **命令一复杂就先把脚本写进 scratchpad 再执行**，别在命令行上硬拼引号 ——
+   嵌套引号被吃掉之后，报错信息会指向完全不相干的地方，很难查。
+3. **绝不要用 PowerShell 的 `Set-Content`/`Out-File` 改仓库里的文件** ——
+   `-Encoding UTF8` 默认加 BOM，而 `config.sh` 这类文件是被 `source` 的，
+   BOM 会顶掉 shebang。改文件一律用 Edit/Write 工具。
+   （`tests/lint.sh` 现在有 BOM/CRLF 守卫，但别指望它兜底。）
+4. **脚本正在跑的时候不要编辑它。** bash 是边读边执行的，改了会错位。
+5. 读后台任务的输出文件用 `-Encoding UTF8`，否则中文是乱码。
 
 ## 改完代码必做
 
@@ -52,8 +83,11 @@ wsl -d Ubuntu-24.04 -u root -e bash -c "cd /mnt/c/Users/li/Desktop/project/KLBur
 4. 改了**判定逻辑或守卫** → 再跑 `./tests/mutate.sh`（把修好的 bug 塞回去，
    守卫必须跑红；逃掉 = 那条守卫是摆设）。它不在 `run-all.sh` 里，
    也**不能**放进去 —— 它自己要调各个套件，挂进去就是递归
-5. 出盘之后 → `sudo ./tests/e2e-qemu.sh`（冒烟约 3 分钟）。发货前跑
-   `--stage full`（约 20 分钟）。软驱那条误判就是它跑出来的，单元测试造不出来
+5. **改了会进盘里的代码（`rootfs/**`、`build/**`）→ 自己重新构建，然后跑
+   `e2e-qemu.sh` 冒烟**（约 3 分钟）。软驱那条误判就是它跑出来的，
+   单元测试造不出来那个场景。发货前再跑一次 `--stage full`（约 20 分钟）
+6. 全绿之后**主动汇报结果**（构建版本、断言数、e2e 结果），
+   而不是丢一条命令让用户自己去跑一遍确认
 
 ## 三条最容易踩的红线
 
