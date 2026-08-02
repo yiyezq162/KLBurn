@@ -472,6 +472,18 @@ HDR3="$(box_row3 80 'KLBurn v9.9.9' 'BURN-IN  CPU + MEMORY' 'QUICK')"
 check "抬头里同一个词不许出现两次" "1" \
       "$(printf '%s\n' "$HDR3" | grep -o 'BURN-IN' | grep -c . || true)"
 
+# ---- 重绘不许留空白帧 ----
+# 先清屏再逐行画的话，清空和画完之间有个空窗（十几行、每行还要 fork 一次 tr），
+# 人眼看到的就是每 2 秒闪一下。e2e 截图逮到过一张只画了两行的。
+# 现在是回绝对原点原地覆盖 + 末尾 ESC[J。
+check "重绘只回原点，不清屏（ESC[2J 会造成可见的空白帧）" "0" \
+      "$(declare -f screen_home | grep -c '2J' || true)"
+check "每帧末尾要抹掉上一帧残留的部分（ESC[J）" "1" \
+      "$(declare -f screen_end | grep -c '\[J' || true)"
+for f in dash_burn dash_disk config_review; do
+  check "$f 画完要调 screen_end" "1" "$(declare -f "$f" | grep -c 'screen_end' || true)"
+done
+
 # ---- 屏幕上一个中文都不许有：报告生成器也算屏幕输出 ----
 # 那两个 python 生成器的 stdout 是 tee 到控制台的，它们原来打的是
 #   内部工程报告已生成: ...
