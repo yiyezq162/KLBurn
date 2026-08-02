@@ -46,6 +46,13 @@ source "$LIB/collect.sh"      # 配置面板要用 dmi_* / psu_ac_state 这几�
 # shellcheck source=/dev/null
 source "$LIB/stress.sh"       # 末尾那组"压测输出不许上屏"的守卫要用
 
+# 下面绝大多数断言（列宽、字符集、行数）验的是**版面**，所以统一在关掉颜色的
+# 前提下跑 —— 颜色码是零宽的，混进来只会让每条断言都要先 strip 一遍。
+# 颜色本身另有一组专门的断言（见末尾「上色不许动到版面」那一节），
+# 钉的是"把颜色码去掉之后必须和这里一模一样"。
+PANEL_COLOR=0
+panel_palette 0
+
 PASS=0; FAIL=0
 ok()   { printf '  \033[32mOK\033[0m   %s\n' "$1"; PASS=$((PASS+1)); }
 bad()  { printf '  \033[31mFAIL\033[0m %s\n     期望 [%s] 实际 [%s]\n' "$1" "$2" "$3"; FAIL=$((FAIL+1)); }
@@ -395,6 +402,62 @@ check "stressapptest 的输出也全部落日志文件" "yes" \
       "$(if declare -f stress_mem | grep -q '> "\$log" 2>&1'; then echo yes; else echo no; fi)"
 check "硬盘压测改用整屏重绘的仪表盘（不再是单行进度条）" "2" \
       "$(declare -f stress_disk | grep -c 'run_disk_with_dashboard' || true)"
+
+# ================================================================
+echo
+echo "=== 上色不许动到版面 ==="
+# 颜色只加在**边框层**，内容串一个字节都不许变。理由不是风格：
+# 列宽全靠 printf '%-*.*s' 补齐，而它数的是字符个数 —— 颜色码混进内容串会被
+# 算成可见字符，补出来的行短一截，整屏重绘立刻错位、越刷越花。
+#
+# 下面这条是整组的核心：**把颜色码去掉之后，必须和不上色时一字不差。**
+# 有它在，"上色"就不可能悄悄改掉版面。
+strip_ansi() { LC_ALL=C sed -E 's/\x1b\[[0-9;]*m//g'; }
+
+# 测试里 stdout 不是 tty，core.sh 会把 C_* 置空 —— 那样上不上色都一样，
+# 这组断言就成了摆设。所以这里显式塞一组颜色进去再打开调色板。
+C_RED=$'\033[1;31m'; C_GRN=$'\033[1;32m'; C_YEL=$'\033[1;33m'
+C_CYN=$'\033[1;36m'; C_GRY=$'\033[0;37m'; C_BLD=$'\033[1m'; C_RST=$'\033[0m'
+panel_palette 1
+
+CPU_HOT="0|Intel Xeon Gold 6430|3100|67|100
+1|Intel Xeon Gold 6430|3090|97|99
+2|Intel Xeon Gold 6430|2100|102|60"
+
+for label in "CPU 分区" "GPU 分区" "配置面板"; do :; done
+colored_cpu="$(dash_cpu_rows 80 "$CPU_HOT")"
+colored_gpu="$(dash_gpu_rows 80 "$(gpu_fixture 2)")"
+colored_prog="$(dash_progress 80 252 600)"
+panel_palette 0
+plain_cpu="$(dash_cpu_rows 80 "$CPU_HOT")"
+plain_gpu="$(dash_gpu_rows 80 "$(gpu_fixture 2)")"
+plain_prog="$(dash_progress 80 252 600)"
+
+check "上色后去掉颜色码 == 不上色（CPU 分区）"  "$plain_cpu"  "$(printf '%s' "$colored_cpu"  | strip_ansi)"
+check "上色后去掉颜色码 == 不上色（GPU 分区）"  "$plain_gpu"  "$(printf '%s' "$colored_gpu"  | strip_ansi)"
+check "上色后去掉颜色码 == 不上色（进度条）"    "$plain_prog" "$(printf '%s' "$colored_prog" | strip_ansi)"
+
+# 而且**确实上了色**，否则上面三条用"什么都没做"也能过
+check "确实加进了颜色码（否则上面几条用空实现也能过）" "yes" \
+      "$(if [[ "$colored_cpu" == *$'\033['* ]]; then echo yes; else echo no; fi)"
+
+# 温度按判定那两条线上色：67 度绿、97 度黄（>=WARN 95）、102 度红（>=FAIL 100）。
+# 用的就是 klburn.conf 能覆盖的那两个阈值，现场改了阈值颜色跟着变。
+panel_palette 1
+CPU_TEMP_WARN=95; CPU_TEMP_FAIL=100
+colored_cpu="$(dash_cpu_rows 80 "$CPU_HOT")"
+check "67 度那行是绿的"   "1" "$(printf '%s\n' "$colored_cpu" | grep -c "$(printf '\033\[1;32m')   #0" || true)"
+check "97 度那行是黄的"   "1" "$(printf '%s\n' "$colored_cpu" | grep -c "$(printf '\033\[1;33m')   #1" || true)"
+check "102 度那行是红的"  "1" "$(printf '%s\n' "$colored_cpu" | grep -c "$(printf '\033\[1;31m')" || true)"
+# 读不到温度不上色 —— 读不到既不是"正常"也不是"异常"，不该给任何暗示
+check "读不到温度的行不上颜色" "0" \
+      "$(dash_cpu_rows 80 '0|Some CPU|||' | grep -c "$(printf '\033\[1;3[123]m')" || true)"
+
+# 写进 raw/ 的那份必须是纯文本：存档、grep、e2e 的日志锚点都不该带转义码
+check "config_review 落盘那份要先把颜色关掉再生成" "yes" \
+      "$(if declare -f config_review | grep -q 'panel_palette 0'; then echo yes; else echo no; fi)"
+
+panel_palette 0
 
 # 自检：断言到底有没有在计数。
 # core.sh 里也有一个 ok()，被测的 lib 一旦在断言助手**之后**被 source，

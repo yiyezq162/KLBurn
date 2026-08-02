@@ -193,43 +193,68 @@ str_put() {
   printf '%s%s%s' "${base:0:pos}" "$s" "${base:pos+${#s}}"
 }
 
-box_rule() { printf '+%s+\n' "$(printf '%*s' "$(( ${1:-80} - 2 ))" '' | tr ' ' '=')"; }
-box_sep()  { printf '+%s+\n' "$(printf '%*s' "$(( ${1:-80} - 2 ))" '' | tr ' ' '-')"; }
+# ---------------------------------------------------------------- 调色板
+#
+# ⚠️ **颜色只加在边框层，绝不进内容串。**
+#
+# 这不是风格问题，是算宽度的问题：列宽全靠 `printf '%-*.*s'` 补齐/截断，
+# 而它数的是**字符个数**。颜色码一旦混进内容串，那几个转义字节会被算成可见字符，
+# 补出来的行就短一截 —— 整屏重绘立刻错位，越刷越花。
+# 所以流程是固定的：**先按纯文本把行补齐到精确宽度，再在两头包颜色码。**
+# 颜色码是零宽的，包完屏幕上的列位一点没动。
+#
+# 另一条：颜色是**可以整体关掉**的（PANEL_COLOR=0，或者 stdout 不是 tty）。
+# 关掉之后输出和上色前一字不差 —— 写进 raw/config-review.txt 的那份就是关掉的，
+# 存档和 e2e 的日志锚点都不该带转义码。
+# tests/test-screen-render.sh 里有一条断言钉着这件事：
+# **把颜色码去掉之后，必须和关掉颜色时的输出完全相同。**
+: "${PANEL_COLOR:=1}"
+declare -A PC=()
+panel_palette() {
+  local on="${1:-0}"
+  PC=(
+    [frame]="" [rst]="" [hdr]="" [ok]="" [warn]="" [bad]="" [dim]="" [none]=""
+  )
+  (( on )) || return 0
+  [[ -n "${C_RST:-}" ]] || return 0      # 不是 tty（core.sh 已经把 C_* 置空）
+  PC[frame]="$C_CYN"; PC[rst]="$C_RST"
+  PC[hdr]="$C_BLD$C_CYN"
+  PC[ok]="$C_GRN"; PC[warn]="$C_YEL"; PC[bad]="$C_RED$C_BLD"; PC[dim]="$C_GRY"
+}
+panel_palette "$PANEL_COLOR"
 
-# box_row <宽> <内容>
+box_rule() {
+  printf '%s+%s+%s\n' "${PC[frame]}" \
+    "$(printf '%*s' "$(( ${1:-80} - 2 ))" '' | tr ' ' '=')" "${PC[rst]}"
+}
+box_sep() {
+  printf '%s+%s+%s\n' "${PC[frame]}" \
+    "$(printf '%*s' "$(( ${1:-80} - 2 ))" '' | tr ' ' '-')" "${PC[rst]}"
+}
+
+# box_row <宽> <内容> [颜色名]
+# 颜色名取 PC 里的键：hdr / ok / warn / bad / dim，不给就是默认色。
 box_row() {
-  local w="${1:-80}" inner=$(( ${1:-80} - 2 )) s
+  local inner=$(( ${1:-80} - 2 )) s pad
   s="$(ascii_clean "${2:-}")"
-  printf '|%-*.*s|\n' "$inner" "$inner" "$s"
+  # 先按纯文本补齐/截断到精确宽度，再包颜色 —— 顺序反了就会错位
+  printf -v pad '%-*.*s' "$inner" "$inner" "$s"
+  printf '%s|%s%s%s%s%s|%s\n' \
+    "${PC[frame]}" "${PC[rst]}" "${PC[${3:-none}]-}" "$pad" \
+    "${PC[rst]}" "${PC[frame]}" "${PC[rst]}"
 }
 
 # box_row3 <宽> <左> <中> <右>  —— 抬头那一行：左中右三段各就各位
 box_row3() {
-  local w="${1:-80}" inner=$(( ${1:-80} - 2 )) l c r line
+  local inner=$(( ${1:-80} - 2 )) l c r line
   l="$(ascii_clean "${2:-}")"; c="$(ascii_clean "${3:-}")"; r="$(ascii_clean "${4:-}")"
   line="$(printf '%*s' "$inner" '')"
   line="$(str_put "$line" 2 "$l")"
   line="$(str_put "$line" $(( (inner - ${#c}) / 2 )) "$c")"
   line="$(str_put "$line" $(( inner - ${#r} - 2 )) "$r")"
-  printf '|%s|\n' "$line"
-}
-
-# 双栏：左栏占 62%，中间一根竖线
-panel_split() { printf '%s' $(( (${1:-80} - 2) * 62 / 100 )); }
-
-box_sep2() {
-  local w="${1:-80}" lw; lw="$(panel_split "$w")"
-  printf '+%s+%s+\n' \
-    "$(printf '%*s' "$lw" '' | tr ' ' '-')" \
-    "$(printf '%*s' "$(( w - 3 - lw ))" '' | tr ' ' '-')"
-}
-
-# box_row2 <宽> <左栏内容> <右栏内容>
-box_row2() {
-  local w="${1:-80}" lw rw l r
-  lw="$(panel_split "$w")"; rw=$(( w - 3 - lw ))
-  l="$(ascii_clean "${2:-}")"; r="$(ascii_clean "${3:-}")"
-  printf '|%-*.*s|%-*.*s|\n' "$lw" "$lw" "$l" "$rw" "$rw" "$r"
+  printf '%s|%s%s%s%s%s|%s\n' \
+    "${PC[frame]}" "${PC[rst]}" "${PC[hdr]}" "$line" \
+    "${PC[rst]}" "${PC[frame]}" "${PC[rst]}"
 }
 
 # 整屏重绘的第一步。用裸转义而不是 clear(1)：clear 要 fork、要 terminfo，
@@ -293,9 +318,9 @@ gpu_mem_total_init() {
 
 # dash_cpu_rows <宽> <数据>   数据每行 "序号|型号|频率MHz|温度C|占用%"
 dash_cpu_rows() {
-  local w="$1" data="$2" idx model freq temp busy busytxt
+  local w="$1" data="$2" idx model freq temp busy busytxt color
   [[ -n "$data" ]] || return 0
-  box_row "$w" "  CPU     MODEL                              FREQ      TEMP    BUSY"
+  box_row "$w" "  CPU     MODEL                              FREQ      TEMP    BUSY" hdr
   while IFS='|' read -r idx model freq temp busy; do
     [[ -n "$idx" ]] || continue
     # 读不到就画 "--"，绝不画 0 —— 0°C / 0% 看着像读数，"--" 才是实话。
@@ -303,8 +328,16 @@ dash_cpu_rows() {
     # 不是故障，判定那边也是这个口径。
     busytxt='--'
     [[ "$busy" =~ ^[0-9]+$ ]] && busytxt="${busy}%"
+    # 整行按温度上色，用的就是判定那两条线（klburn.conf 改了阈值，这里跟着变）。
+    # 读不到温度不上色 —— 读不到不是"正常"也不是"异常"，不该给任何暗示。
+    color="none"
+    if [[ "$temp" =~ ^[0-9]+$ ]]; then
+      if   (( temp >= ${CPU_TEMP_FAIL:-100} )); then color="bad"
+      elif (( temp >= ${CPU_TEMP_WARN:-95} ));  then color="warn"
+      else color="ok"; fi
+    fi
     box_row "$w" "$(printf '   #%-4s  %-32.32s %6s MHz  %4s C  %4s' \
-      "$idx" "$model" "${freq:-  --}" "${temp:-  --}" "$busytxt")"
+      "$idx" "$model" "${freq:-  --}" "${temp:-  --}" "$busytxt")" "$color"
   done <<< "$data"
 }
 
@@ -318,7 +351,7 @@ dash_gpu_rows() {
   [[ -n "$data" ]] || return 0
   total="$(printf '%s\n' "$data" | grep -c . || true)"
   [[ "$total" =~ ^[0-9]+$ ]] || total=0
-  box_row "$w" "  GPU   MODEL                       MEMORY            TEMP   POWER   UTIL"
+  box_row "$w" "  GPU   MODEL                       MEMORY            TEMP   POWER   UTIL" hdr
   while IFS='|' read -r idx name mu mt temp power util; do
     [[ -n "$idx" ]] || continue
     n=$(( n + 1 ))
@@ -334,8 +367,14 @@ dash_gpu_rows() {
       memtxt="$(awk -v u="$mu" 'BEGIN{printf "%.1f GB used", u/1024}')"
     fi
     [[ "$util" =~ ^[0-9]+$ ]] && utiltxt="${util}%"
+    local gcolor="none"
+    if [[ "$temp" =~ ^[0-9]+$ ]]; then
+      if   (( temp >= ${GPU_TEMP_FAIL:-90} )); then gcolor="bad"
+      elif (( temp >= ${GPU_TEMP_WARN:-83} )); then gcolor="warn"
+      else gcolor="ok"; fi
+    fi
     box_row "$w" "$(printf '   %-3s  %-26.26s %-16s %4s C  %5s W  %4s' \
-      "$idx" "$name" "$memtxt" "${temp:-  --}" "${power:-   --}" "$utiltxt")"
+      "$idx" "$name" "$memtxt" "${temp:-  --}" "${power:-   --}" "$utiltxt")" "$gcolor"
   done <<< "$data"
 }
 
@@ -343,11 +382,18 @@ dash_gpu_rows() {
 dash_disk_rows() {
   local w="$1" data="$2" name rd wr iops temp
   [[ -n "$data" ]] || return 0
-  box_row "$w" "  DISK        READ        WRITE          IOPS   TEMP"
+  box_row "$w" "  DISK        READ        WRITE          IOPS   TEMP" hdr
+  local dcolor
   while IFS='|' read -r name rd wr iops temp; do
     [[ -n "$name" ]] || continue
+    dcolor="none"
+    if [[ "$temp" =~ ^[0-9]+$ ]]; then
+      if   (( temp >= ${DISK_TEMP_FAIL:-80} )); then dcolor="bad"
+      elif (( temp >= ${DISK_TEMP_WARN:-70} )); then dcolor="warn"
+      else dcolor="ok"; fi
+    fi
     box_row "$w" "$(printf '   %-10s %5s MB/s  %5s MB/s  %8s   %4s C' \
-      "$name" "${rd:-  --}" "${wr:-  --}" "${iops:-  --}" "${temp:-  --}")"
+      "$name" "${rd:-  --}" "${wr:-  --}" "${iops:-  --}" "${temp:-  --}")" "$dcolor"
   done <<< "$data"
 }
 
@@ -545,19 +591,32 @@ cfg_panel() {
   box_rule "$w"
   box_row3 "$w" "KLBurn v${KLBURN_VERSION:-?}" "CONFIGURATION REVIEW" "$right"
   box_rule "$w"
+  local rowcolor
   for i in "${!_CFG_TITLES[@]}"; do
     (( i > 0 )) && box_sep "$w"
-    box_row "$w" "  ${_CFG_TITLES[i]}"
+    box_row "$w" "  ${_CFG_TITLES[i]}" hdr
     n=0
     while IFS= read -r line; do
       [[ -n "$line" ]] || continue
       n=$(( n + 1 ))
       if (( _CFG_SHOWN[i] < _CFG_ORIG[i] && n > _CFG_SHOWN[i] )); then
         box_row "$w" "$(printf '    ... and %d more (all included in the report)' \
-          "$(( _CFG_ORIG[i] - _CFG_SHOWN[i] ))")"
+          "$(( _CFG_ORIG[i] - _CFG_SHOWN[i] ))")" dim
         break
       fi
-      box_row "$w" "  $line"
+      # 存储那几行按"会不会被擦"上色：这一屏之后紧接着就是破坏性写确认，
+      # 操作员在那一刻要一眼看出哪几块盘会被 fio 写掉。
+      #   [TESTABLE]   黄色 —— 确认之后会被整盘覆盖
+      #   [MOUNTED] / [TEST MEDIA]  绿色 —— 受保护，不会被碰
+      # 网口按有没有链路：UP 绿、没链路灰，现场核对插线一眼就看出来。
+      rowcolor="none"
+      case "$line" in
+        *"[TESTABLE]"*)                 rowcolor="warn" ;;
+        *"[MOUNTED]"*|*"[TEST MEDIA]"*) rowcolor="ok" ;;
+        *" UP "*)                       rowcolor="ok" ;;
+        *"no link"*)                    rowcolor="dim" ;;
+      esac
+      box_row "$w" "  $line" "$rowcolor"
     done <<< "${_CFG_BODIES[i]}"
   done
   box_rule "$w"
@@ -771,14 +830,17 @@ config_review() {
   # 留 3 行给倒计时和余量。装不下就砍最长的那一段（砍掉几行会如实写在屏幕上）。
   cfg_fit $(( ROWS - 3 ))
 
-  local text; text="$(cfg_panel "$w" "$(date '+%Y-%m-%d %H:%M:%S')")"
+  local stamp; stamp="$(date '+%Y-%m-%d %H:%M:%S')"
 
-  # 落一份纯文本进 raw/：报告里可以引用，事后也查得到现场当时看到的是什么
-  printf '%s\n' "$text" > "$RAW_DIR/config-review.txt" 2>/dev/null || true
+  # 落一份**纯文本**进 raw/：存档、grep、e2e 的日志锚点都不该带转义码，
+  # 所以先把颜色关掉生成一遍。这一遍纯字符串操作，不值几个 CPU 周期。
+  panel_palette 0
+  printf '%s\n' "$(cfg_panel "$w" "$stamp")" > "$RAW_DIR/config-review.txt" 2>/dev/null || true
+  panel_palette "$PANEL_COLOR"
 
   info "Configuration review: ${#_CFG_TITLES[@]} sections, ${timeout}s (any key continues)"
   screen_home
-  printf '%s\n' "$text"
+  cfg_panel "$w" "$stamp"
 
   # 倒计时用单行 \r（不是 \033[A）：这时候屏幕上没有别的写入者，
   # 面板已经画完、压测还没开始，是 \r 唯一安全的场景。
