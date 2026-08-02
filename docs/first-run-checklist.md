@@ -5,8 +5,8 @@
 > 用途：拿到第一台真服务器时，照着它一条条过。等真机到手再现想要看什么，
 > 一定会漏 —— 而机器通常只借得到半天。
 
-离线能做的验证已经做到头了：[`tests/run-all.sh`](../tests/run-all.sh) 400+ 项、
-[`tests/mutate.sh`](../tests/mutate.sh) 11 条变异、
+离线能做的验证已经做到头了：[`tests/run-all.sh`](../tests/run-all.sh) 570+ 项、
+[`tests/mutate.sh`](../tests/mutate.sh) 16 条变异、
 [`tests/e2e-qemu.sh`](../tests/e2e-qemu.sh) 把盘在 QEMU 里真开机跑完
 （`--disk-stress` 还会真让 fio 写一次盘）、
 [`tests/check-firmware.sh`](../tests/check-firmware.sh) 对账盘里的网卡固件。
