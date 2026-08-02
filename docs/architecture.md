@@ -138,6 +138,7 @@ PHASE 1  硬件采集                collect_all()
          → net_link_up_all → collect_nic → check_nic_speed → net_test
          → collect_ipmi → collect_raid → check_psu → gpu_detect
          → collect_deep（只留档，不判定）
+         → collect_counters pre（ECC / 热节流 / PCIe AER 的基线）
          → dmesg-pre → verify_dmesg_boot（开机就有硬伤的话，现在就要知道）
 
 REVIEW   config_review()          配置核对面板，60 秒倒计时，任意键继续
@@ -155,6 +156,7 @@ PHASE 3  硬盘压测（单独跑，不并发） 只在两道确认都过了才�
 
 PHASE 4  测后复查                verify_all()
          collect_smart post → verify_smart → verify_disk_temp
+         → collect_counters post → verify_ecc → verify_throttle → verify_aer
          → verify_dmesg → verify_sel
 
          写 meta.json
@@ -294,6 +296,9 @@ rootfs/opt/klburn/
 | `stress_mem` | 内存压测 | 无校验错误 | **被 OOM killer 打死** | — | 有硬件异常/校验错误 |
 | `stress_disk` | 硬盘压测 | 无 I/O 错误 | — | 未确认 / 无可测盘 | fio 报错 |
 | `stress_gpu` | GPU 压测 | 无计算错误、温度正常 | 温度偏高 / 被 OOM 连坐 | 没带压测程序 | FAULTY 卡 / 计算错误 / 超温 |
+| `verify_ecc` | 内存 ECC 复查 | 前后无新增 | **新增可纠正（CE）** | 内核无 EDAC 接口 | **新增不可纠正（UE）** |
+| `verify_throttle` | CPU 热节流复查 | 压测期间没节流 | **压测期间有节流** | 无 thermal_throttle 接口 | — |
+| `verify_aer` | PCIe 错误计数复查 | 前后无新增 | 新增可纠正 | 固件未开放 AER | **新增不可纠正（致命/非致命）** |
 | `verify_smart` | SMART 复查 | 前后无新增 | 测前就有的计数 | 无硬盘 | **前后有增长** |
 | `verify_disk_temp` | 硬盘温度 | 都低于告警线 | 偏高 | 都不上报温度 | 超上限 |
 | `verify_dmesg` | 内核日志复查 | 无硬件错误 | — | — | 有硬件错误 |
@@ -314,6 +319,17 @@ rootfs/opt/klburn/
 不能让一张真坏的卡混在不匹配里蒙混过关。
 
 **阵列卡永远不会是 FAIL**，因为它只采集不压测。
+
+**三条计数器判定（1.7.0 新增）判的都是差值，不是绝对值。** 一台用过的机器
+带着历史计数是正常的；要回答的是"这一轮压测把什么逼出来了"，和 SMART 前后
+对比完全同一个口径。计数器全部取自**内核自带的 sysfs**
+（`/sys/devices/system/edac/`、`thermal_throttle/`、`aer_dev_*`），
+**不依赖 `ras-mc-ctl` / `edac-util`** —— 盘里带那两个工具只是为了多一份人可读的
+原始记录，判定不读它们。读不到接口一律 SKIP：很多平台和虚拟机压根没有 EDAC。
+
+其中**热节流那条最容易被忽略**：散热不行、但温度没到告警线的机器，只有它看得
+出来 —— CPU 自己在降频保护，于是温度曲线反而好看，光看温度什么都发现不了。
+它判 WARN 不判 FAIL：热节流是保护机制正常工作，机器本身没坏。
 
 ---
 

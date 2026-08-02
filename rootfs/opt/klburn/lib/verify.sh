@@ -256,6 +256,155 @@ verify_dmesg() {
   fi
 }
 
+# ================================================================
+# 计数器复查：内存 ECC / CPU 热节流 / PCIe AER
+# ================================================================
+#
+# 这三条判的都是**差值**（压测后减压测前），不是绝对值。理由：
+# 一台用过的机器带着历史计数是正常的，我们要回答的是"这一轮压测把什么逼出来了"，
+# 和 SMART 前后对比完全一样的口径。
+#
+# 计数器本身来自内核 sysfs（ecc_snapshot / throttle_snapshot / aer_snapshot，
+# 都在 collect.sh 里），**不依赖 ras-mc-ctl / edac-util 这些工具** ——
+# 盘里没带工具是能力缺失，不能因此判故障。
+
+# 快照里有没有这一类数据。没有 = 这台机器的内核没暴露这个计数器（很常见），
+# 判 SKIP，绝不能当成"计数为 0"更不能当成故障。
+_counter_has() {
+  local kind="$1" f="$2"
+  [[ -f "$f" ]] || return 1
+  grep -q "^${kind} " "$f" 2>/dev/null
+}
+
+# ---------------------------------------------------------------- 内存 ECC
+#
+# 这是 1.7.0 最有价值的一条新判定：内存早期退化的直接证据。
+# 一条开始出可纠正错误的内存，机器照样能跑、压测照样过，
+# 但它装到客户机房里会越来越频繁，最后变成不可纠正 —— 那时候是宕机。
+#
+# 判定口径（保守）：
+#   新增不可纠正（UE）-> FAIL   数据已经错了，没得商量
+#   新增可纠正（CE）  -> WARN   还纠得回来，但这条内存不该再出厂
+#   两样都没有        -> PASS
+#   内核没有 EDAC     -> SKIP   （很多平台/虚拟机没有，不是故障）
+verify_ecc() {
+  local pre="$RAW_DIR/counters-pre.txt" post="$RAW_DIR/counters-post.txt"
+
+  if ! _counter_has ECC "$pre" || ! _counter_has ECC "$post"; then
+    result_add "verify_ecc" "内存 ECC 复查" "$ST_SKIP" \
+      "本机内核未提供 EDAC 内存错误计数接口，无法核对压测前后的 ECC 变化。\
+此项不影响整机结论。" ""
+    return
+  fi
+
+  # counters_delta 输出 "<标签> <第几列> <前> <后> <增量>"，
+  # ECC 行的第 1 列是可纠正数、第 2 列是不可纠正数
+  local ce_rows=() ue_rows=() label col before after delta
+  while read -r label col before after delta; do
+    [[ -n "$label" ]] || continue
+    if   [[ "$col" == "1" ]]; then ce_rows+=("${label} 可纠正 ${before}->${after}（新增 ${delta}）")
+    elif [[ "$col" == "2" ]]; then ue_rows+=("${label} 不可纠正 ${before}->${after}（新增 ${delta}）")
+    fi
+  done < <(counters_delta ECC "$pre" "$post")
+
+  metric_add "mem" "新增ECC可纠正条目" "${#ce_rows[@]}"
+  metric_add "mem" "新增ECC不可纠正条目" "${#ue_rows[@]}"
+
+  if (( ${#ue_rows[@]} > 0 )); then
+    result_add "verify_ecc" "内存 ECC 复查" "$ST_FAIL" \
+      "压测期间出现**不可纠正**内存错误：$(printf '%s；' "${ue_rows[@]}")\
+不可纠正错误意味着数据已经出错，对应内存条应予更换。" "raw/counters-post.txt"
+  elif (( ${#ce_rows[@]} > 0 )); then
+    result_add "verify_ecc" "内存 ECC 复查" "$ST_WARN" \
+      "压测期间出现可纠正内存错误：$(printf '%s；' "${ce_rows[@]}")\
+错误已被 ECC 纠正，本次运行结果仍然有效；但可纠正错误持续增长通常是内存条\
+早期退化的信号，建议更换后复测。" "raw/counters-post.txt"
+  else
+    result_add "verify_ecc" "内存 ECC 复查" "$ST_PASS" \
+      "压测前后无新增内存 ECC 错误（可纠正与不可纠正均为 0）" "raw/counters-post.txt"
+  fi
+}
+
+# ---------------------------------------------------------------- CPU 热节流
+#
+# 散热不行、但温度**没到告警线**的机器，就是靠这个看出来的：
+# CPU 自己在降频保护，于是温度曲线反而好看，光看温度什么都发现不了。
+#
+# 判 WARN 不判 FAIL：热节流是保护机制正常工作，机器本身没坏；
+# 而且短暂几次节流在高密度机型上是常态。但它必须被看见 ——
+# 装到客户机房里就是"这台机器怎么比同批的慢"。
+verify_throttle() {
+  local pre="$RAW_DIR/counters-pre.txt" post="$RAW_DIR/counters-post.txt"
+
+  if ! _counter_has THROTTLE "$pre" || ! _counter_has THROTTLE "$post"; then
+    result_add "verify_throttle" "CPU 热节流复查" "$ST_SKIP" \
+      "本机 CPU 未提供热节流计数接口（部分平台与虚拟机不提供）。此项不影响整机结论。" ""
+    return
+  fi
+
+  local n_core=0 n_pkg=0 sum=0 label col before after delta
+  while read -r label col before after delta; do
+    [[ "$delta" =~ ^[0-9]+$ ]] || continue
+    sum=$(( sum + delta ))
+    if [[ "$col" == "1" ]]; then n_core=$(( n_core + 1 )); else n_pkg=$(( n_pkg + 1 )); fi
+  done < <(counters_delta THROTTLE "$pre" "$post")
+
+  metric_add "cpu" "压测期间热节流次数" "$sum"
+
+  if (( sum > 0 )); then
+    result_add "verify_throttle" "CPU 热节流复查" "$ST_WARN" \
+      "压测期间 CPU 触发热节流共 ${sum} 次（涉及 ${n_core} 个核心、${n_pkg} 个处理器封装）。\
+热节流是 CPU 的自我保护，出现时会主动降频，因此温度读数可能仍在正常范围。\
+常见原因：散热器没压紧、硅脂没铺开、风道不畅或机箱进风温度偏高。\
+此项不影响整机结论，但建议检查散热后复测。" "raw/counters-post.txt"
+  else
+    result_add "verify_throttle" "CPU 热节流复查" "$ST_PASS" \
+      "压测期间 CPU 未发生热节流，散热能够支撑满载运行" "raw/counters-post.txt"
+  fi
+}
+
+# ---------------------------------------------------------------- PCIe AER
+#
+# 链路层的错误计数。偶发可纠正错误在长链路/转接板上很常见（会被自动重传），
+# 压测期间**新增**才值得查；不可纠正错误则是真出事了。
+verify_aer() {
+  local pre="$RAW_DIR/counters-pre.txt" post="$RAW_DIR/counters-post.txt"
+
+  if ! _counter_has AER "$pre" || ! _counter_has AER "$post"; then
+    result_add "verify_aer" "PCIe 错误计数复查" "$ST_SKIP" \
+      "本机未提供 PCIe AER 错误计数接口（需要固件开放 AER，部分机型与虚拟机不提供）。\
+此项不影响整机结论。" ""
+    return
+  fi
+
+  local cor=() unc=() label col before after delta
+  while read -r label col before after delta; do
+    [[ -n "$label" ]] || continue
+    if [[ "$col" == "1" ]]; then
+      cor+=("${label} 可纠正新增 ${delta}")
+    else
+      unc+=("${label} 不可纠正新增 ${delta}")
+    fi
+  done < <(counters_delta AER "$pre" "$post")
+
+  metric_add "pcie" "新增AER可纠正设备数" "${#cor[@]}"
+  metric_add "pcie" "新增AER不可纠正设备数" "${#unc[@]}"
+
+  if (( ${#unc[@]} > 0 )); then
+    result_add "verify_aer" "PCIe 错误计数复查" "$ST_FAIL" \
+      "压测期间 PCIe 链路出现**不可纠正**错误：$(printf '%s；' "${unc[@]}")\
+不可纠正的 PCIe 错误通常对应板卡、插槽或转接板的实际故障。" "raw/counters-post.txt"
+  elif (( ${#cor[@]} > 0 )); then
+    result_add "verify_aer" "PCIe 错误计数复查" "$ST_WARN" \
+      "压测期间 PCIe 链路出现可纠正错误：$(printf '%s；' "${cor[@]}")\
+可纠正错误会被链路层自动重传，不影响数据正确性；少量出现在长链路或转接板上属常见现象，\
+持续增长则建议检查板卡是否插到位、转接板信号质量是否正常。" "raw/counters-post.txt"
+  else
+    result_add "verify_aer" "PCIe 错误计数复查" "$ST_PASS" \
+      "压测前后无新增 PCIe 链路错误" "raw/counters-post.txt"
+  fi
+}
+
 # ---------------------------------------------------------------- IPMI SEL
 verify_sel() {
   if [[ "${IPMI_OK:-0}" != "1" ]]; then
@@ -300,6 +449,11 @@ verify_all() {
   collect_smart "post"
   verify_smart
   verify_disk_temp
+  # 计数器测后快照。必须排在下面三条判定之前 —— 它们读的就是这份。
+  collect_counters "post"
+  verify_ecc
+  verify_throttle
+  verify_aer
   verify_dmesg
   verify_sel
   capture "sensors-post.txt" sensors

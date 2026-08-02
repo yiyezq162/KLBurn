@@ -195,6 +195,10 @@ RAW_INDEX = (
      "内核启动参数 / 已加载模块 / MTRR / EFI 启动项",
      "怀疑某个模块没加载、或者引导方式不对时",
      "cmdline 里能看到 nouveau 是不是被 blacklist 了"),
+    (r"^deep/fwupd-devices\.(txt|json)$", "系统",
+     "全机可升级部件的固件版本清单（BIOS、BMC、网卡、硬盘、背板……）",
+     "核对一批机器的固件版本齐不齐、或者要查某个部件该不该升级时",
+     "离线也能读到本机现有版本；只有「有没有新版」需要联网"),
     (r"^deep/journal-boot\.txt$", "系统",
      "本次开机的完整 systemd 日志",
      "上面几份都看不出问题、要从头翻的时候",
@@ -222,6 +226,28 @@ RAW_INDEX = (
      "中断分布 / 虚拟内存统计 / 内存 zone 水位",
      "怀疑中断没打散、或者内存压测被 OOM 时",
      "interrupts 看各 CPU 列是不是均衡"),
+    (r"^counters-(pre|post)\.txt$", "CPU 与内存",
+     "压测前后的计数器快照：逐条 DIMM 的 ECC、逐核热节流、逐设备 PCIe AER",
+     "内存 ECC / CPU 热节流 / PCIe 错误这三项判定出现 WARN 或 FAIL 时",
+     "判的是 post 减 pre 的**差值**，不是绝对值；一台用过的机器带历史计数是正常的"),
+    (r"^counters/ras-(mc-ctl|summary)-(pre|post)\.txt$", "CPU 与内存",
+     "rasdaemon 给的人可读版 ECC 计数（按 DIMM 标签归位）",
+     "ECC 判定报了某条内存，想看它到底在哪个插槽时",
+     "判定不读这份，它只是给人看的；标签对应主板丝印的插槽名"),
+    (r"^counters/edac-util-(pre|post)\.txt$", "CPU 与内存",
+     "EDAC 的另一条路给出的内存错误计数",
+     "ras-mc-ctl 那份读不到、想换个来源核对时",
+     "不同平台上两者可用性不一样，互为备份"),
+    (r"^deep/cpuid\.txt$", "CPU 与内存", "CPU 的特性位、步进与勘误相关标志",
+     "怀疑某个指令集/特性没开、或者查勘误时", "lscpu 给不全的那些在这里"),
+    (r"^deep/msr-.*\.txt$", "CPU 与内存",
+     "直接读的 MSR 寄存器：封装能量、Tjmax、功耗墙",
+     "怀疑 BIOS 限了功耗墙、或者想核对 Tjmax 时",
+     "是十六进制原始值；AMD 平台 MSR 号不同，读不到很正常"),
+    (r"^stress/turbostat.*$", "CPU 与内存",
+     "压测期间**逐核**的实际频率、C-state 占比、封装功耗与温度",
+     "想知道满载时是不是所有核都跑满了、哪几个核在拖后腿",
+     "只留档不参与判定 —— 它在不同平台上可用性差别很大"),
 
     # ---------------- 存储 ----------------
     (r"^smart-pre/.*\.norm\.json$", "存储",
@@ -261,6 +287,14 @@ RAW_INDEX = (
      "其它厂商阵列卡 / HBA 的管理工具输出（PERC / Adaptec / HPE / IT 模式 HBA）",
      "同上，非 Broadcom 的卡看这里",
      "文件名前缀就是命中的那个工具"),
+    (r"^deep/nvme-[a-z]+-smart-.*\.txt$", "存储",
+     "NVMe 厂商扩展 SMART 页（各家自己的健康度 / 寿命 / 温度门限字段）",
+     "标准 SMART 看不出名堂、要问厂商专有计数时",
+     "认不了这块盘的插件会直接报错，那一行就是这个意思，不是盘有问题"),
+    (r"^deep/sg_ses-.*\.txt$", "存储",
+     "机框 / 背板（SES）的槽位、风扇、温度与电源状态",
+     "存储机上盘位报错、或者怀疑背板有问题时",
+     "看每个 Element 的状态位；空槽和故障槽在这里分得开"),
     (r"^fio-(seq|rand)\.json$", "存储",
      "硬盘压测的带宽 / IOPS / 延迟原始结果",
      "要看实测性能、或者判定说有 I/O 错误时",
@@ -283,6 +317,14 @@ RAW_INDEX = (
      "怀疑丢包或性能不对时", "看 rx_errors / rx_dropped 这类计数"),
     (r"^deep/ip-link-detail\.txt$", "网络", "所有网络接口的详细状态与统计",
      "接口起不来时", "看 state 和 qdisc"),
+    (r"^deep/lldp-neighbors\.(txt|json)$", "网络",
+     "每个网口的对端：接在**哪台交换机的哪个口**",
+     "现场怀疑网线插错、或者要核对布线表时",
+     "采集用的是接收模式，我们不往对端发任何通告；没接线或对端没开 LLDP 就是空的"),
+    (r"^deep/mstflint-.*\.txt$", "网络",
+     "迈络思网卡的固件版本、PSID 与 PXE 版本",
+     "迈络思卡固件版本要核对、或者怀疑该升级时",
+     "PSID 决定了能刷哪个厂商的固件，比型号还关键"),
 
     # ---------------- GPU ----------------
     (r"^gpu-lspci\.txt$", "GPU", "PCI 总线上看到的 NVIDIA 显卡",
@@ -529,6 +571,140 @@ class Internal(Data):
                 ("收光功率", g("Rcvr signal avg optical power")),
             ]))
         return out
+
+    # ---------- 计数器快照（1.7.0 新增）----------
+    def _counters(self, phase):
+        """raw/counters-<phase>.txt -> {(类型, 键): [数值...]}；没有就返回 None。
+
+        None 和 {} 是两回事：None = 这台机器/这一轮压根没有这份快照（判定判 SKIP），
+        {} = 有快照但一条都没解析出来。报告里两者显示的东西不一样。
+        """
+        p = self.rawpath("counters-%s.txt" % phase)
+        if not os.path.exists(p):
+            return None
+        out = {}
+        for line in read_text(p).splitlines():
+            parts = line.split()
+            if len(parts) < 3 or parts[0].startswith("#"):
+                continue
+            vals = []
+            for v in parts[2:]:
+                n = num(v)
+                vals.append(int(n) if n is not None else None)
+            out[(parts[0], parts[1])] = vals
+        return out
+
+    COUNTER_LABELS = {
+        ("ECC", 0): "内存 ECC 可纠正",
+        ("ECC", 1): "内存 ECC 不可纠正",
+        ("THROTTLE", 0): "CPU 核心热节流",
+        ("THROTTLE", 1): "CPU 封装热节流",
+        ("AER", 0): "PCIe 可纠正错误",
+        ("AER", 1): "PCIe 不可纠正（致命）",
+        ("AER", 2): "PCIe 不可纠正（非致命）",
+    }
+
+    def counter_deltas(self):
+        """-> [OrderedDict...]；只列**增量大于 0** 的。
+
+        没有快照返回 None（报告里整块不画）；有快照但没有增长返回 []。
+        """
+        pre, post = self._counters("pre"), self._counters("post")
+        if pre is None or post is None:
+            return None
+        rows = []
+        for key, after in sorted(post.items()):
+            before = pre.get(key) or []
+            for i, a in enumerate(after):
+                if a is None:
+                    continue
+                b = before[i] if i < len(before) and before[i] is not None else 0
+                if a - b <= 0:
+                    continue
+                rows.append(OrderedDict([
+                    ("类型", self.COUNTER_LABELS.get((key[0], i), "%s[%d]" % (key[0], i))),
+                    ("位置", key[1]),
+                    ("压测前", b),
+                    ("压测后", a),
+                    ("新增", a - b),
+                ]))
+        return rows
+
+    def ecc_table(self):
+        """逐条 DIMM 的 ECC，前后各一列。没有 EDAC 就是空表。"""
+        pre, post = self._counters("pre"), self._counters("post")
+        if pre is None and post is None:
+            return []
+        pre, post = pre or {}, post or {}
+        labels = sorted({k[1] for k in list(pre) + list(post) if k[0] == "ECC"})
+        rows = []
+        for lb in labels:
+            a = pre.get(("ECC", lb)) or [None, None]
+            b = post.get(("ECC", lb)) or [None, None]
+            def cell(x, y):
+                if x is None and y is None:
+                    return None
+                if x == y:
+                    return str(y)
+                return "%s → %s ⚠" % (x, y)
+            rows.append(OrderedDict([
+                ("内存位置", lb),
+                ("可纠正（前→后）", cell(a[0] if len(a) > 0 else None,
+                                        b[0] if len(b) > 0 else None)),
+                ("不可纠正（前→后）", cell(a[1] if len(a) > 1 else None,
+                                          b[1] if len(b) > 1 else None)),
+            ]))
+        return rows
+
+    # ---------- 固件版本清单 ----------
+    def fwupd_devices(self):
+        """fwupdmgr get-devices 的文本输出 -> [(设备, 当前版本)]。
+
+        故意解析文本而不是 json：json 那份在不同 fwupd 版本之间结构变过好几次，
+        而文本里 "Current version:" 这一行十年没变。解析失败就是空表，不影响别的。
+        """
+        txt = read_text(self.rawpath("deep", "fwupd-devices.txt"))
+        if not txt.strip():
+            return []
+        rows, name = [], None
+        for line in txt.splitlines():
+            s = line.strip()
+            if not s:
+                continue
+            # 设备名是不带 "key: value" 形状、且缩进较浅的那一行
+            if ":" not in s and not line.startswith("    "):
+                name = s.strip("│├└─ ").strip()
+                continue
+            m = re.match(r"^[│├└─\s]*(Current version|DeviceId|Vendor|GUID)\s*:\s*(.+)$", s)
+            if m and m.group(1) == "Current version" and name:
+                rows.append(OrderedDict([("部件", name), ("当前固件版本", m.group(2).strip())]))
+        return rows
+
+    # ---------- LLDP 邻居 ----------
+    def lldp_neighbors(self):
+        """lldpctl 的输出 -> [(本端口, 对端设备, 对端端口, 对端描述)]。"""
+        txt = read_text(self.rawpath("deep", "lldp-neighbors.txt"))
+        if not txt.strip() or "command not found" in txt:
+            return []
+        rows, cur = [], None
+        for line in txt.splitlines():
+            m = re.match(r"^Interface:\s*([^,]+)", line.strip())
+            if m:
+                if cur:
+                    rows.append(cur)
+                cur = OrderedDict([("本端网口", m.group(1).strip()),
+                                   ("对端设备", None), ("对端端口", None), ("对端描述", None)])
+                continue
+            if cur is None:
+                continue
+            for key, col in (("SysName", "对端设备"), ("PortID", "对端端口"),
+                             ("PortDescr", "对端端口"), ("SysDescr", "对端描述")):
+                m = re.match(r"^\s*%s:\s*(.+)$" % key, line)
+                if m and not cur.get(col):
+                    cur[col] = m.group(1).strip()[:120]
+        if cur:
+            rows.append(cur)
+        return [r for r in rows if r.get("对端设备") or r.get("对端端口")]
 
     # ---------- 本轮采集范围 ----------
     def scope_notes(self):
@@ -1319,17 +1495,57 @@ def build_internal_html(d):
     # ================================================ 七、深度硬件数据
     SEC("s7")
     got_any = False
+
+    # ---- 计数器差值：这一版新加的三样，最该先看 ----
+    deltas = d.counter_deltas()
+    if deltas is not None:
+        got_any = True
+        A("<h3>7.1 计数器：压测前 → 压测后</h3>")
+        A('<p class="sub">这三样都是内核自带的计数器，判定看的是<b>差值</b>而不是绝对值 ——'
+          "一台用过的机器带着历史计数是正常的，我们要回答的是「这一轮压测把什么逼出来了」。"
+          "<b>热节流</b>那一行尤其值得看：散热不行但温度没到告警线的机器，"
+          "只有它看得出来（CPU 自己在降频，温度曲线反而好看）。</p>")
+        if deltas:
+            A('<div class="dense">%s</div>' % table(deltas))
+        else:
+            A('<p class="muted">三类计数器压测前后都没有增长。</p>')
+
+    ecc_rows = d.ecc_table()
+    if ecc_rows:
+        got_any = True
+        A("<h3>7.2 逐条 DIMM 的 ECC 计数</h3>")
+        A('<p class="sub">按 BIOS 给的插槽标签归位，可以直接对到主板丝印上。'
+          "可纠正错误持续增长是内存条早期退化最直接的信号 ——"
+          "机器现在照样能跑，但装到客户机房里会越来越频繁。</p>")
+        A('<div class="dense">%s</div>' % table(ecc_rows))
+
+    fw_rows = d.fwupd_devices()
+    if fw_rows:
+        got_any = True
+        A("<h3>7.3 全机固件版本一览</h3>")
+        A('<p class="sub">核对一批机器的固件版本齐不齐时用这张表。'
+          "离线也读得到本机现有版本，只有「有没有新版」需要联网。</p>")
+        A('<div class="dense">%s</div>' % table(fw_rows))
+
+    lldp_rows = d.lldp_neighbors()
+    if lldp_rows:
+        got_any = True
+        A("<h3>7.4 网口对端（LLDP 邻居）</h3>")
+        A('<p class="sub">这个口接在哪台交换机的哪个口 —— 现场排线错误一眼就看出来。'
+          "采集用的是<b>接收模式</b>，我们不往对端发任何通告。</p>")
+        A('<div class="dense">%s</div>' % table(lldp_rows))
+
     optics = d.nic_optics()
     if optics:
         got_any = True
-        A("<h3>7.1 光模块</h3>")
+        A("<h3>7.5 光模块</h3>")
         A('<p class="sub">只有插着模块时才读得到。光口机器出问题时，'
           "收发光功率是最值钱的一份数据 —— 客户报告里没有它。</p>")
         A('<div class="dense">%s</div>' % table(optics))
     inv = d.gpu_inventory()
     if inv:
         got_any = True
-        A("<h3>7.2 显卡逐卡清单（压测后读的 PCIe 链路）</h3>")
+        A("<h3>7.6 显卡逐卡清单（压测后读的 PCIe 链路）</h3>")
         A('<div class="dense">%s</div>' % table(
             [OrderedDict((k, v) for k, v in row.items()) for row in inv]))
     for title, rel in (("PCIe 链路详情", "lspci-vv.txt"),

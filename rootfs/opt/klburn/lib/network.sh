@@ -110,6 +110,28 @@ net_link_up_all() {
   dbg "carrier wait finished after ${waited}s"
 }
 
+# ---------------------------------------------------------------- LLDP 邻居发现
+# 现场排线错误（网线插错交换机口）以前只能靠人对着标签核，现在报告里直接写着
+# "eno1 -> switch-A / Gi1/0/12"。
+#
+# ⚠️ **只用接收模式（-r）。** lldpd 默认会往每个口上发我们自己的 LLDP 通告，
+# 而这是在**客户的交换机**上留痕迹 —— 出厂测试是来看这台机器的，
+# 不该往别人的网络里写任何东西。-r 只听不说。
+#
+# 拉起来就不管了：这是 live 系统，测完直接关机。失败一律无声跳过 ——
+# 拿不到 LLDP 邻居只是少一份参考数据，跟被测机器好不好毫无关系（二号原则）。
+lldp_start() {
+  have lldpd || { dbg "lldpd not present, skipping LLDP neighbour discovery"; return 0; }
+  pgrep -x lldpd >/dev/null 2>&1 && return 0
+  # -r 接收模式；服务本身在构建时是 mask 掉的，这里直接跑二进制
+  if lldpd -r >/dev/null 2>&1; then
+    info "LLDP neighbour discovery started (receive-only)"
+  else
+    dbg "lldpd failed to start (non-fatal)"
+  fi
+  return 0
+}
+
 # DHCP 取地址。返回 0 = 拿到，127 = 盘内没有 DHCP 客户端
 #
 # ${RAW_DIR:-/tmp} 是因为联网校时（try_sync_clock_via_network）在 RUN_DIR

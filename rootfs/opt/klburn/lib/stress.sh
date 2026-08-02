@@ -86,23 +86,30 @@ monitor_start() {
   # 逗号是 CSV 的分隔符，不能用。加这一列是因为"双路机器一颗 52°C、
   # 另一颗 78°C"是典型的散热器没装好/风道偏，而这个信息以前只在屏幕上
   # 一闪而过，落不进任何文件，事后想查都查不到。只有内部工程报告读它。
+  # ecc_ce / ecc_ue 是 1.7.0 加的，同样加在**末尾**。有了这一列，
+  # 内部报告能画出"ECC 计数是从压测第几分钟开始涨的"——只有前后两个快照的话，
+  # 只知道涨了，不知道是一上来就涨还是烤热之后才涨，而这两件事的含义完全不同。
   if [[ ! -f "$csv" ]]; then
-    echo "time,phase,cpu_temp_c,cpu_freq_mhz,load1,mem_used_mb,mem_total_mb,cpu_power_w,cpu_pkg_temps" > "$csv"
+    echo "time,phase,cpu_temp_c,cpu_freq_mhz,load1,mem_used_mb,mem_total_mb,cpu_power_w,cpu_pkg_temps,ecc_ce,ecc_ue" > "$csv"
   fi
   (
     # RAPL 是累计能量计数器，要两次采样求差。先在子 shell 里打一次基准，
     # 否则第一个采样点的功耗永远是空的。
     cpu_power_w >/dev/null 2>&1 || true
     while :; do
-      local t f l used total p pk
+      local t f l used total p pk ce ue
       t="$(cpu_temp_max_c)"
       f="$(cpu_freq_avg_mhz)"
       p="$(cpu_power_w)"
       pk="$(cpu_temp_per_pkg | awk '{printf "%s%s", (NR>1 ? ";" : ""), $2}')"
       l="$(awk '{print $1}' /proc/loadavg 2>/dev/null)"
+      read -r ce ue < <(mem_ecc_counts)
+      # 读不到 EDAC 时 mem_ecc_counts 给的是 "-- --"，原样写进去 ——
+      # 报告生成器按数字解析，解析不了就当这一点没有，绝不会当成 0。
       read -r total used < <(awk '/MemTotal/{tot=$2} /MemAvailable/{av=$2} END{printf "%d %d", tot/1024, (tot-av)/1024}' /proc/meminfo)
-      printf '%s,%s,%s,%s,%s,%s,%s,%s,%s\n' \
-        "$(date '+%H:%M:%S')" "$phase" "${t:-}" "${f:-}" "${l:-}" "${used:-}" "${total:-}" "${p:-}" "${pk:-}" >> "$csv"
+      printf '%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s\n' \
+        "$(date '+%H:%M:%S')" "$phase" "${t:-}" "${f:-}" "${l:-}" "${used:-}" "${total:-}" "${p:-}" "${pk:-}" \
+        "${ce:-}" "${ue:-}" >> "$csv"
       sleep 5
     done
   ) &
@@ -115,6 +122,40 @@ monitor_stop() {
   kill "$MONITOR_PID" 2>/dev/null || true
   wait "$MONITOR_PID" 2>/dev/null || true
   MONITOR_PID=""
+}
+
+# ---------------------------------------------------------------- turbostat 采样
+# sensors 只给"某个 hwmon 探头此刻多少度"。turbostat 给的是**逐核**的
+# 实际运行频率、C-state 占比、封装功耗和温度 —— 复盘"这台机器满载时到底
+# 有没有跑满、是哪几个核在拖后腿"时，只有它答得上来。
+#
+# 只留档，**不参与任何判定**：它在不同平台上的可用性差别很大（要 MSR、
+# 要认识这代 CPU），拿它判定等于给自己埋一堆误判。
+#
+# 起不来一律无声跳过（老平台、虚拟机、内核禁了 msr 都会起不来）。
+TURBOSTAT_PID=""
+turbostat_start() {
+  have turbostat || return 0
+  modprobe msr >/dev/null 2>&1 || true
+  local out="$STRESS_LOG_DIR/turbostat.txt"
+  # --quiet 只留数值列；5 秒一次和 monitor_start 对齐，好按时间对照
+  turbostat --quiet --interval 5 > "$out" 2>"$STRESS_LOG_DIR/turbostat-err.log" &
+  TURBOSTAT_PID=$!
+  # 给它一秒钟把不支持的情况暴露出来；死了就当没有这回事
+  sleep 1
+  if ! kill -0 "$TURBOSTAT_PID" 2>/dev/null; then
+    dbg "turbostat exited immediately (platform not supported), skipping"
+    TURBOSTAT_PID=""
+    return 0
+  fi
+  dbg "turbostat sampling started pid=$TURBOSTAT_PID"
+}
+
+turbostat_stop() {
+  [[ -n "$TURBOSTAT_PID" ]] || return 0
+  kill "$TURBOSTAT_PID" 2>/dev/null || true
+  wait "$TURBOSTAT_PID" 2>/dev/null || true
+  TURBOSTAT_PID=""
 }
 
 # 从 sys_metrics.csv 里取某阶段的最高温度

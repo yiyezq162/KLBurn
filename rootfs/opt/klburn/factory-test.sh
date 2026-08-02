@@ -37,6 +37,7 @@ BURN_PIDS=()
 cleanup() {
   monitor_stop 2>/dev/null || true
   gpu_monitor_stop 2>/dev/null || true
+  turbostat_stop 2>/dev/null || true
   # 异常退出时也要把内核消息放回控制台，否则收尾菜单那个 shell 是"聋"的
   console_quiet_off 2>/dev/null || true
   # CPU/内存/GPU 压测现在是并发子 shell（见下面的 BURN_PIDS），
@@ -230,6 +231,9 @@ stress_init
 # 判定读的都是 ring buffer）。压测全部结束后原样恢复。
 console_quiet_on
 
+# 逐核频率/温度/功耗的采样。只留档不判定，起不来就当没有（见 stress.sh）。
+turbostat_start
+
 section "PHASE 2/4  BURN-IN: $burn_label CONCURRENTLY  ($(fmt_dur "$DURATION_SECONDS"))"
 
 BURN_PIDS=()
@@ -258,6 +262,7 @@ if (( gpu_will_run == 0 && GPU_USABLE > 0 )); then
   gpu_stress 0
 fi
 
+turbostat_stop
 # 仪表盘到此为止，把内核消息放回控制台 —— 后面复查/出报告阶段本来就是
 # 正常滚动输出，而且这时候真出了内核错误，现场应该第一时间看见。
 console_quiet_off

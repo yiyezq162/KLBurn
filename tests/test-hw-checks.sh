@@ -511,6 +511,172 @@ RAW_DIR="$TMP"
 
 # ================================================================
 echo
+echo "=== 计数器快照与差值判定（ECC / 热节流 / PCIe AER）==="
+# 1.7.0 新增的三条判定。它们判的都是**差值**（测后减测前），不是绝对值 ——
+# 一台用过的机器带着历史计数是正常的。
+#
+# 三个 *_snapshot 都吃一个 sysfs 根目录参数，这里搭一棵假树喂它们，
+# 不需要真硬件。**这一组最要紧的是"读不到 = SKIP，绝不是 FAIL"**：
+# 很多平台和虚拟机压根没有 EDAC / thermal_throttle / AER 接口。
+
+CNT="$TMP/counters"
+SYSC="$CNT/sys"
+mkdir -p "$CNT"
+
+mk_ecc() {   # mk_ecc <mc> <dimm> <标签> <ce> <ue>
+  local d="$SYSC/devices/system/edac/mc/mc$1/dimm$2"
+  mkdir -p "$d"
+  printf '%s\n' "$3" > "$d/dimm_label"
+  printf '%s\n' "$4" > "$d/dimm_ce_count"
+  printf '%s\n' "$5" > "$d/dimm_ue_count"
+}
+mk_throttle() {   # mk_throttle <cpu> <core计数> <package计数>
+  local d="$SYSC/devices/system/cpu/cpu$1/thermal_throttle"
+  mkdir -p "$d"
+  printf '%s\n' "$2" > "$d/core_throttle_count"
+  printf '%s\n' "$3" > "$d/package_throttle_count"
+}
+mk_aer() {   # mk_aer <BDF> <可纠正> <致命> <非致命>
+  local d="$SYSC/bus/pci/devices/$1"
+  mkdir -p "$d"
+  printf 'RxErr 0\nBadTLP 0\nTOTAL_ERR_COR %s\n'   "$2" > "$d/aer_dev_correctable"
+  printf 'Undefined 0\nTOTAL_ERR_FATAL %s\n'       "$3" > "$d/aer_dev_fatal"
+  printf 'Undefined 0\nTOTAL_ERR_FATAL %s\n'       "$4" > "$d/aer_dev_nonfatal"
+}
+
+rm -rf "$SYSC"
+mk_ecc 0 0 "CPU0_DIMM_A1" 0 0
+mk_ecc 0 1 "CPU0_DIMM_B1" 3 0
+mk_throttle 0 0 0
+mk_throttle 1 5 2
+mk_aer "0000:18:00.0" 7 0 0
+
+check "ecc_snapshot 逐条 DIMM 按标签归位" "1" \
+      "$(ecc_snapshot "$SYSC" | grep -c '^ECC CPU0_DIMM_B1 3 0$' || true)"
+check "ecc_snapshot 认到两条内存" "2" "$(ecc_snapshot "$SYSC" | grep -c '^ECC ' || true)"
+check "throttle_snapshot 读到逐核计数" "1" \
+      "$(throttle_snapshot "$SYSC" | grep -c '^THROTTLE cpu1 5 2$' || true)"
+check "aer_snapshot 读到 TOTAL_ERR_COR" "1" \
+      "$(aer_snapshot "$SYSC" | grep -c '^AER 0000:18:00.0 7 0 0$' || true)"
+
+# 没有这些 sysfs 接口时必须是**空输出**，不是 0 —— 空 = 判 SKIP，0 = 判 PASS，
+# 这两件事的含义完全不同（"没这个功能" vs "查过了没问题"）。
+check "没有 EDAC 时 ecc_snapshot 一行都不输出"      "0" "$(ecc_snapshot "$TMP/nosuch" | grep -c . || true)"
+check "没有热节流接口时 throttle_snapshot 不输出"    "0" "$(throttle_snapshot "$TMP/nosuch" | grep -c . || true)"
+check "没有 AER 接口时 aer_snapshot 不输出"          "0" "$(aer_snapshot "$TMP/nosuch" | grep -c . || true)"
+
+# ---- 差值 ----
+{ ecc_snapshot "$SYSC"; throttle_snapshot "$SYSC"; aer_snapshot "$SYSC"; } > "$CNT/pre.txt"
+# 压测之后：B1 又多了 2 个可纠正、A1 出了 1 个不可纠正、cpu1 多节流 3 次、AER 多 4 个
+rm -rf "$SYSC"
+mk_ecc 0 0 "CPU0_DIMM_A1" 0 1
+mk_ecc 0 1 "CPU0_DIMM_B1" 5 0
+mk_throttle 0 0 0
+mk_throttle 1 8 2
+mk_aer "0000:18:00.0" 11 0 0
+{ ecc_snapshot "$SYSC"; throttle_snapshot "$SYSC"; aer_snapshot "$SYSC"; } > "$CNT/post.txt"
+
+check "counters_delta 只报增量大于 0 的（B1 可纠正 3->5）" "1" \
+      "$(counters_delta ECC "$CNT/pre.txt" "$CNT/post.txt" | grep -c '^CPU0_DIMM_B1 1 3 5 2$' || true)"
+check "counters_delta 认得出新增的不可纠正（A1 0->1）" "1" \
+      "$(counters_delta ECC "$CNT/pre.txt" "$CNT/post.txt" | grep -c '^CPU0_DIMM_A1 2 0 1 1$' || true)"
+check "没变化的条目不出现在差值里" "0" \
+      "$(counters_delta ECC "$CNT/pre.txt" "$CNT/post.txt" | grep -c '^CPU0_DIMM_A1 1 ' || true)"
+check "counters_delta 认得出热节流增量" "1" \
+      "$(counters_delta THROTTLE "$CNT/pre.txt" "$CNT/post.txt" | grep -c '^cpu1 1 5 8 3$' || true)"
+
+# 计数器回绕/清零绝不能算成"新增"（负增量要被丢掉）
+printf 'ECC X 100 0\n' > "$CNT/hi.txt"
+printf 'ECC X 0 0\n'   > "$CNT/lo.txt"
+check "计数器变小（清零/换硬件）不算新增" "0" \
+      "$(counters_delta ECC "$CNT/hi.txt" "$CNT/lo.txt" | grep -c . || true)"
+
+# ---- 三条判定 ----
+RAW_DIR="$CNT"; RUN_DIR="$CNT"
+LAST_STATUS=""; LAST_DETAIL=""
+result_add() { LAST_STATUS="$3"; LAST_DETAIL="$4"; }
+metric_add() { :; }
+
+cp "$CNT/pre.txt" "$RAW_DIR/counters-pre.txt"
+cp "$CNT/pre.txt" "$RAW_DIR/counters-post.txt"
+LAST_STATUS=""; verify_ecc
+check "ECC 前后一模一样 -> PASS" "PASS" "$LAST_STATUS"
+LAST_STATUS=""; verify_throttle
+check "热节流前后一模一样 -> PASS" "PASS" "$LAST_STATUS"
+LAST_STATUS=""; verify_aer
+check "AER 前后一模一样 -> PASS" "PASS" "$LAST_STATUS"
+
+# 只新增可纠正 -> WARN（还纠得回来，不拉低整机结论）
+printf 'ECC A1 0 0\nECC B1 3 0\n' > "$RAW_DIR/counters-pre.txt"
+printf 'ECC A1 0 0\nECC B1 9 0\n' > "$RAW_DIR/counters-post.txt"
+LAST_STATUS=""; LAST_DETAIL=""; verify_ecc
+check "只新增可纠正 ECC -> WARN（不是 FAIL）" "WARN" "$LAST_STATUS"
+check "而且要说清楚错误已被纠正、本次结果仍然有效" "1" \
+      "$(printf '%s' "$LAST_DETAIL" | grep -c '已被 ECC 纠正' || true)"
+check "文案里要点到具体是哪一条内存" "1" \
+      "$(printf '%s' "$LAST_DETAIL" | grep -c 'B1' || true)"
+
+# 新增不可纠正 -> FAIL
+printf 'ECC A1 0 0\n' > "$RAW_DIR/counters-pre.txt"
+printf 'ECC A1 0 2\n' > "$RAW_DIR/counters-post.txt"
+LAST_STATUS=""; verify_ecc
+check "新增不可纠正 ECC -> FAIL" "FAIL" "$LAST_STATUS"
+
+# 可纠正 + 不可纠正同时有 -> 必须是 FAIL，不能被 WARN 盖过去
+printf 'ECC A1 0 0\nECC B1 0 0\n' > "$RAW_DIR/counters-pre.txt"
+printf 'ECC A1 9 0\nECC B1 0 1\n' > "$RAW_DIR/counters-post.txt"
+LAST_STATUS=""; verify_ecc
+check "可纠正和不可纠正同时新增 -> FAIL（不可纠正优先）" "FAIL" "$LAST_STATUS"
+
+# 没有 EDAC -> SKIP。**这条最重要：读不到绝不能判故障**
+printf '# 只有热节流，没有 ECC\nTHROTTLE cpu0 0 0\n' > "$RAW_DIR/counters-pre.txt"
+printf '# 只有热节流，没有 ECC\nTHROTTLE cpu0 0 0\n' > "$RAW_DIR/counters-post.txt"
+LAST_STATUS=""; LAST_DETAIL=""; verify_ecc
+check "内核没有 EDAC 接口 -> SKIP（不是 PASS 也不是 FAIL）" "SKIP" "$LAST_STATUS"
+check "SKIP 的文案要写明不影响整机结论" "1" \
+      "$(printf '%s' "$LAST_DETAIL" | grep -c '不影响整机结论' || true)"
+
+# 热节流：新增 -> WARN（散热问题，但机器本身没坏）
+printf 'THROTTLE cpu0 0 0\n' > "$RAW_DIR/counters-pre.txt"
+printf 'THROTTLE cpu0 4 1\n' > "$RAW_DIR/counters-post.txt"
+LAST_STATUS=""; LAST_DETAIL=""; verify_throttle
+check "压测期间出现热节流 -> WARN（保护机制正常工作，不是故障）" "WARN" "$LAST_STATUS"
+check "要提示这时温度读数可能仍然正常（否则没人会去查散热）" "1" \
+      "$(printf '%s' "$LAST_DETAIL" | grep -c '温度读数可能仍在正常范围' || true)"
+
+printf '# 没有热节流接口\nECC A1 0 0\n' > "$RAW_DIR/counters-pre.txt"
+printf '# 没有热节流接口\nECC A1 0 0\n' > "$RAW_DIR/counters-post.txt"
+LAST_STATUS=""; verify_throttle
+check "CPU 不提供热节流计数 -> SKIP" "SKIP" "$LAST_STATUS"
+
+# AER：可纠正 -> WARN，不可纠正 -> FAIL
+printf 'AER 0000:18:00.0 0 0 0\n'  > "$RAW_DIR/counters-pre.txt"
+printf 'AER 0000:18:00.0 12 0 0\n' > "$RAW_DIR/counters-post.txt"
+LAST_STATUS=""; verify_aer
+check "只新增 PCIe 可纠正错误 -> WARN" "WARN" "$LAST_STATUS"
+
+printf 'AER 0000:18:00.0 0 0 0\n' > "$RAW_DIR/counters-pre.txt"
+printf 'AER 0000:18:00.0 0 0 3\n' > "$RAW_DIR/counters-post.txt"
+LAST_STATUS=""; verify_aer
+check "新增 PCIe 不可纠正（非致命）-> FAIL" "FAIL" "$LAST_STATUS"
+
+printf 'AER 0000:18:00.0 0 0 0\n' > "$RAW_DIR/counters-pre.txt"
+printf 'AER 0000:18:00.0 0 1 0\n' > "$RAW_DIR/counters-post.txt"
+LAST_STATUS=""; verify_aer
+check "新增 PCIe 不可纠正（致命）-> FAIL" "FAIL" "$LAST_STATUS"
+
+printf '# 没有 AER\nECC A1 0 0\n' > "$RAW_DIR/counters-pre.txt"
+printf '# 没有 AER\nECC A1 0 0\n' > "$RAW_DIR/counters-post.txt"
+LAST_STATUS=""; verify_aer
+check "固件没开 AER -> SKIP" "SKIP" "$LAST_STATUS"
+
+# 快照文件整个不存在（采集阶段就崩了）也必须是 SKIP，不能崩也不能判故障
+rm -f "$RAW_DIR/counters-pre.txt" "$RAW_DIR/counters-post.txt"
+LAST_STATUS=""; verify_ecc
+check "连快照文件都没有 -> SKIP（不崩、不判故障）" "SKIP" "$LAST_STATUS"
+
+# ================================================================
+echo
 echo "=== 硬盘温度判定（verify_disk_temp）==="
 # 这是 0.4.0 新接上的判定（DISK_TEMP_WARN/FAIL 以前定义了却没人用），
 # 新判定最怕的就是误判 —— 尤其"读不到温度"绝不能被当成故障。
@@ -1333,14 +1499,15 @@ echo "=== 汇总入口的调用链不能少人（少一个 = 那项结论从报�
 # 报告里那一项就凭空消失，既不是 PASS 也不是 SKIP，谁也不会注意到。
 # declare -f 打出来的函数体不含注释，所以数的是真调用。
 
-for fn in collect_smart verify_smart verify_disk_temp verify_dmesg verify_sel; do
+for fn in collect_smart verify_smart verify_disk_temp verify_dmesg verify_sel \
+          collect_counters verify_ecc verify_throttle verify_aer; do
   check "verify_all 必须调用 $fn" \
         "yes" "$(declare -f verify_all | grep -q "\b${fn}\b" && echo yes || echo no)"
 done
 
 for fn in collect_system check_memory_capacity check_pcie_link collect_sensors collect_smart \
-          net_link_up_all collect_nic check_nic_speed net_test collect_ipmi collect_raid \
-          check_psu gpu_detect collect_deep verify_dmesg_boot; do
+          net_link_up_all lldp_start collect_nic check_nic_speed net_test collect_ipmi collect_raid \
+          check_psu gpu_detect collect_deep collect_counters verify_dmesg_boot; do
   check "collect_all 必须调用 $fn" \
         "yes" "$(declare -f collect_all | grep -q "\b${fn}\b" && echo yes || echo no)"
 done

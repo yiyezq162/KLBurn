@@ -60,6 +60,11 @@ MUTATIONS=(
 "disk-none-fail${S}没装硬盘时判 FAIL 而不是 WARN（§2-2：能力缺失 ≠ 硬件故障，会把无盘机器拦在出货前）${S}test-hw-checks${S}$RT/lib/collect.sh${S}mut_disk_none_fail"
 "counter-postfix${S}断言计数改回 (( PASS++ ))（X=0 时返回 1，让 cond && ok || bad 两边都跑）${S}lint${S}tests/lint.sh${S}mut_counter_postfix"
 "media-blind${S}scan_disks 不再反查启动 U 盘（Ventoy 下前两层同时落空，fio 会把测试盘写穿）${S}test-hw-checks${S}$RT/lib/storage.sh${S}mut_media_blind"
+"ecc-ue-warn${S}内存不可纠正错误判 WARN 而不是 FAIL（数据已经错了，这种机器不能出厂）${S}test-hw-checks${S}$RT/lib/verify.sh${S}mut_ecc_ue_warn"
+"ecc-noedac-pass${S}读不到 EDAC 时判 PASS 而不是 SKIP（没查过和查过没问题被混为一谈）${S}test-hw-checks${S}$RT/lib/verify.sh${S}mut_ecc_noedac_pass"
+"counter-abs${S}计数器判定看绝对值而不是前后差值（带着历史计数的二手机器会被全判故障）${S}test-hw-checks${S}$RT/lib/collect.sh${S}mut_counter_abs"
+"screen-nonascii${S}面板不再过滤非 ASCII（一个中文字节就能把 BMC 上那屏顶成乱码）${S}test-screen-render${S}$RT/lib/ui.sh${S}mut_screen_nonascii"
+"gpu-cap-fail${S}超过 8 张卡时不再收口（进度条被挤出屏幕，现场看不到测到哪了）${S}test-screen-render${S}$RT/lib/ui.sh${S}mut_gpu_cap"
 )
 
 # ================================================================
@@ -190,6 +195,45 @@ mut_media_blind() {
   replace_line "$RT/lib/storage.sh" \
     'media_list="$(live_media_disks' \
     '  media_list=""   # 变异：反查不出启动 U 盘'
+}
+
+# 内存的不可纠正错误意味着数据已经出错了，不是"读数偏高"那种程度。
+# 判成 WARN 的话整机结论仍然是 PASS，一台内存已经开始坏的机器照常出厂。
+mut_ecc_ue_warn() {
+  replace_line "$RT/lib/verify.sh" \
+    '    result_add "verify_ecc" "内存 ECC 复查" "$ST_FAIL" \' \
+    '    result_add "verify_ecc" "内存 ECC 复查" "$ST_WARN" \'
+}
+
+# 「这台机器没有 EDAC 接口」和「查过了，没有 ECC 错误」是两件完全不同的事。
+# 前者判 PASS 等于凭空给出一个没有依据的结论 —— 而报告上看不出区别。
+# 这是二号原则（能力缺失 ≠ 结论）在新判定上的同款陷阱。
+mut_ecc_noedac_pass() {
+  replace_line "$RT/lib/verify.sh" \
+    '    result_add "verify_ecc" "内存 ECC 复查" "$ST_SKIP" \' \
+    '    result_add "verify_ecc" "内存 ECC 复查" "$ST_PASS" \'
+}
+
+# 计数器判定必须看**差值**。改成看绝对值的话，任何一台跑过的机器
+# （历史上有过一次可纠正错误、开机时有过一次 AER）都会被判有问题 ——
+# 而出厂测试要回答的是"这一轮压测把什么逼出来了"。
+mut_counter_abs() {
+  replace_line "$RT/lib/collect.sh" \
+    '        if (d > 0) printf "%s %d %d %d %d\n", $2, i - 2, b, $i, d' \
+    '        if ($i > 0) printf "%s %d %d %d %d\n", $2, i - 2, b, $i, $i'
+}
+
+# 屏幕上一个非 ASCII 字节都不许有：现场是通过 BMC 的 KVM / 串口看的，
+# 字符集不受我们控制。型号串来自 dmidecode / nvidia-smi，带得进非 ASCII。
+mut_screen_nonascii() {
+  replace_line "$RT/lib/ui.sh" \
+    "ascii_clean() { printf '%s' \"\$*\" | LC_ALL=C tr -cd '\\40-\\176'; }" \
+    "ascii_clean() { printf '%s' \"\$*\"; }"
+}
+
+# 8 张卡已经占了半屏，全铺开会把进度条挤出屏幕 —— 而那是现场最需要看到的一行。
+mut_gpu_cap() {
+  replace_line "$RT/lib/ui.sh" "DASH_GPU_MAX=8" "DASH_GPU_MAX=999"
 }
 
 mut_net_servers() {

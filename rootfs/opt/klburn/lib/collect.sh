@@ -819,6 +819,123 @@ check_pcie_link() {
   fi
 }
 
+# ================================================================
+# 计数器快照（压测前后各一次，判定看的是**差值**）
+# ================================================================
+#
+# 这一组是 1.7.0 的重点：出厂老化真正该抓的东西，光看"压测跑完没报错"是看不到的。
+#
+#   ECC        内存的早期退化。一条内存开始出可纠正错误时，机器照样能跑、
+#              压测照样过，但它在客户机房里会越来越频繁，最后变成不可纠正。
+#   热节流     散热不行、但温度**没到阈值**的机器，就是靠这个看出来的：
+#              CPU 自己在降频保护，温度曲线反而好看。
+#   PCIe AER   链路层的错误计数。偶发可纠正很常见，压测期间新增就值得查。
+#
+# 三条都是**内核自带的 sysfs 计数器**，不依赖任何额外工具 —— 盘里带了
+# ras-mc-ctl / edac-util 是为了多一份人可读的原始记录，判定不靠它们。
+# 这很要紧：工具没带 = 能力缺失，不能因此判故障（二号原则）。
+#
+# 三个 *_snapshot 都吃一个 sysfs 根目录参数（默认 /sys），
+# 这样 tests/test-hw-checks.sh 能搭一棵假树喂它们。
+
+# ecc_snapshot [sysfs根] -> 每行 "ECC <位置标签> <可纠正数> <不可纠正数>"
+#
+# 逐条 DIMM 归位靠 dimm_label（BIOS 给的插槽名，形如 CPU0_DIMM_A1）。
+# 老内核只有 csrow/rank 的粒度，两种目录名都认。
+ecc_snapshot() {
+  local sysroot="${1:-/sys}" d label ce ue
+  for d in "$sysroot"/devices/system/edac/mc/mc[0-9]*/dimm[0-9]* \
+           "$sysroot"/devices/system/edac/mc/mc[0-9]*/rank[0-9]*; do
+    [[ -d "$d" ]] || continue
+    ce=""; ue=""
+    [[ -r "$d/dimm_ce_count" ]] && ce="$(<"$d/dimm_ce_count")"
+    [[ -r "$d/dimm_ue_count" ]] && ue="$(<"$d/dimm_ue_count")"
+    [[ "$ce" =~ ^[0-9]+$ && "$ue" =~ ^[0-9]+$ ]] || continue
+    label=""
+    [[ -r "$d/dimm_label" ]] && label="$(<"$d/dimm_label")"
+    # 标签可能是空的（BIOS 没填）。退回用 sysfs 路径当标签 ——
+    # 不好看，但至少前后两次快照能对得上，差值算得出来。
+    [[ -n "${label// /}" ]] || label="$(basename "$(dirname "$d")")/$(basename "$d")"
+    printf 'ECC %s %s %s\n' "${label// /_}" "$ce" "$ue"
+  done
+}
+
+# throttle_snapshot [sysfs根] -> 每行 "THROTTLE <cpu> <core计数> <package计数>"
+throttle_snapshot() {
+  local sysroot="${1:-/sys}" d n core pkg
+  for d in "$sysroot"/devices/system/cpu/cpu[0-9]*/thermal_throttle; do
+    [[ -d "$d" ]] || continue
+    n="$(basename "$(dirname "$d")")"
+    core=0; pkg=0
+    [[ -r "$d/core_throttle_count" ]]    && core="$(<"$d/core_throttle_count")"
+    [[ -r "$d/package_throttle_count" ]] && pkg="$(<"$d/package_throttle_count")"
+    [[ "$core" =~ ^[0-9]+$ ]] || core=0
+    [[ "$pkg"  =~ ^[0-9]+$ ]] || pkg=0
+    printf 'THROTTLE %s %s %s\n' "$n" "$core" "$pkg"
+  done
+}
+
+# aer_snapshot [sysfs根] -> 每行 "AER <BDF> <可纠正> <不可纠正致命> <不可纠正非致命>"
+#
+# aer_dev_* 是逐项计数的文本表，最后一行是 TOTAL_ERR_COR / TOTAL_ERR_FATAL 之类，
+# 只取总数就够 —— 逐项明细留在 raw/ 里给人看。
+aer_snapshot() {
+  local sysroot="${1:-/sys}" d bdf cor fat nfat
+  for d in "$sysroot"/bus/pci/devices/*; do
+    [[ -d "$d" ]] || continue
+    [[ -r "$d/aer_dev_correctable" ]] || continue
+    bdf="$(basename "$d")"
+    cor="$(awk '/^TOTAL_ERR_COR/{print $2; exit}'   "$d/aer_dev_correctable" 2>/dev/null)"
+    fat="$(awk '/^TOTAL_ERR_FATAL/{print $2; exit}' "$d/aer_dev_fatal"       2>/dev/null)"
+    nfat="$(awk '/^TOTAL_ERR_FATAL/{print $2; exit}' "$d/aer_dev_nonfatal"   2>/dev/null)"
+    [[ "$cor"  =~ ^[0-9]+$ ]] || cor=0
+    [[ "$fat"  =~ ^[0-9]+$ ]] || fat=0
+    [[ "$nfat" =~ ^[0-9]+$ ]] || nfat=0
+    printf 'AER %s %s %s %s\n' "$bdf" "$cor" "$fat" "$nfat"
+  done
+}
+
+# counters_snapshot <phase>  —— 三份快照落到 raw/counters-<phase>.txt
+collect_counters() {
+  # 分两条 local：同一条里后一个看不到前一个刚赋的值（§11-8），
+  # 写成一行的话 $phase 是空的、文件名会变成 counters-.txt。
+  local phase="$1"
+  local f="$RAW_DIR/counters-${phase}.txt"
+  {
+    printf '# KLBurn counter snapshot (%s)\n' "$phase"
+    ecc_snapshot
+    throttle_snapshot
+    aer_snapshot
+  } > "$f" 2>/dev/null
+
+  # 人可读的那几份原始记录（有工具才有，没有就是没有，不影响上面的判定）
+  if [[ "$phase" == "pre" ]] || [[ "$phase" == "post" ]]; then
+    capture -t 30 "counters/ras-mc-ctl-${phase}.txt"  ras-mc-ctl --error-count
+    capture -t 30 "counters/ras-summary-${phase}.txt" ras-mc-ctl --summary
+    capture -t 30 "counters/edac-util-${phase}.txt"   edac-util -v
+  fi
+}
+
+# counters_delta <字段前缀> <pre文件> <post文件> -> 每行 "<键> <前> <后> <增量>"
+# 只输出**增量大于 0** 的行 —— 判定要的就是"压测把什么逼出来了"。
+#
+# 抽成纯函数便于脱机回归测试：喂两份手写的快照就能验差值算得对不对。
+counters_delta() {
+  local kind="$1" pre="$2" post="$3"
+  [[ -f "$pre" && -f "$post" ]] || return 0
+  awk -v kind="$kind" '
+    FNR==NR { if ($1 == kind) { for (i = 3; i <= NF; i++) a[$2 "\t" i] = $i }; next }
+    $1 == kind {
+      for (i = 3; i <= NF; i++) {
+        k = $2 "\t" i
+        # 前一次没有这一项（热插拔/枚举变了）就当基线为 0，不要算成负数
+        b = (k in a) ? a[k] : 0
+        d = $i - b
+        if (d > 0) printf "%s %d %d %d %d\n", $2, i - 2, b, $i, d
+      }
+    }' "$pre" "$post"
+}
+
 # ---------------------------------------------------------------- 深度留档
 # 这一整块只往 raw/ 里落原始数据，**不产生任何判定、不进客户报告**。
 #
@@ -906,6 +1023,56 @@ collect_deep() {
       --format=csv
   fi
 
+  # ---- 全机固件版本清单 ----
+  # 离线可用（不联网只是查不到"有没有新版"，本机现有版本照样读得到）。
+  # 内部报告里做成一张表，核对"这批机器的固件版本齐不齐"非常实用。
+  capture -t 60 "deep/fwupd-devices.txt" fwupdmgr get-devices --no-unreported-check
+  capture -t 30 "deep/fwupd-devices.json" fwupdmgr get-devices --json --no-unreported-check
+
+  # ---- CPU 特性位 / MSR ----
+  capture -t 30 "deep/cpuid.txt" cpuid -1
+  modprobe msr >/dev/null 2>&1 || true
+  # MSR_PKG_ENERGY_STATUS(0x611) / MSR_TEMPERATURE_TARGET(0x1a2) / MSR_PKG_POWER_LIMIT(0x610)
+  # 只读不写。读不到（AMD 平台 MSR 号不同、或者内核禁了 msr）就是读不到，不影响任何判定。
+  capture -t 20 "deep/msr-power.txt" rdmsr -a 0x611
+  capture -t 20 "deep/msr-tjmax.txt" rdmsr -a 0x1a2
+  capture -t 20 "deep/msr-pkg-power-limit.txt" rdmsr 0x610
+
+  # ---- 迈络思网卡的固件版本 / PSID ----
+  # ethtool -i 在 mlx5 上给的固件版本串信息量很少，mstflint 才有 PSID 和 PXE 版本。
+  local mlx
+  while read -r mlx; do
+    [[ -n "$mlx" ]] || continue
+    capture -t 30 "deep/mstflint-${mlx//:/_}.txt" mstflint -d "$mlx" q
+  done < <(awk '/Mellanox|ConnectX/{print $1}' "$RAW_DIR/lspci.txt" 2>/dev/null | head -8)
+
+  # ---- 机框 / 背板（SES）----
+  # 盘位、风扇、温度、电源在背板上的状态。存储机上这份最值钱。
+  local ses
+  while read -r ses; do
+    [[ -n "$ses" ]] || continue
+    capture -t 30 "deep/sg_ses-$(basename "$ses").txt" sg_ses -p es "$ses"
+  done < <(lsscsi -g 2>/dev/null | awk '/enclosu/{print $NF}' | head -8)
+
+  # ---- NVMe 厂商扩展 SMART 页 ----
+  # nvme-cli 自带各厂商插件，厂商专有的健康度/寿命字段是**白捡的**，
+  # 不需要任何闭源工具。认不了这块盘的插件会直接报错，capture 记下来就行。
+  local item key dev dtype vend
+  for item in "${SMART_TARGETS[@]:-}"; do
+    [[ -n "$item" ]] || continue
+    IFS='|' read -r key dev dtype <<< "$item"
+    [[ "$key" == nvme* ]] || continue
+    for vend in intel wdc micron seagate samsung sndk; do
+      capture -t 20 "deep/nvme-${vend}-smart-${key}.txt" nvme "$vend" smart-log-add "$dev"
+    done
+  done
+
+  # ---- LLDP 邻居：这个口接在哪台交换机的哪个口 ----
+  # lldpd 是在 net_link_up_all 之后以**接收模式**拉起来的（见 lib/network.sh），
+  # 到这里已经过了整个采集阶段，足够收到一轮通告（交换机一般 30 秒发一次）。
+  capture -t 30 "deep/lldp-neighbors.txt" lldpctl
+  capture -t 30 "deep/lldp-neighbors.json" lldpctl -f json
+
   # ---- 完整的本次开机日志 ----
   capture -t 60 "deep/journal-boot.txt" journalctl -b --no-pager
 
@@ -937,6 +1104,10 @@ collect_all() {
   # 顺序有讲究：网口是 down 的时候 ethtool 报的速率/链路状态是假的
   # （插着网线也报 Unknown!/no），所以先把口拉起来再采集，最后才做连通性测试。
   net_link_up_all     # 定义在 lib/network.sh
+  # LLDP 邻居要有 daemon 在收才有。**必须排在 net_link_up_all 之后**
+  # （口是 down 的时候收不到任何通告），而且要尽早起 —— 交换机一般 30 秒
+  # 才发一次，起晚了到 collect_deep 那一步还没收到东西。
+  lldp_start          # 定义在 lib/network.sh
   collect_nic
   check_nic_speed     # 读的是 collect_nic 落下的 ethtool 输出，必须排在它后面
   net_test
@@ -949,6 +1120,9 @@ collect_all() {
   # 深度留档放在最后：它要用到前面所有阶段的结果（DISK_SMART / IPMI_OK / GPU_USABLE），
   # 而且只往 raw/ 里落数据、不产生判定，排在末尾对流程没有任何影响。
   collect_deep
+  # 计数器基线。**必须在压测开始之前取**，测后减它才是"压测逼出来的"。
+  # 三样都是内核自带的 sysfs 计数器，不依赖任何工具。
+  collect_counters "pre"
   capture "dmesg-pre.txt" dmesg -T
   # 定义在 lib/verify.sh，但故意在这里（PHASE 1 末尾）调用而不是放进 verify_all：
   # 它扫的就是上面这份 dmesg-pre，而且现场应该在开始压测之前就知道机器有没有硬伤，

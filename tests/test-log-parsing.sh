@@ -238,6 +238,78 @@ check "gpu_detect 必须在判 FAIL 之前先查一次不匹配" "yes" \
 check "不匹配那条分支判的必须是 SKIP" "yes" \
       "$(if grep -A6 'GPU_MISMATCH=1' <<<"$gd_chain" | grep -q 'ST_SKIP'; \
          then echo yes; else echo no; fi)"
+
+# ---------------------------------------------------------------- 端到端跑一遍 gpu_detect
+#
+# 上面几条验的是"零件对不对"（判读函数、分支顺序）。这一组把 gpu_detect 整个
+# 跑一遍，直接断言**最终结论**——零件都对、装起来错了的事这个项目发生过
+# （gpu_stress 那次判定函数还在、只是再没被调用过）。
+#
+# 1.7.0 特别要守这条：这一版明确决定**只带 open 内核模块**（GSP，Turing 及以后），
+# 而 open 模块遇到 Maxwell/Pascal/Volta 这些没有 GSP 的老卡时，
+# NVRM 打的就是 "not supported by open nvidia.ko"。那种情况必须判 SKIP ——
+# 那是我们这张盘的驱动分支覆盖不到，跟客户的卡好不好毫无关系。
+RAW_DIR="$TMP/gpudetect"; RUN_DIR="$TMP/gpudetect"; mkdir -p "$RAW_DIR"
+
+# ⚠️ 整个替身环境必须关在**子 shell** 里。gpu_detect 会调 ok()/info()/warn()，
+# 而本套件自己的断言助手也叫 ok() —— 在当前 shell 里把它们改成空函数，
+# 后面所有 check 就都不再计数了（§11-13：屏幕全绿、总数悄悄少一截）。
+# 第一版就是这么写的，结果整个套件从这里往下静默失效。
+# 子 shell 里改函数不会漏回来，结论用文件带出来。
+run_gpu_detect() {   # run_gpu_detect <dmesg样本> -> 结论写进 $TMP/gd.*
+  local fixture="$1"
+  (
+    # 本套件只 source 了 stress.sh / gpu.sh（故意不 source core.sh —— 它里面的
+    # ok()/info() 会把断言助手顶掉）。但 gpu_detect 要用四态常量，
+    # 而本脚本是 set -u：不补上这四个，子 shell 会在第一次 result_add 之前
+    # 就以 "unbound variable" 静默退出，表现成"结论是空的"。
+    ST_PASS="PASS"; ST_FAIL="FAIL"; ST_SKIP="SKIP"; ST_WARN="WARN"
+    INCLUDE_NVIDIA=1
+    KLB_TOOLS="$TMP/tools"; mkdir -p "$KLB_TOOLS"
+    GPU_PRESENT=0; GPU_USABLE=0; GPU_MISMATCH=0
+
+    ok() { :; }; info() { :; }; warn() { :; }; dbg() { :; }
+    metric_add() { :; }
+    modprobe() { return 0; }
+    sleep() { :; }
+    have() { [[ "$1" == "nvidia-smi" ]]; }
+    result_add() {
+      printf '%s' "$3" > "$TMP/gd.status"
+      printf '%s' "$4" > "$TMP/gd.detail"
+    }
+    # lspci 报 2 张卡；nvidia-smi 一张都认不到
+    lspci() { printf '%s\n' \
+      'c9:00.0 VGA compatible controller [0300]: NVIDIA Corporation GP102 [10de:1b06]' \
+      'ca:00.0 VGA compatible controller [0300]: NVIDIA Corporation GP102 [10de:1b06]'; }
+    nvidia-smi() { return 1; }
+    # capture 的替身：把准备好的 dmesg 放到 gpu_detect 要读的那个文件里
+    capture() {
+      local out="$1"
+      [[ "$out" == "-t" ]] && { shift 2; out="$1"; }
+      if [[ "$out" == "gpu-modprobe-error.txt" ]]; then
+        cp "$fixture" "$RAW_DIR/gpu-modprobe-error.txt"
+      else
+        : > "$RAW_DIR/$out"
+      fi
+      return 0
+    }
+
+    : > "$TMP/gd.status"; : > "$TMP/gd.detail"
+    gpu_detect >/dev/null 2>&1
+    printf '%s' "$GPU_MISMATCH" > "$TMP/gd.mismatch"
+  )
+}
+
+run_gpu_detect "$TMP/nvrm-open-unsupported.txt"
+check "两张老卡 + open 模块报不支持 -> SKIP（不是 FAIL）" "SKIP" "$(cat "$TMP/gd.status")"
+check "文案必须写明不影响整机结论" "1" \
+      "$(grep -c '不影响整机结论' "$TMP/gd.detail" || true)"
+check "而且要留下不匹配的标志，供内部报告解释" "1" "$(cat "$TMP/gd.mismatch")"
+
+# 反面：同样是一张卡都认不到，但内核日志里没有任何"不支持"的证据 ——
+# 那就是卡真的坏了 / 供电插槽有问题，必须判 FAIL，不能被上面那条放过。
+run_gpu_detect "$TMP/nvrm-dead-card.txt"
+check "认不到卡且没有不匹配证据 -> FAIL（别让坏卡混过去）" "FAIL" "$(cat "$TMP/gd.status")"
 check "不匹配的文案里不许把原因说成硬件异常" "0" \
       "$(grep -A8 'GPU_MISMATCH=1' <<<"$gd_chain" | grep -cE '故障|异常|损坏' || true)"
 
