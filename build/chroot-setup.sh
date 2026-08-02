@@ -126,6 +126,42 @@ for pat in "${FIRMWARE_PRUNE[@]}"; do
 done
 say "剪掉 $fw_pruned 项，剩 $(du -sh /lib/firmware | cut -f1) / $(find /lib/firmware -type f -o -type l | wc -l) 个文件"
 
+# ---------------------------------------------------------------- PCI / USB ID 库
+# noble 的 pciutils 里那份 pci.ids 停在 2024-03-31，两年前的库认不出新硬件：
+# H200 / RTX 50xx / ConnectX-8 / 新阵列卡在 lspci 里只会显示成 "Device 2335"。
+# 而"这台机器装了什么卡"是报告的核心信息之一 —— 网卡型号（nic_pci_model）和
+# 阵列卡型号（collect_raid）都是按总线地址从 lspci 反查的，库旧了整条链就断了。
+#
+# 新版由 build-iso.sh 在外面下载好放进 $STAGE/ids/（那边失败一律降级、不中断构建），
+# 这里只管装。没送进来就沿用镜像自带的那份。
+#
+# /usr/share/hwdata/pci.ids 是指向 misc/ 那份的符号链接（hwdata 包铺的），
+# 覆盖 misc/ 那一份两边就都是新的。
+say "=== 更新 PCI / USB ID 库 ==="
+for ids in pci.ids usb.ids; do
+  src="$STAGE/ids/$ids"
+  dst="/usr/share/misc/$ids"
+  if [[ -s "$src" ]]; then
+    old="$(awk -F'Date:[[:space:]]*' '/^#[[:space:]]*Date:/{print $2; exit}' "$dst" 2>/dev/null || true)"
+    install -m 0644 "$src" "$dst"
+    new="$(awk -F'Date:[[:space:]]*' '/^#[[:space:]]*Date:/{print $2; exit}' "$dst" 2>/dev/null || true)"
+    say "$ids: ${old:-未知} -> ${new:-未知}"
+  else
+    say "WARN: 没有送进来新的 $ids，沿用镜像自带的那份（新硬件的型号可能认不出来）"
+  fi
+done
+
+# smartmontools 的 drivedb 同理：新盘型号的 SMART 属性名要靠它解释，
+# 库旧了属性会显示成 "Unknown_Attribute"。和 pci.ids 一个道理。
+# 它自带 --update 子命令，**失败绝不能中断构建**（现场可能没有外网）。
+if command -v update-smart-drivedb >/dev/null 2>&1; then
+  if update-smart-drivedb >/dev/null 2>&1; then
+    say "smartmontools drivedb 已更新"
+  else
+    say "WARN: drivedb 更新失败（无外网？），沿用包里自带的那份"
+  fi
+fi
+
 # ---------------------------------------------------------------- 瘦身 & 关掉碍事的服务
 say "移除 snapd / 关闭 cloud-init"
 apt-get purge -y -qq snapd >/dev/null 2>&1 || true

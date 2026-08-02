@@ -149,8 +149,12 @@ FIRMWARE_PRUNE=(
                     # ⚠️ 写成 `nvidia` 会把 NVIDIA 驱动自己铺的 nvidia/595.84/ 一起删掉 ——
                     #    那是 open 内核模块必须的 GSP 固件，删了 nvidia.ko 直接加载失败，
                     #    然后被判成"显卡故障"。用 [a-z] 开头卡死：驱动那份是版本号，数字开头。
-  'amdgpu'          # 28MB
-  'radeon' 'xe'     # 老 AMD 卡 / Intel Arc，服务器上没有
+  # ⚠️ amdgpu（28MB）和 radeon（1.9MB）**1.7.0 起不再剪**。
+  #    1.5.0 把它们剪掉是按"控体积优先"定的，代价是：装了 AMD 独显的机器上
+  #    内核模块还在、固件没了 -> 显示驱动起不来 -> 屏幕点不亮 / 认不到显卡。
+  #    这一版取向反过来（兼容性优先、体积次要），所以加回来，
+  #    并且把 amdgpu 加进 check-firmware.sh 的驱动清单，以后自动受守。
+  'xe'              # Intel Arc 独显，服务器上没有
   # --- 无线 / 蓝牙：服务器没有，也不参与任何判定 ---
   'mrvl'            # 79MB，Marvell wifi/蓝牙
   'qcom'            # 61MB，高通 SoC

@@ -346,6 +346,36 @@ if [[ -d "$PROJ_DIR/vendor" ]]; then
   rsync -a --exclude='README.md' "$PROJ_DIR/vendor/" "$STAGE/vendor/"
 fi
 
+# ---------------------------------------------------------------- PCI / USB ID 库
+# noble 的 pciutils 里那份 pci.ids 停在 2024-03-31。两年前的库认不出新硬件：
+# H200 / RTX 50xx / ConnectX-8 / 新阵列卡在 lspci 里会显示成 "Device 2335"。
+# 而"这台机器装了什么卡"是报告的核心信息之一 —— 网卡型号、阵列卡型号都是从
+# lspci 按总线地址反查的，认不出来整条链就断了。
+#
+# 在**外面**下载而不是在 chroot 里：外面这层已经 require_cmds curl 了，
+# 而 chroot 里有没有 curl/wget 不一定；更要紧的是失败处理 ——
+# **下载失败绝不能让构建失败**，现场可能根本没有外网。拿不到就用镜像自带那份，
+# 只是认不出最新的卡而已，不影响任何判定。
+mkdir -p "$STAGE/ids"
+for spec in "pci.ids|https://pci-ids.ucw.cz/v2.2/pci.ids" \
+            "usb.ids|http://www.linux-usb.org/usb.ids"; do
+  ids_name="${spec%%|*}"; ids_url="${spec#*|}"
+  ids_cache="$CACHE_DIR/$ids_name"
+  # -z：本地那份比服务器上的新就不重下。--max-time 60：网络不通时不要卡住构建。
+  if curl -fsSL --max-time 60 --retry 2 -z "$ids_cache" -o "$ids_cache.new" "$ids_url" \
+     && [[ -s "$ids_cache.new" ]]; then
+    mv -f "$ids_cache.new" "$ids_cache"
+  fi
+  rm -f "$ids_cache.new"
+  if [[ -s "$ids_cache" ]]; then
+    install -m 0644 "$ids_cache" "$STAGE/ids/$ids_name"
+    ids_date="$(awk -F'Date:[[:space:]]*' '/^#[[:space:]]*Date:/{print $2; exit}' "$ids_cache")"
+    log "$ids_name: ${ids_date:-日期未知}"
+  else
+    warn "$ids_name 拿不到（无外网？），沿用镜像自带的那份 —— 新硬件的型号可能认不出来"
+  fi
+done
+
 chroot_mount "$ROOTFS_DIR"
 if ! in_chroot "$ROOTFS_DIR" /bin/bash /tmp/klburn-stage/chroot-setup.sh; then
   die "chroot 定制失败，详见上方输出"

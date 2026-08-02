@@ -23,12 +23,24 @@ GPU_BURN_REPO="https://github.com/wilicc/gpu-burn.git"
 COMPUTE="${COMPUTE:-75}"
 
 # cuBLAS 静态库里要保留哪几代卡的 cubin。裁掉其余的能省一大半体积。
+#   75  = Turing   T4 / RTX 20 系 / Quadro RTX
 #   80  = Ampere   A100
-#   86  = Ampere   A10 / A6000
+#   86  = Ampere   A10 / A6000 / RTX 30 系
 #   89  = Ada      RTX 4090 / L20 / L40S
 #   90  = Hopper   H100 / H200
 #   120 = Blackwell RTX 5090 / RTX PRO 6000
-GPU_ARCHS="${GPU_ARCHS:-80 86 89 90 120}"
+#
+# ⚠️ **少一代就是那一代的卡跑不了压测**，而且表现得像显卡故障。
+# PTX JIT 只能向**新**架构兼容（COMPUTE=75 的 PTX 能在 Ampere 上 JIT 出来），
+# 补不回旧架构 —— 真正的算力负载来自 cuBLAS 里的**预编译 cubin**，
+# 那张卡的 cubin 被 nvprune 裁掉了就是没有，运行时 cuBLAS 直接报无可用核，
+# gpu_burn 非零退出 -> gpu_stress 判 FAIL「gpu_burn 异常退出」-> 好卡判成坏卡。
+#
+# 1.7.0 补上 75：T4 是服务器上最常见的推理卡之一，之前一直不在列表里。
+# 70（V100 / Volta）没加 —— 见 chroot-setup.sh 里 -M=open 那段：
+# open 内核模块要 GSP，而 Volta 及更早的卡没有 GSP，驱动本来就起不来，
+# 加了 sm_70 的 cubin 也没有卡能跑到那一步，白占体积。
+GPU_ARCHS="${GPU_ARCHS:-75 80 86 89 90 120}"
 
 info() { printf '\033[36m[gpu-burn]\033[0m %s\n' "$*"; }
 warn() { printf '\033[33m[gpu-burn] 警告\033[0m %s\n' "$*"; }
@@ -104,16 +116,75 @@ done
 info "裁剪 cuBLAS 静态库（保留 sm_${GPU_ARCHS// /, sm_}）..."
 mkdir -p "$TMP_DIR"
 NVPRUNE="$CUDAPATH/bin/nvprune"
-ARCH_ARGS=()
-for a in $GPU_ARCHS; do ARCH_ARGS+=("--arch=sm_$a"); done
 
+# ⚠️⚠️ **必须用 -gencode，绝对不能用重复的 --arch。**
+#
+# nvprune 的 `--arch` 重复写**不叠加，最后一个赢**。实测（CUDA 12.8，
+# libcublas_static.a 178,727,190 字节）：
+#
+#     --arch=sm_75                 -> 71,072,022
+#     --arch=sm_90                 -> 82,703,390
+#     --arch=sm_75 --arch=sm_90    -> 82,703,390   <- 和只留 sm_90 一模一样
+#     --arch=sm_90 --arch=sm_75    -> 71,072,022   <- 和只留 sm_75 一模一样
+#     -gencode ...75 -gencode ...90-> 83,980,894   <- 这才是两代都留
+#
+# nvprune 自己的 --help 也是这么写的：`--generate-code ... provides a way to
+# specify **multiple** architectures which should remain`。
+#
+# 1.6.0 及以前用的就是重复 --arch，也就是说**盘里的 gpu_burn 只带了列表里
+# 最后那一代（sm_120 / Blackwell）的 cubin**。后果不是"跑得慢"，是：
+# H200 / 4090 / A100 / 3060 上 cuBLAS 找不到可用核 -> gpu_burn 非零退出 ->
+# gpu_stress 判 FAIL「gpu_burn 异常退出」-> **一张好卡被判成坏卡**。
+# 这条一直没被发现，因为至今没有一次构建在真显卡上跑过。
+GENCODE_ARGS=()
+for a in $GPU_ARCHS; do
+  GENCODE_ARGS+=(--generate-code "arch=compute_$a,code=sm_$a")
+done
+
+# 只留某一代时的体积，用来给下面那条自检当基准
+prune_size_one() {   # prune_size_one <库> <arch> -> 字节数（失败给空）
+  # ⚠️ 分成两条 local：同一条 local 里后一个变量看不到前一个刚赋的值
+  #    （bash 在调用 local 之前就把参数全展开完了），写成一行的话 $arch 是空的，
+  #    而本脚本是 set -u —— 直接 "arch: unbound variable" 整个构建停下。
+  #    docs/architecture.md §11-8，这里第一次写就踩了。
+  local lib="$1" arch="$2"
+  local out="$TMP_DIR/.probe-$arch.a"
+  "$NVPRUNE" --arch="sm_$arch" "$lib" -o "$out" 2>/dev/null || { rm -f "$out"; return 0; }
+  stat -c %s "$out" 2>/dev/null
+  rm -f "$out"
+}
+
+read -r -a ARCH_LIST <<< "$GPU_ARCHS"
 LINK_L="$TMP_DIR"
 for a in libcublas_static.a libcublasLt_static.a; do
   [[ -f "$CUDA_LIB/$a" ]] || die "缺少 $CUDA_LIB/$a（需要 libcublas-dev 包）"
-  if [[ -x "$NVPRUNE" ]] && "$NVPRUNE" "${ARCH_ARGS[@]}" "$CUDA_LIB/$a" -o "$TMP_DIR/$a" 2>/dev/null; then
+  if [[ -x "$NVPRUNE" ]] \
+     && "$NVPRUNE" "${GENCODE_ARGS[@]}" "$CUDA_LIB/$a" -o "$TMP_DIR/$a" 2>/dev/null; then
     printf '    %-24s %5d MB -> %4d MB\n' "$a" \
       "$(( $(stat -c %s "$CUDA_LIB/$a") / 1048576 ))" \
       "$(( $(stat -c %s "$TMP_DIR/$a") / 1048576 ))"
+
+    # ---- 自检：多代真的都留下来了吗 ----
+    # 没有 cuobjdump 可用（CUDA 的 runfile/apt 包不一定装它），所以用体积对比：
+    # 只留头一代、只留最后一代，各裁一次；多代裁出来的结果必须**严格大于**
+    # 这两个。要是哪天 nvprune 的参数语义又变了、退回到"只留一代"，
+    # 这条会当场跑红，而不是等到现场把好卡判成坏卡。
+    if (( ${#ARCH_LIST[@]} > 1 )); then
+      s_multi="$(stat -c %s "$TMP_DIR/$a")"
+      s_first="$(prune_size_one "$CUDA_LIB/$a" "${ARCH_LIST[0]}")"
+      s_last="$(prune_size_one  "$CUDA_LIB/$a" "${ARCH_LIST[-1]}")"
+      s_max=0
+      for s in "$s_first" "$s_last"; do
+        [[ "$s" =~ ^[0-9]+$ ]] && (( s > s_max )) && s_max="$s"
+      done
+      if (( s_max > 0 )) && (( s_multi <= s_max )); then
+        die "裁剪结果（$s_multi 字节）不比只留单独一代（$s_max 字节）大 ——
+     说明 nvprune 只保留了一代 cubin。这样出盘的话，除了那一代之外的所有卡
+     都会在 cuBLAS 里找不到可用核，gpu_burn 非零退出，然后被判成显卡故障。
+     检查上面 GENCODE_ARGS 那段：**不能**用重复的 --arch，必须用 -gencode。"
+      fi
+      printf '      自检: 多代 %d 字节 > 单代上限 %d 字节，OK\n' "$s_multi" "$s_max"
+    fi
   else
     warn "$a 裁剪失败，原样使用（二进制会大不少）"
     cp "$CUDA_LIB/$a" "$TMP_DIR/$a"

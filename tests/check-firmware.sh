@@ -70,8 +70,9 @@ FWDIR="$ROOTFS/lib/firmware"
 # ================================================================
 # 关键驱动清单
 # ================================================================
-# 只列**服务器上真会插的东西**：网卡、FC HBA、阵列卡 / HBA。
-# 显卡不在这里 —— NVIDIA 走 vendor/ 里的闭源驱动，固件是驱动自带的。
+# 只列**服务器上真会插的东西**：网卡、FC HBA、阵列卡 / HBA、板载与独立显示。
+# NVIDIA 不在这里 —— 它走 vendor/ 里的闭源驱动，GSP 固件是驱动自己铺的
+# （chroot-setup.sh 里另有一条断言盯着那份）。
 #
 # 不需要固件的驱动留在表里是**故意的**：这样"某天内核升级后它开始需要固件了"
 # 会当场跑红，而不是等到现场发现少了一块网卡。
@@ -97,6 +98,14 @@ DRIVERS=(
   bfa        # Brocade
   # ---- 阵列卡 / HBA ----
   megaraid_sas mpt3sas mpi3mr smartpqi aacraid hpsa
+  # ---- 显示 ----
+  # 1.7.0 加进来的。1.5.0 曾经把 amdgpu / radeon 的固件剪掉，模块还在、固件没了 ——
+  # 装了 AMD 独显的机器上显示驱动起不来，屏幕点不亮，而且不会有任何报错。
+  # 现在固件加回来了，顺手让这条对账替我们盯着，别再被"控体积"顺手剪掉一次。
+  #
+  # ast（AST2400/2500/2600）和 mgag200 是服务器上最常见的板载显示芯片，
+  # 两个都**不需要固件**（modinfo 报 0 项）—— 列在这里正是为了万一哪天要了能发现。
+  amdgpu radeon ast mgag200
 )
 
 # ================================================================
@@ -181,6 +190,47 @@ for d in intel-ucode amd-ucode; do
     ok "CPU 微码 $d 在（$(find "$FWDIR/$d" -type f | wc -l) 个文件）"
   else
     bad "CPU 微码 $d 缺失"
+  fi
+done
+
+# ================================================================
+# 4. PCI / USB ID 库不能太旧
+# ================================================================
+# 库旧了不会有任何报错，只是新卡在 lspci 里显示成 "Device 2335" ——
+# 而网卡型号（nic_pci_model）和阵列卡型号（collect_raid）都是按总线地址从
+# lspci 反查的，库一旧整条链就断了，报告上"这台机器装了什么卡"直接失真。
+#
+# 卡"两年"这条线：pci.ids 每周都在更新，落后两年意味着中间整整两代新硬件
+# 都认不出来。noble 自带的那份就停在 2024-03-31，构建时不覆盖的话必然跑红。
+#
+# 比的是**本机今天的日期**，不是 ISO 里记的构建日期 —— 后者是这次构建自己写的，
+# 拿它当基准等于自己给自己打分。
+ids_age_days() {          # ids_age_days <文件> -> 距今天多少天；读不出来给空
+  local f="$1" d
+  d="$(awk -F'Date:[[:space:]]*' '/^#[[:space:]]*Date:/{print $2; exit}' "$f" 2>/dev/null)"
+  [[ -n "$d" ]] || return 0
+  local epoch; epoch="$(date -d "$d" +%s 2>/dev/null)" || return 0
+  printf '%s' $(( ( $(date +%s) - epoch ) / 86400 ))
+}
+for ids in pci.ids usb.ids; do
+  f="$ROOTFS/usr/share/misc/$ids"
+  if [[ ! -f "$f" ]]; then
+    bad "$ids 在盘里根本不存在（lspci 会连厂商名都报不出来）"
+    continue
+  fi
+  age="$(ids_age_days "$f")"
+  if [[ -z "$age" ]]; then
+    # usb.ids 的头里不一定有 Date: 行，取不到就只确认它非空，不硬判
+    if [[ -s "$f" ]]; then
+      ok "$ids 在盘里（头部没有日期行，只确认非空）"
+    else
+      bad "$ids 是空文件"
+    fi
+  elif (( age <= 730 )); then
+    ok "$ids 的日期距今 $age 天（不到两年）"
+  else
+    bad "$ids 的日期距今 $age 天（超过两年）—— 新卡会显示成 Device xxxx，
+       报告里的网卡/阵列卡型号会失真。构建时是不是没能下载新版？"
   fi
 done
 
