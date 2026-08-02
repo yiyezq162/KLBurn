@@ -214,9 +214,16 @@ panel_palette() {
   local on="${1:-0}"
   PC=(
     [frame]="" [rst]="" [hdr]="" [ok]="" [warn]="" [bad]="" [dim]="" [none]=""
+    [eol]=""
   )
   (( on )) || return 0
   [[ -n "${C_RST:-}" ]] || return 0      # 不是 tty（core.sh 已经把 C_* 置空）
+  # 每行末尾抹到行尾。**去掉整屏清空之后这条是必须的**：
+  # 面板只有 80~120 列，而上一屏（开机日志）可能是 160 列的 ——
+  # 原地覆盖只盖得住前 120 列，右边那截尾巴会一直留在屏幕上。
+  # e2e 截图里看得清清楚楚：面板右边挂着一串上一屏的 === 碎片。
+  # 和颜色一样受 PANEL_COLOR 管：生成给文件的那份不能带任何转义码。
+  PC[eol]=$'\033[K'
   PC[frame]="$C_CYN"; PC[rst]="$C_RST"
   PC[hdr]="$C_BLD$C_CYN"
   PC[ok]="$C_GRN"; PC[warn]="$C_YEL"; PC[bad]="$C_RED$C_BLD"; PC[dim]="$C_GRY"
@@ -224,12 +231,12 @@ panel_palette() {
 panel_palette "$PANEL_COLOR"
 
 box_rule() {
-  printf '%s+%s+%s\n' "${PC[frame]}" \
-    "$(printf '%*s' "$(( ${1:-80} - 2 ))" '' | tr ' ' '=')" "${PC[rst]}"
+  printf '%s+%s+%s%s\n' "${PC[frame]}" \
+    "$(printf '%*s' "$(( ${1:-80} - 2 ))" '' | tr ' ' '=')" "${PC[rst]}" "${PC[eol]}"
 }
 box_sep() {
-  printf '%s+%s+%s\n' "${PC[frame]}" \
-    "$(printf '%*s' "$(( ${1:-80} - 2 ))" '' | tr ' ' '-')" "${PC[rst]}"
+  printf '%s+%s+%s%s\n' "${PC[frame]}" \
+    "$(printf '%*s' "$(( ${1:-80} - 2 ))" '' | tr ' ' '-')" "${PC[rst]}" "${PC[eol]}"
 }
 
 # box_row <宽> <内容> [颜色名]
@@ -239,9 +246,9 @@ box_row() {
   s="$(ascii_clean "${2:-}")"
   # 先按纯文本补齐/截断到精确宽度，再包颜色 —— 顺序反了就会错位
   printf -v pad '%-*.*s' "$inner" "$inner" "$s"
-  printf '%s|%s%s%s%s%s|%s\n' \
+  printf '%s|%s%s%s%s%s|%s%s\n' \
     "${PC[frame]}" "${PC[rst]}" "${PC[${3:-none}]-}" "$pad" \
-    "${PC[rst]}" "${PC[frame]}" "${PC[rst]}"
+    "${PC[rst]}" "${PC[frame]}" "${PC[rst]}" "${PC[eol]}"
 }
 
 # box_row3 <宽> <左> <中> <右>  —— 抬头那一行：左中右三段各就各位
@@ -252,9 +259,9 @@ box_row3() {
   line="$(str_put "$line" 2 "$l")"
   line="$(str_put "$line" $(( (inner - ${#c}) / 2 )) "$c")"
   line="$(str_put "$line" $(( inner - ${#r} - 2 )) "$r")"
-  printf '%s|%s%s%s%s%s|%s\n' \
+  printf '%s|%s%s%s%s%s|%s%s\n' \
     "${PC[frame]}" "${PC[rst]}" "${PC[hdr]}" "$line" \
-    "${PC[rst]}" "${PC[frame]}" "${PC[rst]}"
+    "${PC[rst]}" "${PC[frame]}" "${PC[rst]}" "${PC[eol]}"
 }
 
 # 整屏重绘的头尾。用裸转义而不是 clear(1)：clear 要 fork、要 terminfo，

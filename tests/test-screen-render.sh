@@ -412,7 +412,9 @@ echo "=== 上色不许动到版面 ==="
 #
 # 下面这条是整组的核心：**把颜色码去掉之后，必须和不上色时一字不差。**
 # 有它在，"上色"就不可能悄悄改掉版面。
-strip_ansi() { LC_ALL=C sed -E 's/\x1b\[[0-9;]*m//g'; }
+# 不能只剥 SGR（m 结尾）—— 行末还有 ESC[K（抹到行尾），
+# 只剥颜色的话下面那条"去掉转义码 == 不上色"会漏掉它，等于没验。
+strip_ansi() { LC_ALL=C sed -E 's/\x1b\[[0-9;]*[A-Za-z]//g'; }
 
 # 测试里 stdout 不是 tty，core.sh 会把 C_* 置空 —— 那样上不上色都一样，
 # 这组断言就成了摆设。所以这里显式塞一组颜色进去再打开调色板。
@@ -480,6 +482,11 @@ check "重绘只回原点，不清屏（ESC[2J 会造成可见的空白帧）" "
       "$(declare -f screen_home | grep -c '2J' || true)"
 check "每帧末尾要抹掉上一帧残留的部分（ESC[J）" "1" \
       "$(declare -f screen_end | grep -c '\[J' || true)"
+# 面板只有 80~120 列，而上一屏（开机日志）可能是 160 列的 —— 原地覆盖只盖得住
+# 前 120 列，右边那截尾巴会一直挂在屏幕上（e2e 截图里看得清清楚楚）。
+# 所以每行末尾还要 ESC[K 抹到行尾。
+check "每行末尾要抹到行尾（ESC[K），否则右边挂着上一屏的残留" "yes" \
+      "$(if [[ "$(PANEL_COLOR=1; panel_palette 1; printf '%s' "${PC[eol]}")" == *'[K'* ]]; then echo yes; else echo no; fi)"
 for f in dash_burn dash_disk config_review; do
   check "$f 画完要调 screen_end" "1" "$(declare -f "$f" | grep -c 'screen_end' || true)"
 done
