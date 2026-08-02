@@ -98,14 +98,25 @@ DRIVERS=(
   bfa        # Brocade
   # ---- 阵列卡 / HBA ----
   megaraid_sas mpt3sas mpi3mr smartpqi aacraid hpsa
-  # ---- 显示 ----
-  # 1.7.0 加进来的。1.5.0 曾经把 amdgpu / radeon 的固件剪掉，模块还在、固件没了 ——
-  # 装了 AMD 独显的机器上显示驱动起不来，屏幕点不亮，而且不会有任何报错。
-  # 现在固件加回来了，顺手让这条对账替我们盯着，别再被"控体积"顺手剪掉一次。
-  #
-  # ast（AST2400/2500/2600）和 mgag200 是服务器上最常见的板载显示芯片，
-  # 两个都**不需要固件**（modinfo 报 0 项）—— 列在这里正是为了万一哪天要了能发现。
-  amdgpu radeon ast mgag200
+)
+
+# ⚠️ **显示驱动不能放进上面那张表。**
+#
+# 上面那套"MODULE_FIRMWARE 声明了什么，盘里就得有什么"对网卡/HBA 成立
+# （实测 852 项里网卡一个不缺），对显卡**不成立**：amdgpu 声明了 584 个固件，
+# 而 Ubuntu 的 linux-firmware 本来就只发其中 574 个 —— 少的那 10 个
+# （ip_discovery.bin / *_cap.bin / *_mes.bin）要么是从显存里读的、要么上游没发。
+# ast 的 ast_dp501_fw.bin 同理，Debian/Ubuntu 从来不发。
+#
+# 拿声明当账本去对，只会得到 3 条永远红着的假警报，然后逼着人把守卫关掉。
+#
+# 我们真正要守的不是"声明的都在"，而是**"我们的剪裁没有把本来有的剪掉"**
+# （1.5.0 就是这么把 amdgpu 整个目录剪没的：模块还在、固件没了，
+#  装了 AMD 独显的机器屏幕点不亮，而且全程零报错）。
+# 所以显示驱动改成查**目录在不在、文件数够不够**。
+FW_DIRS_MUST_EXIST=(
+  "amdgpu|400"    # AMD 独显（Ubuntu 发 570+ 个文件，卡在 400 留足上游增删的余量）
+  "radeon|100"    # 老 AMD 卡
 )
 
 # ================================================================
@@ -174,6 +185,33 @@ if (( total_miss == 0 )); then
 else
   bad "总账：共需要 $total_need 个固件，缺 $total_miss 个（涉及 ${miss_drivers[*]}）"
 fi
+
+# 显示驱动：查目录在不在、文件数够不够（理由见上面 FW_DIRS_MUST_EXIST 那段）
+for entry in "${FW_DIRS_MUST_EXIST[@]}"; do
+  d="${entry%%|*}"; want="${entry#*|}"
+  n="$(find "$FWDIR/$d" -type f -o -type l 2>/dev/null | grep -c . || true)"
+  [[ "$n" =~ ^[0-9]+$ ]] || n=0
+  if (( n >= want )); then
+    ok "$d 固件目录在（$n 个文件，下限 $want）"
+  else
+    bad "$d 固件目录只有 $n 个文件（下限 $want）—— 是不是又被 FIRMWARE_PRUNE 剪了？
+       模块还在、固件没了的表现是：装了这类显卡的机器屏幕点不亮，而且全程零报错。"
+  fi
+done
+
+# 板载显示芯片：ast（AST2400/2500/2600）和 mgag200 是服务器上最常见的两个，
+# 现在**都不需要固件**。列在这里是为了万一哪天内核改成要固件了能当场发现 ——
+# 那时候这两条会从"0 项"变成"缺 N 项"。
+for drv in ast mgag200; do
+  ko="$(find "$KDIR" -name "$drv.ko" -o -name "$drv.ko.*" 2>/dev/null | head -1)"
+  if [[ -z "$ko" ]]; then
+    bad "$drv：内核里没有这个模块（板载显示会点不亮）"
+    continue
+  fi
+  # ast 声明了 ast_dp501_fw.bin，但那是 DP501 转接芯片专用、Ubuntu 从来不发，
+  # 绝大多数服务器用不到。所以只确认模块在，不对账它声明的固件。
+  ok "$drv：板载显示模块在（不对账其声明的固件，Ubuntu 不发那几个）"
+done
 
 # 需要固件的驱动数不能是 0 —— 那说明 modinfo 没真跑起来（比如 .ko.zst 读不了），
 # 于是每个驱动都"需要 0 个、缺 0 个"，一路全绿。这正是本项目最恨的那种绿。
