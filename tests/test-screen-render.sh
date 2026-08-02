@@ -459,6 +459,34 @@ check "config_review 落盘那份要先把颜色关掉再生成" "yes" \
 
 panel_palette 0
 
+# ---- 抬头三段不许重复（截图看出来的）----
+# 第一版把 label 同时当中间段和右边段用，屏幕上就成了
+#   KLBurn v1.7.2      BURN-IN  BURN-IN        BURN-IN
+# 三处重复。列宽和字符集都是对的，单元测试全绿 —— 这种"字对了、意思重了"
+# 的问题只有看截图才发现。现在右边放的是**档位**。
+check "仪表盘抬头的右段放的是档位，不是阶段名" "yes" \
+      "$(if declare -f progress_bar_concurrent | grep -q 'DURATION_PROFILE'; then echo yes; else echo no; fi)"
+check "硬盘那屏同理" "yes" \
+      "$(if declare -f run_disk_with_dashboard | grep -q 'DURATION_PROFILE'; then echo yes; else echo no; fi)"
+HDR3="$(box_row3 80 'KLBurn v9.9.9' 'BURN-IN  CPU + MEMORY' 'QUICK')"
+check "抬头里同一个词不许出现两次" "1" \
+      "$(printf '%s\n' "$HDR3" | grep -o 'BURN-IN' | grep -c . || true)"
+
+# ---- 屏幕上一个中文都不许有：报告生成器也算屏幕输出 ----
+# 那两个 python 生成器的 stdout 是 tee 到控制台的，它们原来打的是
+#   内部工程报告已生成: ...
+# 在 Linux 文本控制台上就是一行 ◆◆◆◆（e2e 截图里逮到的）。
+# 屏幕全英文这条规矩管的是"所有会打到屏幕上的东西"，不只是 shell 那部分。
+RPT="$ROOT/rootfs/opt/klburn/report"
+check "generate_report.py 不许往屏幕上打中文" "0" \
+      "$(grep -o 'print(\"[^\"]*\"' "$RPT/generate_report.py" | LC_ALL=C grep -c '[^ -~]' || true)"
+check "generate_internal.py 不许往屏幕上打中文" "0" \
+      "$(grep -o 'print(\"[^\"]*\"' "$RPT/generate_internal.py" | LC_ALL=C grep -c '[^ -~]' || true)"
+
+# ---- 收尾那张逐项结果要上色（二十几行状态，黑白的话得逐行找 FAIL）----
+check "逐项结果列表按状态上色" "yes" \
+      "$(if grep -q 'jq -r --arg p "\$C_GRN"' "$FT"; then echo yes; else echo no; fi)"
+
 # 自检：断言到底有没有在计数。
 # core.sh 里也有一个 ok()，被测的 lib 一旦在断言助手**之后**被 source，
 # 它就会把测试自己的 ok() 顶掉 —— 屏幕上一行行打勾、PASS 一个都不加，

@@ -1691,10 +1691,10 @@ def main():
         return 0
 
     if not a.run_dir:
-        print("要么给 --run-dir，要么给 --classify", file=sys.stderr)
+        print("need either --run-dir or --classify", file=sys.stderr)
         return 2
     if not os.path.isdir(a.run_dir):
-        print("run-dir 不存在: %s" % a.run_dir, file=sys.stderr)
+        print("run-dir does not exist: %s" % a.run_dir, file=sys.stderr)
         return 1
 
     d = Internal(a.run_dir)
@@ -1710,14 +1710,14 @@ def main():
         doc = build_internal_html(d)
     except Exception as e:      # 内部报告失败绝不能影响已经生成好的客户报告
         import traceback
-        print("内部工程报告生成失败: %s" % e, file=sys.stderr)
+        print("Internal report generator failed: %s" % e, file=sys.stderr)
         traceback.print_exc()
         return 1
 
     with open(out, "w", encoding="utf-8") as f:
         f.write(doc)
 
-    print("内部工程报告已生成: %s (%.1f KB)" % (out, os.path.getsize(out) / 1024.0))
+    print("Internal engineering report written: %s (%.1f KB)" % (out, os.path.getsize(out) / 1024.0))
     return 0
 
 

@@ -1127,7 +1127,7 @@ def main():
     a = ap.parse_args()
 
     if not os.path.isdir(a.run_dir):
-        print("run-dir 不存在: %s" % a.run_dir, file=sys.stderr)
+        print("run-dir does not exist: %s" % a.run_dir, file=sys.stderr)
         return 1
 
     data = Data(a.run_dir)
@@ -1137,14 +1137,14 @@ def main():
         doc = build_html(data)
     except Exception as e:  # 报告生成失败绝不能吞掉原始数据
         import traceback
-        print("报告生成失败: %s" % e, file=sys.stderr)
+        print("Report generator failed: %s" % e, file=sys.stderr)
         traceback.print_exc()
         return 1
 
     with open(out, "w", encoding="utf-8") as f:
         f.write(doc)
 
-    print("报告已生成: %s (%.1f KB)" % (out, os.path.getsize(out) / 1024.0))
+    print("Report written: %s (%.1f KB)" % (out, os.path.getsize(out) / 1024.0))
     return 0
 
 

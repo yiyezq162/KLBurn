@@ -882,12 +882,17 @@ progress_bar_concurrent() {
     done
     now=$(date +%s); elapsed=$(( now - start ))
 
-    dash_burn "$w" "$label" "BURN-IN  $label" "$elapsed" "$total"
+    # 抬头三段各有各的内容，别把同一个串塞进两处：
+    #   左  KLBurn v1.7.x      中  BURN-IN  CPU + MEMORY + GPU      右  QUICK
+    # 右边是**档位**（select_duration 定的），不是阶段名 —— 第一版把 label
+    # 同时当中间和右边用，屏幕上就成了 "BURN-IN  BURN-IN ... BURN-IN"。
+    # 单元测试查列宽和字符集，查不出这种"字对了、意思重了"的问题，是截图看出来的。
+    dash_burn "$w" "${DURATION_PROFILE:-}" "BURN-IN  $label" "$elapsed" "$total"
 
     (( alive == 0 )) && break
     sleep 2
   done
-  dash_burn "$w" "$label" "BURN-IN  $label" "$total" "$total"
+  dash_burn "$w" "${DURATION_PROFILE:-}" "BURN-IN  $label" "$total" "$total"
 }
 
 # run_disk_with_dashboard <pid> <总秒数> <标签>
@@ -898,10 +903,10 @@ run_disk_with_dashboard() {
   disk_io_rates >/dev/null 2>&1 || true      # 打基准，第一屏才有速率
   while kill -0 "$pid" 2>/dev/null; do
     now=$(date +%s); elapsed=$(( now - start ))
-    dash_disk "$w" "$label" "DISK STRESS  $label" "$elapsed" "$total"
+    dash_disk "$w" "${DURATION_PROFILE:-}" "DISK STRESS  $label" "$elapsed" "$total"
     sleep 2
   done
-  dash_disk "$w" "$label" "DISK STRESS  $label" "$total" "$total"
+  dash_disk "$w" "${DURATION_PROFILE:-}" "DISK STRESS  $label" "$total" "$total"
   wait "$pid"
   return $?
 }

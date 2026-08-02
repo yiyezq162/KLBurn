@@ -243,7 +243,9 @@ if (( gpu_will_run )); then
   ( gpu_stress "$GPU_SECS" ) & BURN_PIDS+=("$!")
 fi
 
-progress_bar_concurrent "$DURATION_SECONDS" "BURN-IN" "${BURN_PIDS[@]}"
+# 传的是"这一轮在压什么"（CPU + MEMORY + GPU），不是阶段名 ——
+# 阶段名由 dash_burn 自己加，右上角放的是档位。
+progress_bar_concurrent "$DURATION_SECONDS" "$burn_label" "${BURN_PIDS[@]}"
 wait "${BURN_PIDS[@]}" 2>/dev/null || true
 
 # ---------------------------------------------------------------- 压测：硬盘（单独跑，不并发）
@@ -405,9 +407,15 @@ else
 fi
 hr
 printf '\n'
+# 二十几行状态，黑白一片时要逐行读才找得到那条 FAIL。上色之后一眼就跳出来。
+# 颜色码交给 jq 拼进去（--arg 传进去的是 core.sh 那几个变量，
+# 不是 tty 的时候它们是空串，输出自动退回纯文本）。
 printf '  Per-item results:\n'
-jq -r '"    " + (.status | if . == "PASS" then "[PASS]" elif . == "FAIL" then "[FAIL]"
-        elif . == "SKIP" then "[SKIP]" else "[WARN]" end) + " " + .id' \
+jq -r --arg p "$C_GRN" --arg f "$C_RED$C_BLD" --arg w "$C_YEL" --arg s "$C_GRY" --arg r "$C_RST" \
+   '"    " + (if   .status == "PASS" then $p + "[PASS]" + $r
+              elif .status == "FAIL" then $f + "[FAIL]" + $r
+              elif .status == "SKIP" then $s + "[SKIP]" + $r
+              else                        $w + "[WARN]" + $r end) + " " + .id' \
    "$RUN_DIR/results.jsonl" 2>/dev/null || true
 printf '\n'
 
