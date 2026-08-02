@@ -57,6 +57,21 @@ def E(s):
     return html.escape(str(s))
 
 
+# 判定文案里用 **这样** 标重点，是给写代码的人看的记号（源码里一眼看得到
+# 哪句是关键）。以前它一路原样进 HTML —— 客户看到的是
+#     这是测试环境的容量限制，**不是内存故障** ——
+# 字面的星号。那句话恰恰是最该让人看清的一句，结果被两串星号糟蹋了。
+#
+# 在**转义之后**做替换：html.escape 不碰星号，所以先转义再换标签是安全的，
+# 反过来（先换标签再转义）会把 <b> 自己也转义掉。
+_EMPH = re.compile(r"\*\*(.+?)\*\*", re.S)
+
+
+def E_rich(s):
+    """给判定文案用的转义：和 E() 一样安全，另外把 **重点** 渲染成粗体。"""
+    return _EMPH.sub(r"<b>\1</b>", E(s))
+
+
 BOGUS = {
     "to be filled by o.e.m.", "not specified", "default string", "none",
     "unknown", "n/a", "no dimm", "not present", "empty", "o.e.m.",
@@ -866,7 +881,7 @@ def build_html(data):
         A('<div class="notice notice-warn"><b>以下 %d 项为告警，不影响总体结论，'
           "但建议出货前确认：</b><ul style=\"margin:6px 0 0;padding-left:22px\">" % len(warn_items))
         for r in warn_items:
-            A("<li>%s：%s</li>" % (E(r.get("name")), E(r.get("detail"))))
+            A("<li>%s：%s</li>" % (E(r.get("name")), E_rich(r.get("detail"))))
         A("</ul></div>")
 
     if str(meta.get("clock_suspect")) == "1":
@@ -981,7 +996,7 @@ def build_html(data):
         A('<div class="result-row r-%s">' % st)
         A('<span class="badge b-%s">%s</span>' % (st, st))
         A('<span class="rn">%s</span>' % E(r.get("name")))
-        A('<span class="rd">%s</span>' % E(r.get("detail")))
+        A('<span class="rd">%s</span>' % E_rich(r.get("detail")))
         A("</div>")
 
     # 判定阈值从 meta.json 取实际生效的值——现场可以在 klburn.conf 里覆盖，

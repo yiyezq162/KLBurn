@@ -103,10 +103,13 @@ cat > "$RD/metrics.jsonl" <<'EOF'
 EOF
 
 # sys_metrics.csv：带 0.9.0 新增的 cpu_pkg_temps 列（两颗，温差 22°C）
+# ecc_ce / ecc_ue 是 1.7.1 加的两列（末尾）。这里让 CE 从第 7 个采样点开始涨 ——
+# 「烤热之后才开始涨」和「一上来就涨」含义完全不同，那条曲线就是为了区分这个。
 {
-  echo "time,phase,cpu_temp_c,cpu_freq_mhz,load1,mem_used_mb,mem_total_mb,cpu_power_w,cpu_pkg_temps"
+  echo "time,phase,cpu_temp_c,cpu_freq_mhz,load1,mem_used_mb,mem_total_mb,cpu_power_w,cpu_pkg_temps,ecc_ce,ecc_ue"
   for i in $(seq 1 12); do
-    echo "10:$((15+i)):00,cpu,$((60+i)),2400,64.5,12000,524288,320,$((54+i));$((76+i))"
+    ce=0; (( i > 6 )) && ce=$(( (i - 6) * 3 ))
+    echo "10:$((15+i)):00,cpu,$((60+i)),2400,64.5,12000,524288,320,$((54+i));$((76+i)),${ce},0"
   done
 } > "$RD/sys_metrics.csv"
 
@@ -317,6 +320,21 @@ has "$OUT" "本轮有 2 项数据未取到"   "一条采集超时 + 一项要专
 has "$OUT" "开机阶段有 1 条硬件错误" "dmesg 里的 Machine Check"
 has "$OUT" "FINISAR"                 "光模块厂商"
 has "$OUT" "硬盘破坏性读写压测不在本轮范围内" "disk_confirmed=0"
+
+echo
+echo "=== 采了就得有人看：sys_metrics.csv 的每一列都要有去处 ==="
+# 1.7.0 加了 ecc_ce / ecc_ue 两列，却只有写入方没有读取方 —— 正是这个项目
+# 反复说的「采了没人看等于没采」，1.7.1 补上曲线。
+has "$OUT" "内存 ECC 计数随时间的变化" "ECC 那两列要真的画出来"
+has "$OUT" "什么时候开始涨"            "要说清这条曲线比前后差值多回答了什么"
+# 守卫：CSV 表头里的每一列，除了时间/阶段这种元数据，都得在报告里有人读。
+# 漏一列不会有任何报错，只会安安静静地白采。
+CSVCOLS="$(head -1 "$RD/sys_metrics.csv" | tr ',' '\n' | grep -vE '^(time|phase)$')"
+UNREAD=""
+for col in $CSVCOLS; do
+  grep -qF "\"$col\"" "$GEN" "$CUST" || UNREAD="$UNREAD $col"
+done
+check "sys_metrics.csv 的每一列都有报告生成器在读（漏了就是白采）" "" "$UNREAD"
 
 echo
 echo "=== 九节结构与导航（读的人想知道什么，就按什么顺序排）==="

@@ -20,27 +20,49 @@ GPU_BURN_REPO="https://github.com/wilicc/gpu-burn.git"
 # gpu_burn 自己那个 compare 核的 PTX 基线架构。
 # 它只负责比对计算结果，真正的算力负载来自 cuBLAS 里的预编译 cubin，
 # 所以基线定低不会削弱压测强度，只是让更老的卡也能跑（PTX 向上兼容，由驱动 JIT）。
-COMPUTE="${COMPUTE:-75}"
+#
+# ⚠️ **这个值必须 <= GPU_ARCHS 里最老的那一代**，否则那几代白加：
+# PTX 只能向**新**架构 JIT，compare 核在比基线老的卡上根本编不出来，
+# cuBLAS 那边有 cubin 也没用。1.7.1 把 GPU_ARCHS 下探到 Pascal，所以这里从 75 降到 60。
+COMPUTE="${COMPUTE:-60}"
 
 # cuBLAS 静态库里要保留哪几代卡的 cubin。裁掉其余的能省一大半体积。
-#   75  = Turing   T4 / RTX 20 系 / Quadro RTX
-#   80  = Ampere   A100
-#   86  = Ampere   A10 / A6000 / RTX 30 系
-#   89  = Ada      RTX 4090 / L20 / L40S
-#   90  = Hopper   H100 / H200
-#   120 = Blackwell RTX 5090 / RTX PRO 6000
 #
-# ⚠️ **少一代就是那一代的卡跑不了压测**，而且表现得像显卡故障。
-# PTX JIT 只能向**新**架构兼容（COMPUTE=75 的 PTX 能在 Ampere 上 JIT 出来），
-# 补不回旧架构 —— 真正的算力负载来自 cuBLAS 里的**预编译 cubin**，
-# 那张卡的 cubin 被 nvprune 裁掉了就是没有，运行时 cuBLAS 直接报无可用核，
-# gpu_burn 非零退出 -> gpu_stress 判 FAIL「gpu_burn 异常退出」-> 好卡判成坏卡。
+#   60  = Pascal    Tesla P100 / GTX 10 系          2016
+#   61  = Pascal    Tesla P4 / P40（很常见的推理卡） 2016
+#   70  = Volta     Tesla V100 / Titan V             2017
+#   75  = Turing    Tesla T4 / RTX 20 系 / Quadro RTX 2018
+#   80  = Ampere    A100                             2020
+#   86  = Ampere    RTX 30 系 / A10 / A40 / A6000    2020
+#   89  = Ada       RTX 40 系 / L4 / L40S            2022
+#   90  = Hopper    H100 / H200                      2022
+#   100 = Blackwell B100 / B200 / GB200（数据中心）  2024
+#   120 = Blackwell RTX 50 系 / RTX PRO 6000         2025
 #
-# 1.7.0 补上 75：T4 是服务器上最常见的推理卡之一，之前一直不在列表里。
-# 70（V100 / Volta）没加 —— 见 chroot-setup.sh 里 -M=open 那段：
-# open 内核模块要 GSP，而 Volta 及更早的卡没有 GSP，驱动本来就起不来，
-# 加了 sm_70 的 cubin 也没有卡能跑到那一步，白占体积。
-GPU_ARCHS="${GPU_ARCHS:-75 80 86 89 90 120}"
+# ⚠️ **少一代就是那一代的卡跑不了压测**，而且表现得像显卡故障：
+# 真正的算力负载来自 cuBLAS 里的**预编译 cubin**，那一代的 cubin 被 nvprune
+# 裁掉了就是没有，运行时 cuBLAS 报无可用核 -> gpu_burn 非零退出 ->
+# gpu_stress 判 FAIL「异常退出」-> **好卡判成坏卡**。
+# 1.6.0 及以前就栽在这上面（--arch 重复写不叠加，只剩最后一代）。
+#
+# 关于这张表，三件实测出来的事（`nvprune --arch=sm_N` 逐个裁一遍量体积，
+# 69,794,518 字节是"这一代在库里根本没有 cubin"的基线）：
+#
+#   1. **sm_89 在 cuBLAS 静态库里是空的**（正好等于基线）。这不是问题：
+#      cubin 在同一个大版本内向上兼容，sm_86 的核在 8.9 上照样跑 ——
+#      RTX 40 系是靠 sm_86 覆盖的。留 89 在表里只是把这件事写明白。
+#      同理 sm_101/103 空、由 sm_100 覆盖，sm_121 空、由 sm_120 覆盖。
+#   2. **sm_100（数据中心 Blackwell，B200/GB200）1.7.0 漏了**，1.7.1 补上。
+#   3. **Pascal / Volta 的瓶颈不在 cuBLAS，在驱动。** 库里有它们的 cubin，
+#      但 open 内核模块要 GSP（Turing 才有）。NVIDIA 文档说 open 只支持
+#      Turing 及以后，而 .run 自带的 supported-gpus.json 又给 V100/P40 标了
+#      kernelopen —— 两边矛盾，**我们没有那一代的卡，无法证实**。
+#
+#      仍然把它们加进来，是因为代价不对称：
+#        加了而驱动确实不支持 -> 卡起不来，gpu_detect 干净地判 SKIP，白占体积
+#        不加而驱动其实支持   -> gpu_burn 报错 -> **好卡被判 FAIL**
+#      后者正是这个项目最不能接受的方向，几十 MB 换掉它很划算。
+GPU_ARCHS="${GPU_ARCHS:-60 61 70 75 80 86 89 90 100 120}"
 
 info() { printf '\033[36m[gpu-burn]\033[0m %s\n' "$*"; }
 warn() { printf '\033[33m[gpu-burn] 警告\033[0m %s\n' "$*"; }
@@ -141,7 +163,12 @@ for a in $GPU_ARCHS; do
   GENCODE_ARGS+=(--generate-code "arch=compute_$a,code=sm_$a")
 done
 
-# 只留某一代时的体积，用来给下面那条自检当基准
+# 只留某一代时的体积。这是下面那条自检的原语。
+#
+# 为什么用 nvprune 自己当"这一代在不在"的判据，而不是 cuobjdump：
+# cuobjdump 不一定装（CUDA 的 runfile 和 apt 包都可能不带，这台机器上就没有），
+# 而 nvprune 是必装的 —— 拿必然存在的工具做自检，才不会哪天因为"工具没装"
+# 就静默跳过整条检查。
 prune_size_one() {   # prune_size_one <库> <arch> -> 字节数（失败给空）
   # ⚠️ 分成两条 local：同一条 local 里后一个变量看不到前一个刚赋的值
   #    （bash 在调用 local 之前就把参数全展开完了），写成一行的话 $arch 是空的，
@@ -164,27 +191,46 @@ for a in libcublas_static.a libcublasLt_static.a; do
       "$(( $(stat -c %s "$CUDA_LIB/$a") / 1048576 ))" \
       "$(( $(stat -c %s "$TMP_DIR/$a") / 1048576 ))"
 
-    # ---- 自检：多代真的都留下来了吗 ----
-    # 没有 cuobjdump 可用（CUDA 的 runfile/apt 包不一定装它），所以用体积对比：
-    # 只留头一代、只留最后一代，各裁一次；多代裁出来的结果必须**严格大于**
-    # 这两个。要是哪天 nvprune 的参数语义又变了、退回到"只留一代"，
-    # 这条会当场跑红，而不是等到现场把好卡判成坏卡。
-    if (( ${#ARCH_LIST[@]} > 1 )); then
-      s_multi="$(stat -c %s "$TMP_DIR/$a")"
-      s_first="$(prune_size_one "$CUDA_LIB/$a" "${ARCH_LIST[0]}")"
-      s_last="$(prune_size_one  "$CUDA_LIB/$a" "${ARCH_LIST[-1]}")"
-      s_max=0
-      for s in "$s_first" "$s_last"; do
-        [[ "$s" =~ ^[0-9]+$ ]] && (( s > s_max )) && s_max="$s"
-      done
-      if (( s_max > 0 )) && (( s_multi <= s_max )); then
-        die "裁剪结果（$s_multi 字节）不比只留单独一代（$s_max 字节）大 ——
-     说明 nvprune 只保留了一代 cubin。这样出盘的话，除了那一代之外的所有卡
-     都会在 cuBLAS 里找不到可用核，gpu_burn 非零退出，然后被判成显卡故障。
-     检查上面 GENCODE_ARGS 那段：**不能**用重复的 --arch，必须用 -gencode。"
+    # ---- 自检：**逐代**核对，不是看总体积 ----
+    #
+    # 1.7.0 那版自检是"多代结果必须比单代大"。它只能抓住"只剩一代"这一种退化，
+    # 抓不住"中间少了某一代" —— 而少一代的后果和只剩一代是一样的：
+    # 那一代的卡跑不了压测，然后被判成显卡故障。
+    #
+    # 现在改成精确核对：对每一代 A，把**原始库**和**裁过的库**各自再裁到只剩 A，
+    # 两边体积必须一模一样 —— 相等就说明 A 的 cubin 在裁剪中一个字节都没丢。
+    # 顺带把"这一代在原始库里本来就没有"（等于基线）也报出来，
+    # 那种情况不算错（比如 sm_89 由 sm_86 向上兼容覆盖），但要让人看见。
+    # 第一趟：量出每一代在**原始库**和**裁过的库**里各自的单代体积
+    declare -A S_ORIG=() S_KEPT=()
+    baseline=0
+    for arch in "${ARCH_LIST[@]}"; do
+      s_orig="$(prune_size_one "$CUDA_LIB/$a" "$arch")"
+      s_kept="$(prune_size_one "$TMP_DIR/$a"  "$arch")"
+      [[ "$s_orig" =~ ^[0-9]+$ && "$s_kept" =~ ^[0-9]+$ ]] \
+        || die "sm_$arch 的自检没法做（nvprune 裁不动 $a）——
+     宁可在这里停下，也不出一张不知道支持哪些卡的盘。"
+      S_ORIG[$arch]="$s_orig"; S_KEPT[$arch]="$s_kept"
+      # "这一代在库里根本没有 cubin"时裁完剩的就是个壳，各代里最小的那个即是它。
+      # 只用来把话说准（哪几代是靠向上兼容覆盖的），不参与判定。
+      (( baseline == 0 || s_orig < baseline )) && baseline="$s_orig"
+    done
+
+    # 第二趟：逐代核对
+    for arch in "${ARCH_LIST[@]}"; do
+      if (( S_KEPT[$arch] != S_ORIG[$arch] )); then
+        die "sm_$arch 的 cubin 在裁剪中丢了：原始库里裁出来 ${S_ORIG[$arch]} 字节，
+     裁过的库里只剩 ${S_KEPT[$arch]} 字节。这一代的卡上 cuBLAS 会找不到可用核，
+     gpu_burn 非零退出，然后被判成「显卡故障」—— **好卡判成坏卡**。
+     检查 GENCODE_ARGS：必须是重复的 -gencode，不能用重复的 --arch。"
       fi
-      printf '      自检: 多代 %d 字节 > 单代上限 %d 字节，OK\n' "$s_multi" "$s_max"
-    fi
+      if (( S_ORIG[$arch] <= baseline )); then
+        printf '      sm_%-4s 本代无独立 cubin，由同代更低版本向上兼容覆盖\n' "$arch"
+      else
+        printf '      sm_%-4s OK（cubin 完整保留）\n' "$arch"
+      fi
+    done
+    unset S_ORIG S_KEPT
   else
     warn "$a 裁剪失败，原样使用（二进制会大不少）"
     cp "$CUDA_LIB/$a" "$TMP_DIR/$a"

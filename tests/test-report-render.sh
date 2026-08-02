@@ -79,6 +79,9 @@ cat > "$RD/results.jsonl" <<'EOF'
 {"id":"check_psu","name":"电源","status":"WARN","detail":"PSU2 未检测到交流输入","ref":"","time":"t"}
 {"id":"collect_raid","name":"阵列卡","status":"SKIP","detail":"未安装阵列卡；BMC 上为阵列卡/HBA 预留的温度和插槽供电传感器均无读数（板子设计上支持装卡，但这次没读到任何反馈——如果确实装了卡，建议检查卡和转接板/riser 是否插到位）","ref":"","time":"t"}
 {"id":"stress_disk","name":"硬盘压力测试","status":"SKIP","detail":"现场选择跳过","ref":"","time":"t"}
+{"id":"verify_ecc","name":"内存 ECC 复查","status":"FAIL","detail":"压测期间出现**不可纠正**内存错误：CPU0_DIMM_A1 不可纠正 0->2（新增 2）；不可纠正错误意味着数据已经出错，对应内存条应予更换。","ref":"raw/counters-post.txt","time":"t"}
+{"id":"verify_throttle","name":"CPU 热节流复查","status":"WARN","detail":"压测期间 CPU 触发热节流共 12 次（涉及 4 个核心、1 个处理器封装）。热节流是 CPU 的自我保护，出现时会主动降频，因此温度读数可能仍在正常范围。此项不影响整机结论，但建议检查散热后复测。","ref":"raw/counters-post.txt","time":"t"}
+{"id":"verify_aer","name":"PCIe 错误计数复查","status":"WARN","detail":"压测期间 PCIe 链路出现可纠正错误：0000:18:00.0 可纠正新增 7；可纠正错误会被链路层自动重传，不影响数据正确性。","ref":"raw/counters-post.txt","time":"t"}
 EOF
 
 cat > "$RD/metrics.jsonl" <<'EOF'
@@ -520,6 +523,22 @@ done
 
 # ⑤ 整机结论大字有且只有一个（多一个 = 页面上自相矛盾）
 check "整机结论大字有且只有一个" "1" "$(cnt "$OUT" 'class="verdict v-[A-Z]+"')"
+
+# ================================================================
+echo
+echo "=== 1.7.0 新增的三条判定要能正常渲染 ==="
+# 这三条以前只在 e2e 里以 SKIP 的形态渲染过（QEMU 没有 EDAC / 热节流 / AER），
+# WARN 和 FAIL 那两个形态一次都没进过客户报告。
+has "$OUT" "内存 ECC 复查"        "新判定要出现在客户报告里"
+has "$OUT" "CPU 热节流复查"       "同上"
+has "$OUT" "PCIe 错误计数复查"    "同上"
+check "有 FAIL 判定时整机结论必须是 FAIL" "1" "$(cnt "$OUT" 'class="verdict v-FAIL"')"
+
+# 判定文案里的 **重点** 是给写代码的人看的记号，不能原样印给客户。
+# 以前它一路进 HTML —— 客户看到的是「这是测试环境的容量限制，**不是内存故障** ——」，
+# 字面的两串星号，而那句恰恰是最该让人看清的一句。现在渲染成粗体。
+check "判定文案里不许出现字面的 ** 星号" "0" "$(cnt "$OUT" '\*\*')"
+has "$OUT" "<b>不可纠正</b>" "**重点** 要渲染成粗体，而不是原样印出来"
 
 # ⑥ 有采样数据就必须真画出线。
 #    图表是手写 SVG，最容易的失效方式是"框还在、线没了"——

@@ -464,18 +464,50 @@ class Internal(Data):
         return out
 
     def sys_extra_series(self):
-        """负载和内存占用两条曲线（客户报告不画，内部看压测强度用）。"""
+        """负载和内存占用两条曲线，外加内存总量（客户报告不画，内部看压测强度用）。
+
+        总量要一起给：光画"已用 12000 MB"看不出压测吃得狠不狠 ——
+        16GB 机器上那是快满了，512GB 机器上那是几乎没动。
+        -> (负载[], 已用MB[], 总量MB 或 None)
+        """
         path = os.path.join(self.run_dir, "sys_metrics.csv")
-        load, memused = [], []
+        load, memused, total = [], [], None
         if not os.path.exists(path):
-            return load, memused
+            return load, memused, total
         with open(path, newline="", encoding="utf-8", errors="replace") as f:
             for row in csv.DictReader(f):
                 for key, bucket in (("load1", load), ("mem_used_mb", memused)):
                     v = num(row.get(key))
                     if v is not None:
                         bucket.append(float(v))
-        return load, memused
+                t = num(row.get("mem_total_mb"))
+                if t is not None and (total is None or t > total):
+                    total = float(t)
+        return load, memused, total
+
+    def ecc_series(self):
+        """压测期间的 ECC 计数曲线 -> (可纠正[], 不可纠正[])。
+
+        为什么值得单独画一条：只有压测前后两个快照的话，只知道"涨了多少"，
+        不知道**什么时候开始涨**。而这两件事的含义完全不同 ——
+        一上来就涨，多半是这条内存本身；烤热十分钟之后才开始涨，
+        更像是散热或供电压不住。判定只看差值，这条曲线是给人看的。
+
+        老 run-dir（1.7.0 之前）没有这两列，返回两个空列表，报告里整块不画。
+        读不到 EDAC 的机器上写进 CSV 的是 "--"，num() 解析不了，同样不计点 ——
+        绝不会被当成 0。
+        """
+        path = os.path.join(self.run_dir, "sys_metrics.csv")
+        ce, ue = [], []
+        if not os.path.exists(path):
+            return ce, ue
+        with open(path, newline="", encoding="utf-8", errors="replace") as f:
+            for row in csv.DictReader(f):
+                for key, bucket in (("ecc_ce", ce), ("ecc_ue", ue)):
+                    v = num(row.get(key))
+                    if v is not None:
+                        bucket.append(float(v))
+        return ce, ue
 
     def gpu_full_series(self):
         """逐卡的频率/利用率/显存，客户报告只画温度和功耗。"""
@@ -1416,7 +1448,7 @@ def build_internal_html(d):
     if powers:
         A("<h3>5.4 CPU 封装功耗</h3>")
         A(svg_line_chart([("封装功耗", powers)], y_label="W", y_suffix="W"))
-    load, memused = d.sys_extra_series()
+    load, memused, memtotal = d.sys_extra_series()
     if load or memused:
         A("<h3>5.5 系统负载与内存占用</h3>")
         A('<p class="sub">用来核对压测强度：负载没上去 = 压测没真跑满；'
@@ -1424,11 +1456,29 @@ def build_internal_html(d):
         if load:
             A(svg_line_chart([("1 分钟负载", load)], y_label="load"))
         if memused:
-            A(svg_line_chart([("已用内存", memused)], y_label="MB", y_suffix="MB"))
+            # 总量写进图例：光看"已用 12000 MB"分不出这是快满了还是几乎没动
+            label = "已用内存"
+            if memtotal:
+                label = "已用内存（本机共 %.0f GB）" % (memtotal / 1024.0)
+            A(svg_line_chart([(label, memused)], y_label="MB", y_suffix="MB"))
+
+    ecc_ce, ecc_ue = d.ecc_series()
+    if ecc_ce or ecc_ue:
+        A("<h3>5.6 内存 ECC 计数随时间的变化</h3>")
+        A('<p class="sub">第六节那张表给的是压测前后的<b>差值</b>，只能回答"涨了多少"。'
+          "这条曲线回答的是<b>什么时候开始涨</b> —— 而这两件事的含义完全不同："
+          "一上来就涨多半是这条内存本身，烤热十几分钟之后才开始涨则更像散热或供电压不住。"
+          "判定只看差值，这条是给人看的。</p>")
+        series = []
+        if ecc_ce:
+            series.append(("可纠正 CE", ecc_ce))
+        if ecc_ue:
+            series.append(("不可纠正 UE", ecc_ue))
+        A(svg_line_chart(series, y_label="次"))
 
     gfull = d.gpu_full_series()
     if gfull:
-        A("<h3>5.6 GPU 频率 / 利用率 / 显存占用</h3>")
+        A("<h3>5.7 GPU 频率 / 利用率 / 显存占用</h3>")
         A('<p class="sub">利用率没到 100% 说明压测没喂满，出来的温度功耗数字要打折看。</p>')
         for key, label, suf in (("clock", "SM 频率", "MHz"), ("util", "利用率", "%"),
                                 ("mem", "显存占用", "MB")):
@@ -1440,10 +1490,10 @@ def build_internal_html(d):
 
     fio = d.fio_results()
     if fio:
-        A("<h3>5.7 硬盘性能数据</h3>")
+        A("<h3>5.8 硬盘性能数据</h3>")
         A('<div class="dense">%s</div>' % table(fio))
 
-    A("<h3>5.8 压测日志原文</h3>")
+    A("<h3>5.9 压测日志原文</h3>")
     for title, rel in (("CPU 压测", "stress/cpu-stress-ng.log"),
                        ("内存压测", "stress/mem-stressapptest.log"),
                        ("内存压测（退到 stress-ng --vm）", "stress/mem-stress-ng.log"),
