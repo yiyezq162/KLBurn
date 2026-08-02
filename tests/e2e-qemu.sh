@@ -497,13 +497,24 @@ elif (( DISK_STRESS )); then
   # QUICK 是 CPU/内存并发 600s，硬盘再单独 180s（30%），加上采集/复查/出报告。
   # 这里不再盲等固定秒数，而是等最后那条 "Report written:"。
   info "等压测 + 出报告（QUICK 600s 并发 + 硬盘 180s + 余量）"
+
+  # 压测期间截一张。**界面改动只有截图验得了** —— 单元测试能保证列宽和字符集，
+  # 保证不了"在真控制台上看着对不对"（颜色、对齐、有没有被别的输出顶花）。
+  # 挑第 90 秒：这时候并发压测已经跑起来、读数都有值了，离硬盘阶段还远。
+  sleep 90
+  shot "burn-in"
+
   if wait_for_log "Sequential write" 900 "fio 开始跑了"; then
     ok "fio 真的启动了（日志里有顺序写那一段）"
+    sleep 25          # 让逐盘带宽/IOPS 采到第二个点，否则那一屏还是 "warming up"
+    shot "disk-stress"
   else
     bad "日志里没有 fio 启动的痕迹"
   fi
   wait_for_log "Report written:" 1500 "报告已生成，可以关机了" || \
     info "没等到出报告，照常往下走（下面的断言会说明发生了什么）"
+  # 出完报告再等一下：PASS/FAIL 大字和收尾菜单是在那之后才打的
+  sleep 12
   shot "burn-done"
 
   info "发关机键"
