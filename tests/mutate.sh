@@ -66,6 +66,7 @@ MUTATIONS=(
 "screen-nonascii${S}面板不再过滤非 ASCII（一个中文字节就能把 BMC 上那屏顶成乱码）${S}test-screen-render${S}$RT/lib/ui.sh${S}mut_screen_nonascii"
 "gpu-cap-fail${S}超过 8 张卡时不再收口（进度条被挤出屏幕，现场看不到测到哪了）${S}test-screen-render${S}$RT/lib/ui.sh${S}mut_gpu_cap"
 "review-hang${S}配置核对面板的倒计时永不到点（现场插上去像死机，最怕的那种）${S}test-screen-render${S}$RT/lib/ui.sh${S}mut_review_hang"
+"brand-nofit${S}大字标题不管装不装得下都画（超一行就滚屏，整屏重绘从此越刷越歪）${S}test-screen-render${S}$RT/lib/ui.sh${S}mut_brand_nofit"
 "csv-unread${S}sys_metrics 多采一列却没人读（采了没人看等于没采）${S}test-internal-report${S}$RT/report/generate_internal.py${S}mut_csv_unread"
 "rawindex-gap${S}加了新采集却忘了在 raw 索引里写说明（没人知道那份文件是什么）${S}test-internal-report${S}$RT/report/generate_internal.py${S}mut_rawindex_gap"
 "emph-literal${S}判定文案里的 **重点** 原样印给客户（客户看到两串字面星号）${S}test-report-render${S}$RT/report/generate_report.py${S}mut_emph_literal"
@@ -268,6 +269,17 @@ mut_review_hang() {
   replace_line "$RT/lib/ui.sh" \
     "(( remaining <= 0 )) && { printf '\\n'; break; }" \
     "    (( remaining < -999999 )) && { printf '\\n'; break; }   # 变异：永远不到点"
+}
+
+# 大字标题占六行。八卡机的仪表盘、或者 80x25 的 BMC 控制台上，这六行会把面板
+# 顶出屏幕 —— 而**整屏重绘一旦滚屏就废了**：滚完之后 ESC[H 回的"绝对原点"
+# 和面板第一行不再是同一行，下一帧盖在错开的位置上，越刷越歪。
+# 和 §11-14 禁 ESC[A 是同一类问题的另一个入口（那条是"别人写了一行"，
+# 这条是"自己画得太高"）。所以每屏画之前都要先数行数，放不下就退成一行。
+mut_brand_nofit() {
+  replace_line "$RT/lib/ui.sh" \
+    '(( ${1:-0} + $(brand_rows) > ROWS )) && BRAND_COMPACT=1' \
+    '  :   # 变异：不管装不装得下都画大字'
 }
 
 # "采了没人看等于没采"。1.7.0 往 sys_metrics.csv 加了 ecc_ce/ecc_ue 两列，
