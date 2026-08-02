@@ -65,7 +65,28 @@ MUTATIONS=(
 "counter-abs${S}计数器判定看绝对值而不是前后差值（带着历史计数的二手机器会被全判故障）${S}test-hw-checks${S}$RT/lib/collect.sh${S}mut_counter_abs"
 "screen-nonascii${S}面板不再过滤非 ASCII（一个中文字节就能把 BMC 上那屏顶成乱码）${S}test-screen-render${S}$RT/lib/ui.sh${S}mut_screen_nonascii"
 "gpu-cap-fail${S}超过 8 张卡时不再收口（进度条被挤出屏幕，现场看不到测到哪了）${S}test-screen-render${S}$RT/lib/ui.sh${S}mut_gpu_cap"
+"review-hang${S}配置核对面板的倒计时永不到点（现场插上去像死机，最怕的那种）${S}test-screen-render${S}$RT/lib/ui.sh${S}mut_review_hang"
+"csv-unread${S}sys_metrics 多采一列却没人读（采了没人看等于没采）${S}test-internal-report${S}$RT/report/generate_internal.py${S}mut_csv_unread"
+"rawindex-gap${S}加了新采集却忘了在 raw 索引里写说明（没人知道那份文件是什么）${S}test-internal-report${S}$RT/report/generate_internal.py${S}mut_rawindex_gap"
+"emph-literal${S}判定文案里的 **重点** 原样印给客户（客户看到两串字面星号）${S}test-report-render${S}$RT/report/generate_report.py${S}mut_emph_literal"
 )
+
+# ================================================================
+# 有两条守卫**故意没有**变异 —— 不是漏了
+# ================================================================
+# 本脚本的契约是"3~5 分钟、不需要构建"。下面这两条都违反它，硬塞进来会让
+# 每次跑变异都变成一小时，最后的结果是没人再跑它。
+# （和 e2e 那条"把启动 U 盘写穿"的变异同一个道理，见 architecture.md。）
+#
+#   build-gpu-burn.sh 的逐代 cubin 自检
+#       要重新裁剪 1GB 的 cuBLAS 静态库再链接一遍，十几分钟起步，
+#       而且要机器上装着 CUDA。它自己已经红过一次（1.7.0 那版体积启发式
+#       就是被它的前身抓出来的），不是没验过的守卫。
+#
+#   check-firmware.sh 的 pci.ids 日期断言
+#       check-firmware 要一个**已经构建出来的 rootfs**，没构建过它判 0 项跳过。
+#       在没有 rootfs 的机器上塞这条变异，会得到"逃掉了"的**假警报** ——
+#       而假警报比漏报还难查，人会去改一条本来就没问题的守卫。
 
 # ================================================================
 # 施加变异的原语
@@ -234,6 +255,46 @@ mut_screen_nonascii() {
 # 8 张卡已经占了半屏，全铺开会把进度条挤出屏幕 —— 而那是现场最需要看到的一行。
 mut_gpu_cap() {
   replace_line "$RT/lib/ui.sh" "DASH_GPU_MAX=8" "DASH_GPU_MAX=999"
+}
+
+# 配置核对面板"绝不能卡住流程"是它唯一的硬要求：现场最怕的就是插上去没反应，
+# 那会让人直接断电重来。倒计时到点必须自己往下走，不能只等按键。
+#
+# ⚠️ 这条变异**只改文案不改行为**（把条件改成一个永远不成立的值），
+# 而守卫是 `declare -f config_review | grep -q 'remaining <= 0'` —— 只读函数体、
+# 不执行它。故意这么设计：真把 break 删掉的话，测试自己会挂死在那儿，
+# 变异测试就再也跑不完了。
+mut_review_hang() {
+  replace_line "$RT/lib/ui.sh" \
+    "(( remaining <= 0 )) && { printf '\\n'; break; }" \
+    "    (( remaining < -999999 )) && { printf '\\n'; break; }   # 变异：永远不到点"
+}
+
+# "采了没人看等于没采"。1.7.0 往 sys_metrics.csv 加了 ecc_ce/ecc_ue 两列，
+# 却只有写入方没有读取方 —— 而这种事**不会有任何报错**，只是那份数据白采。
+# 守卫是"CSV 表头里除时间/阶段外的每一列都必须有报告生成器在读"。
+mut_csv_unread() {
+  replace_line "$RT/report/generate_internal.py" \
+    'for key, bucket in (("ecc_ce", ce)' \
+    '                for key, bucket in (("ecc_ce_MUTATED", ce), ("ecc_ue", ue)):'
+}
+
+# 加了新采集却忘了在 RAW_INDEX 里写一条说明。表现是报告里那份文件落进"未分类"，
+# 看报告的工程人员根本不知道它是什么、什么时候该点开 —— 和没采一样。
+# 这里把 lspci.txt 那条的正则改成匹配不上，模拟"漏写了一条"。
+mut_rawindex_gap() {
+  replace_line "$RT/report/generate_internal.py" \
+    '(r"^lspci\.txt$", "系统"' \
+    '    (r"^lspci-MUTATED\\.txt$", "系统", "PCI 设备清单", "查装了什么卡时", "按总线地址反查"),'
+}
+
+# 判定文案里的 **重点** 是给写代码的人看的记号。原样进 HTML 的话，
+# 客户看到的是「这是测试环境的容量限制，**不是内存故障** ——」两串字面星号，
+# 而那句恰恰是最该让人看清的一句。这个坑从 0.7.0 一直躺到 1.7.1 才发现。
+mut_emph_literal() {
+  replace_line "$RT/report/generate_report.py" \
+    'class="rd">%s</span>' \
+    "        A('<span class=\"rd\">%s</span>' % E(r.get(\"detail\")))"
 }
 
 mut_net_servers() {

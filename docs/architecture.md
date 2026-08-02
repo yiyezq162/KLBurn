@@ -880,6 +880,12 @@ check_fans() {
 | `check-firmware.sh` | **盘里关键驱动要的固件一个都不能少**：拿 `modinfo -F firmware` 问驱动自己要什么，再逐个去 `<rootfs>/lib/firmware` 下找。顺带复核"有且只有一个内核"和 CPU 微码在不在 | 构建之后（它查的是构建工作区里的 rootfs） |
 | `mutate.sh` | 把已修好的 bug 逐个塞回代码，确认对应的用例真的会跑红。**逃掉 = 那条守卫是摆设** | 改了任何判定逻辑或守卫之后 |
 
+`mutate.sh` 里有两条守卫**故意没有变异**（脚本里写了理由，别当成漏了）：
+`build-gpu-burn.sh` 的逐代 cubin 自检要重裁 1GB 静态库再链接，十几分钟起步；
+`check-firmware.sh` 的 `pci.ids` 日期断言要一个已构建的 rootfs，没有时它判 0 项跳过 ——
+在没 rootfs 的机器上会得到「逃掉了」的**假警报**，而假警报比漏报还难查。
+两条都违反 `mutate.sh`「3~5 分钟、不需要构建」的契约，和 `--disk-stress` 那条同理。
+
 ```bash
 sudo ./tests/e2e-qemu.sh                          # BIOS 冒烟，约 3 分钟
 sudo ./tests/e2e-qemu.sh --firmware uefi          # UEFI（OVMF + q35）
