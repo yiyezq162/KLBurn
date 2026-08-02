@@ -186,6 +186,39 @@ PKGS_COLLECT=(
   dmidecode lshw pciutils usbutils nvme-cli smartmontools ipmitool
   ethtool jq python3 hdparm sdparm lsscsi lm-sensors numactl
   efibootmgr kmod util-linux bc gawk
+  # ↓ 基础镜像里本来就有，但**显式列出来** = 手动安装标记 = autoremove 不会碰。
+  #   清理多余内核那步的 autoremove 射程比想象中远（1.5.0 第一次就顺手带走了
+  #   amd64-microcode），而这几个是采集要用的。
+  sg3-utils fwupd
+)
+
+# ---------- 深度诊断类（1.7.0 新增）----------
+# 每一个都写清楚它换来什么数据。都在 Ubuntu 24.04 的官方源里
+# （多数在 universe，chroot-setup.sh 已经启用），不需要任何闭源二进制。
+#
+# ⚠️ 这几个包装进来是为了**那几条命令**，不是为了它们带的 daemon。
+#    chroot-setup.sh 会把对应的 service 一律 mask 掉，理由和 smartd 一样：
+#    压测期间不能有别的东西在后台动硬件、抢 IO、往日志里插东西。
+PKGS_DIAG=(
+  # ras-mc-ctl --error-count：**逐条 DIMM 的 ECC 可纠正/不可纠正错误计数**。
+  # 出厂老化最该抓的就是内存的早期退化，而在这之前我们只能扫 dmesg 关键字 ——
+  # 那既不结构化、也归不到具体是哪一条内存上。
+  # --error-count 读的是内核的 EDAC sysfs，**不需要 rasdaemon 在跑**。
+  rasdaemon
+  # edac-util -v：EDAC 的另一条路。和上面互为备份，不同平台上可用性不一样
+  #（有的机型 ras-mc-ctl 读得到、edac-util 读不到，反过来也有）。
+  edac-utils
+  # 迈络思网卡的固件版本 / PSID / PXE 版本。这类卡在服务器上很常见，
+  # 而 ethtool -i 在 mlx5 上给的固件版本串信息量很少。
+  mstflint
+  # CPU 特性位、步进、勘误相关标志 —— lscpu 给不全。
+  cpuid
+  # rdmsr：读功耗/温度/降频寄存器，补 turbostat 够不到的平台。
+  msr-tools
+  # lldpctl：这个网口接在**哪台交换机的哪个口**。现场排线错误一眼就看出来。
+  # LLDP 邻居要有 daemon 在收才有，所以采集阶段会临时把 lldpd 拉起来，
+  # 但**只用接收模式**：绝不往客户的交换机上发我们自己的通告。
+  lldpd
 )
 # 网卡连通性测试 + 联网校时用
 # 24.04 的 live server 层里没有 dhclient，必须显式装；

@@ -38,8 +38,8 @@ say "apt-get update"
 apt-get update -qq || fail "apt update 失败（检查 WSL 网络 / 镜像地址）"
 
 # ---------------------------------------------------------------- 装包
-PKGS=( "${PKGS_COLLECT[@]}" "${PKGS_NET[@]}" "${PKGS_STRESS[@]}" "${PKGS_MISC[@]}"
-       "${PKGS_PLATFORM[@]}" )
+PKGS=( "${PKGS_COLLECT[@]}" "${PKGS_DIAG[@]}" "${PKGS_NET[@]}" "${PKGS_STRESS[@]}"
+       "${PKGS_MISC[@]}" "${PKGS_PLATFORM[@]}" )
 if [[ "${INCLUDE_NVIDIA:-0}" == "1" ]]; then
   PKGS+=( "${PKGS_NVIDIA_BUILD[@]}" )
 fi
@@ -56,7 +56,9 @@ apt-get install -y -qq --no-install-recommends "${PKGS[@]}" \
 verify_tools() {
   local when="$1" entry missing=()
   for entry in dmidecode lshw lspci nvme smartctl ipmitool ethtool jq python3 \
-               stress-ng stressapptest fio sysbench dhclient ping ip chronyd; do
+               stress-ng stressapptest fio sysbench dhclient ping ip chronyd \
+               sg_ses sg_logs sg_vpd fwupdmgr \
+               ras-mc-ctl edac-util mstflint cpuid rdmsr lldpctl lldpd; do
     command -v "$entry" >/dev/null 2>&1 || missing+=("$entry")
   done
   if ((${#missing[@]})); then
@@ -177,12 +179,21 @@ for u in snapd.service snapd.socket snapd.seeded.service \
          cloud-init.service cloud-init-local.service cloud-config.service cloud-final.service \
          smartd.service smartmontools.service \
          nvmefc-boot-connections.service nvmf-autoconnect.service \
-         chrony.service systemd-timesyncd.service; do
+         chrony.service systemd-timesyncd.service \
+         rasdaemon.service lldpd.service lldpd.socket \
+         fwupd.service fwupd-refresh.service fwupd-refresh.timer; do
   systemctl mask "$u" >/dev/null 2>&1 || true
 done
 # 说明：smartd 装 smartmontools 时会被自动 enable。它后台定期轮询硬盘，
 # 会和 fio 的裸盘压测抢 IO、也可能在日志里插入干扰信息，所以关掉。
 # 我们自己在测前测后各显式跑一次 smartctl 就够了。
+#
+# 1.7.0 新装的几个包同理 —— 装它们是为了那几条**命令**，不是为了 daemon：
+#   rasdaemon  ras-mc-ctl --error-count 读的是内核的 EDAC sysfs，不需要它在跑
+#   lldpd      LLDP 邻居确实要 daemon 在收才有，但只在采集阶段临时拉起、
+#              而且只用接收模式（见 lib/network.sh），绝不常驻
+#   fwupd      我们只用 `fwupdmgr get-devices` 读一次固件版本清单；
+#              它的 refresh timer 会去联网拉厂商元数据，现场没网只会白等超时
 
 # tty1 归 KLBurn 独占
 systemctl mask getty@tty1.service >/dev/null 2>&1 || true
