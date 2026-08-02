@@ -398,6 +398,7 @@ confirm_disk_write() {
     return 1
   fi
 
+  brand_bar "$(panel_width)" "DISK STRESS CONFIRM"
   section "DISK STRESS TEST  (OPTIONAL, DESTRUCTIVE)"
   printf '  Disk %sinventory%s (model / capacity / serial / firmware / SMART health)\n' "$C_GRN" "$C_RST"
   printf '  has %salready been collected%s and will appear in the report either way.\n\n' "$C_GRN" "$C_RST"

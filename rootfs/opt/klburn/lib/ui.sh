@@ -21,16 +21,13 @@ section() {
 
 banner() {
   clear 2>/dev/null || true
-  printf '%s' "$C_BLD$C_CYN"
-  cat <<'EOF'
-  _  ___     ____
- | |/ / |   |  _ \ _   _ _ __ _ __
- | ' /| |   | |_) | | | | '__| '_ \
- | . \| |___|  _ <| |_| | |  | | | |
- |_|\_\_____|_| \_\\__,_|_|  |_| |_|
-EOF
-  printf '%s' "$C_RST"
-  printf '  %sServer Factory Burn-in Test%s   v%s\n' "$C_BLD" "$C_RST" "${KLBURN_VERSION:-?}"
+  # 大字和下面各个页面用的是**同一套**（_BRAND_ART），改一处两边都变。
+  # 以前这里是内嵌的 heredoc，和页面上的那份各画各的，改一处另一处就对不上了。
+  local i
+  for i in "${!_BRAND_ART[@]}"; do
+    printf '%s%s%s\n' "$C_GRN$C_BLD" "${_BRAND_ART[i]}" "$C_RST"
+  done
+  printf '  %s%s   v%s%s\n' "$C_GRN" "$BRAND_TAGLINE" "${KLBURN_VERSION:-?}" "$C_RST"
   # 公司名通常是中文，文本控制台打不出来（会变一串 ◆）。
   # 只在纯 ASCII 时才显示；中文名照常进 report.html，不受影响。
   local cn ascii
@@ -71,6 +68,7 @@ read_line_countdown() {
 select_duration() {
   local default_key="2" timeout=30 key start now remaining chosen=""
 
+  brand_bar "$(panel_width)" "SELECT DURATION"
   section "SELECT TEST DURATION"
   printf '   %s[1]%s  QUICK       10 minutes   (smoke test)\n'       "$C_BLD" "$C_RST"
   printf '   %s[2]%s  STANDARD    30 minutes   (default)\n'          "$C_BLD" "$C_RST"
@@ -170,6 +168,14 @@ EOF
 # 只留可打印 ASCII。控制字符、ESC、中文全部丢掉。
 ascii_clean() { printf '%s' "$*" | LC_ALL=C tr -cd '\40-\176'; }
 
+# 一段多行文本有几行非空行。core.sh 的 count_lines 吃的是**文件名**，这里吃的是串。
+# 和它一样必须过一遍数字校验：grep -c 在没匹配时退 1，直接塞进 (( )) 会炸。
+_nlines() {
+  local n; n="$(printf '%s\n' "${1:-}" | grep -c . || true)"
+  [[ "$n" =~ ^[0-9]+$ ]] || n=0
+  printf '%s' "$n"
+}
+
 # 面板宽度：跟着终端走，但夹在 80~120 之间。
 #   下限 80 —— 串口和多数 BMC KVM 就是 80 列，再窄的布局没意义
 #   上限 120 —— 再宽一行扫不过来，而且表格拉得太开反而难对齐
@@ -214,7 +220,7 @@ panel_palette() {
   local on="${1:-0}"
   PC=(
     [frame]="" [rst]="" [hdr]="" [ok]="" [warn]="" [bad]="" [dim]="" [none]=""
-    [eol]=""
+    [eol]="" [brand]="" [brandsub]=""
   )
   (( on )) || return 0
   [[ -n "${C_RST:-}" ]] || return 0      # 不是 tty（core.sh 已经把 C_* 置空）
@@ -224,6 +230,10 @@ panel_palette() {
   # e2e 截图里看得清清楚楚：面板右边挂着一串上一屏的 === 碎片。
   # 和颜色一样受 PANEL_COLOR 管：生成给文件的那份不能带任何转义码。
   PC[eol]=$'\033[K'
+  # 大字标题：绿色加粗。**不用反显** —— 试过一条实心色块横杠，
+  # 在真控制台上太扎眼，而且和下面的 ASCII 框线是两种视觉语言，凑一起反而乱。
+  PC[brand]="$C_GRN$C_BLD"
+  PC[brandsub]="$C_GRN"
   PC[frame]="$C_CYN"; PC[rst]="$C_RST"
   PC[hdr]="$C_BLD$C_CYN"
   PC[ok]="$C_GRN"; PC[warn]="$C_YEL"; PC[bad]="$C_RED$C_BLD"; PC[dim]="$C_GRY"
@@ -249,6 +259,80 @@ box_row() {
   printf '%s|%s%s%s%s%s|%s%s\n' \
     "${PC[frame]}" "${PC[rst]}" "${PC[${3:-none}]-}" "$pad" \
     "${PC[rst]}" "${PC[frame]}" "${PC[rst]}" "${PC[eol]}"
+}
+
+# ---------------------------------------------------------------- 标题条
+#
+# **每一块整屏页面的第一块都是它**：配置核对、压测仪表盘、硬盘视角、
+# 破坏性写确认、时长菜单、最终结论。现场看到的不该是"一屏滚动的日志"，
+# 而是一个有名字的软件 —— 尤其这块屏幕经常被拍照发群里。
+#
+# 版本号取自 klburn.conf（构建时钉进盘里的），这里不写死。
+# 公司名多半是中文，文本控制台打不出来，只进 HTML 报告 —— 见 banner()。
+: "${BRAND_TAGLINE:=Server Factory Burn-in Test}"
+
+# 大字标题。就是开机 banner 那套 ASCII 艺术字，从 0.x 一直用到现在 ——
+# 现场认的就是它。**绿色**，下面跟一行 "说明 + 版本号"。
+#
+# 为什么不用反显的实心横杠：试过，在真控制台上一整条色块很扎眼，
+# 而且和下面的框线是两种视觉语言，凑在一起反而乱。大字是这个产品本来的样子。
+_BRAND_ART=(
+'  _  ___     ____                '
+' | |/ / |   |  _ \ _   _ _ __ _ __ '
+" | ' /| |   | |_) | | | | '__| '_ \\ "
+' | . \| |___|  _ <| |_| | |  | | | |'
+' |_|\_\_____|_| \_\\__,_|_|  |_| |_|'
+)
+
+# 标题条实际占几行。每一屏都要按它算还剩多少行能放内容 ——
+# 写死成 1 的话，高屏上大字一占六行，最下面那一段就被挤出屏幕外了。
+#
+# BRAND_COMPACT=1 是**装不下时的退路**：整屏重绘一旦超出屏幕高度就会滚屏，
+# 滚完之后 ESC[H 回的"绝对原点"和面板第一行就不是同一行了，越刷越歪。
+# 所以画之前先数行数，宁可把大字退成一行，也不能让数据被挤下去。
+: "${BRAND_COMPACT:=0}"
+brand_rows() {
+  if (( ROWS < 28 )) || (( BRAND_COMPACT )); then printf 1
+  else printf '%s' $(( ${#_BRAND_ART[@]} + 1 )); fi
+}
+
+# brand_fit <这一屏除标题条以外要占的行数>
+# 大字放得下就放大字，放不下就退成一行。每帧都重新判一次 ——
+# 插一张热插拔的盘、多认出一颗 CPU，行数是会变的。
+brand_fit() {
+  BRAND_COMPACT=0
+  (( ${1:-0} + $(brand_rows) > ROWS )) && BRAND_COMPACT=1
+  return 0
+}
+
+# brand_bar <宽> [右侧文字]
+#
+# 名字沿用 brand_bar（调用点都不用改）。窄屏上退化成一行 ——
+# 80x25 的 BMC 控制台上，大字要占掉六行，配置核对那一屏就没地方了。
+brand_bar() {
+  local w="${1:-80}" right line tag i
+  right="$(ascii_clean "${2:-}")"
+  tag="$(ascii_clean "${BRAND_TAGLINE}")"
+  local ver; ver="$(ascii_clean "v${KLBURN_VERSION:-?}")"
+
+  if (( $(brand_rows) == 1 )); then
+    # 矮屏 / 这一屏装不下：一行搞定，不占地方
+    line="$(printf '%*s' "$w" '')"
+    line="$(str_put "$line" 1 "$(ascii_clean "${PRODUCT_NAME:-KLBurn}") $ver  $tag")"
+    [[ -n "$right" ]] && line="$(str_put "$line" $(( w - ${#right} - 1 )) "$right")"
+    printf '%s%s%s%s\n' "${PC[brand]}" "$line" "${PC[rst]}" "${PC[eol]}"
+    return 0
+  fi
+
+  for i in "${!_BRAND_ART[@]}"; do
+    printf '%s%s%s%s\n' "${PC[brand]}" "$(ascii_clean "${_BRAND_ART[i]}")" \
+      "${PC[rst]}" "${PC[eol]}"
+  done
+  # 说明行：左边"说明 + 版本"，右边当前是哪一页
+  line="$(printf '%*s' "$w" '')"
+  line="$(str_put "$line" 1 "$tag   $ver")"
+  [[ -n "$right" ]] && line="$(str_put "$line" $(( w - ${#right} - 1 )) "$right")"
+  printf '%s%s%s%s\n' "${PC[brandsub]}" "$line" "${PC[rst]}" "${PC[eol]}"
 }
 
 # box_row3 <宽> <左> <中> <右>  —— 抬头那一行：左中右三段各就各位
@@ -495,14 +579,37 @@ dash_burn() {
   done < <(gpu_status_rows)
 
   # ---- 画 ----
+  # 先数一遍除标题条以外要占几行，装不下就让标题条退成一行（见 brand_rows）。
+  # 顶框+抬头+抬头下框 3，CPU 表头 1，分隔 1，MEMORY/NETWORK 2，
+  # 底下 框+进度两行+框 4。
+  local body=$(( 3 + 1 + $(_nlines "$cpu_data") + 1 + 2 + 4 ))
+  if [[ -n "$gpu_data" ]]; then
+    local ng; ng="$(_nlines "$gpu_data")"
+    body=$(( body + 2 + (ng < DASH_GPU_MAX ? ng : DASH_GPU_MAX + 1) ))
+  fi
+  brand_fit "$body"
+
   screen_home
+  brand_bar "$w" "$right"
   box_rule "$w"
-  box_row3 "$w" "KLBurn v${KLBURN_VERSION:-?}" "$phase" "$right"
+  box_row3 "$w" "" "$phase" ""
   box_rule "$w"
   dash_cpu_rows "$w" "${cpu_data%$'\n'}"
   box_sep "$w"
-  box_row "$w" "$(printf '  MEMORY   %-26s ECC  CE %s / UE %s' "$memline" "$ce" "$ue")"
-  box_row "$w" "$(printf '  NETWORK  %d ports, %d up' "$nic_all" "$nic_up")"
+  # ECC：不可纠正红、可纠正黄、明确读到 0 才给绿；读不到（"--"）不上色。
+  # 和 verify_ecc 的判定口径一致 —— 屏幕上的颜色不能和最后的结论打架。
+  local ecolor="none"
+  if   [[ "$ue" =~ ^[0-9]+$ ]] && (( ue > 0 )); then ecolor="bad"
+  elif [[ "$ce" =~ ^[0-9]+$ ]] && (( ce > 0 )); then ecolor="warn"
+  elif [[ "$ce" =~ ^[0-9]+$ && "$ue" =~ ^[0-9]+$ ]]; then ecolor="ok"
+  fi
+  box_row "$w" "$(printf '  MEMORY   %-26s ECC  CE %s / UE %s' "$memline" "$ce" "$ue")" "$ecolor"
+
+  local ncolor="none"
+  if   (( nic_up > 0 ));  then ncolor="ok"
+  elif (( nic_all > 0 )); then ncolor="dim"     # 有口但一个都没起来
+  fi
+  box_row "$w" "$(printf '  NETWORK  %d ports, %d up' "$nic_all" "$nic_up")" "$ncolor"
   if [[ -n "$gpu_data" ]]; then
     box_sep "$w"
     dash_gpu_rows "$w" "${gpu_data%$'\n'}"
@@ -529,9 +636,15 @@ dash_disk() {
     data+="${name}|${rd}|${wr}|${iops}|$(disk_temp_c "$name")"$'\n'
   done < <(disk_io_rates)
 
+  local body=$(( 3 + 4 ))
+  if [[ -n "$data" ]]; then body=$(( body + 1 + $(_nlines "$data") ))
+  else body=$(( body + 1 )); fi
+  brand_fit "$body"
+
   screen_home
+  brand_bar "$w" "$right"
   box_rule "$w"
-  box_row3 "$w" "KLBurn v${KLBURN_VERSION:-?}" "$phase" "$right"
+  box_row3 "$w" "" "$phase" ""
   box_rule "$w"
   if [[ -n "$data" ]]; then
     dash_disk_rows "$w" "${data%$'\n'}"
@@ -612,8 +725,9 @@ cfg_fit() {
 # cfg_panel <宽> <抬头右侧>  -> 完整面板（纯 ASCII，含边框）
 cfg_panel() {
   local w="$1" right="$2" i n line
+  brand_bar "$w" "$right"
   box_rule "$w"
-  box_row3 "$w" "KLBurn v${KLBURN_VERSION:-?}" "CONFIGURATION REVIEW" "$right"
+  box_row3 "$w" "" "CONFIGURATION REVIEW" ""
   box_rule "$w"
   local rowcolor
   for i in "${!_CFG_TITLES[@]}"; do
@@ -851,8 +965,13 @@ config_review() {
     return 0
   fi
 
-  # 留 3 行给倒计时和余量。装不下就砍最长的那一段（砍掉几行会如实写在屏幕上）。
-  cfg_fit $(( ROWS - 3 ))
+  # 留出：标题条（大字六行 / 矮屏一行，问 brand_rows）+ 倒计时 1 行 + 余量 2 行。
+  # 装不下就砍最长的那一段（砍掉几行会如实写在屏幕上）。
+  BRAND_COMPACT=0
+  cfg_fit $(( ROWS - $(brand_rows) - 3 ))
+  # 每段都砍到只剩一行了还是超（段特别多的机器）：**先牺牲大字**，不牺牲数据。
+  brand_fit $(( $(_cfg_height) + 3 ))
+  (( BRAND_COMPACT )) && cfg_fit $(( ROWS - 1 - 3 ))
 
   local stamp; stamp="$(date '+%Y-%m-%d %H:%M:%S')"
 

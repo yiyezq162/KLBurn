@@ -381,6 +381,7 @@ if ! jq -e -s 'length > 0' "$RUN_DIR/results.jsonl" >/dev/null 2>&1; then
   warn "The machine was NOT evaluated. Re-test; do not ship on this report."
 fi
 
+brand_bar "$(panel_width)" "TEST COMPLETE"
 verdict_banner "$OVERALL"
 
 # 大字之后再说一次原因：这个 FAIL 说的是"这轮测试作废"，不是"这台机器坏了"。

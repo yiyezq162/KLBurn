@@ -343,8 +343,11 @@ for w in 80 100 120; do
 done
 
 panel="$(cfg_panel 80 '2026-08-02 14:33:07')"
-check "面板抬头有版本号和标题" "1" \
-      "$(printf '%s\n' "$panel" | grep -c 'KLBurn v9.9.9.*CONFIGURATION REVIEW.*2026-08-02' || true)"
+# 1.7.3 起版本号在标题条上、页名在框内那一行，分两行
+check "标题条上有产品名和版本号" "1" \
+      "$(printf '%s\n' "$panel" | grep -c 'KLBurn v9.9.9.*Server Factory Burn-in Test.*2026-08-02' || true)"
+check "框内那行写着当前是哪一页" "1" \
+      "$(printf '%s\n' "$panel" | grep -c '^|.*CONFIGURATION REVIEW.*|$' || true)"
 check "六个分区标题都在" "6" \
       "$(printf '%s\n' "$panel" | grep -cE '^\|  (SYSTEM|CPU|MEMORY|STORAGE|GPU|PLATFORM) ' || true)"
 
@@ -460,6 +463,69 @@ check "config_review 落盘那份要先把颜色关掉再生成" "yes" \
       "$(if declare -f config_review | grep -q 'panel_palette 0'; then echo yes; else echo no; fi)"
 
 panel_palette 0
+
+# ---- 标题条：每块整屏页面开头都得有 ----
+# 现场那块屏经常被拍照发群里，看到的不该是"一屏滚动的日志"，
+# 而是一个有名字的软件。所以是**大字**，而且每一页都在。
+panel_palette 0
+
+# ---- 高屏：大字标题 ----
+ROWS=50
+BRAND_COMPACT=0
+BIG="$(brand_bar 80 'CONFIGURATION REVIEW')"
+assert_ascii "大字标题" "$BIG"
+check "大字标题是 5 行艺术字 + 1 行说明" "6" "$(nlines "$BIG")"
+check "艺术字拼出来的是 KLBurn（现场认的就是这个）" "1" \
+      "$(printf '%s\n' "$BIG" | grep -cF '|_|\_\_____|_|' || true)"
+check "说明行有版本号" "1" \
+      "$(printf '%s\n' "$BIG" | grep -c 'Server Factory Burn-in Test   v9.9.9' || true)"
+check "说明行右侧写着当前是哪一页" "1" \
+      "$(printf '%s\n' "$BIG" | grep -c 'CONFIGURATION REVIEW *$' || true)"
+check "艺术字任何一行都不许超过面板宽度（超了就折行，折行就滚屏）" "0" \
+      "$(printf '%s\n' "$BIG" | awk 'length($0) > 80' | grep -c . || true)"
+assert_width "大字标题的说明行" "$(printf '%s\n' "$BIG" | tail -1)" 80
+check "brand_rows 报的行数和实际画出来的一致" "$(nlines "$BIG")" "$(brand_rows)"
+
+# ---- 矮屏（80x25 的 BMC 控制台）：退化成一行 ----
+# 大字要占六行，25 行的屏上配置核对那一屏就没地方了。
+ROWS=25
+SMALL="$(brand_bar 80 'CONFIGURATION REVIEW')"
+check "矮屏上退化成一行" "1" "$(nlines "$SMALL")"
+check "矮屏上 brand_rows 也报 1" "1" "$(brand_rows)"
+assert_width "矮屏标题行" "$SMALL" 80
+check "退化那行照样有产品名和版本号" "1" \
+      "$(printf '%s\n' "$SMALL" | grep -c 'KLBurn v9.9.9' || true)"
+
+# ---- 装不下的时候先牺牲大字，不牺牲数据 ----
+# 整屏重绘一旦超出屏幕就滚屏，滚完 ESC[H 回的原点和面板第一行对不上，越刷越歪。
+ROWS=40
+brand_fit 30; check "放得下就放大字" "6" "$(brand_rows)"
+brand_fit 36; check "放不下就退成一行（宁可丢装饰，不丢数据）" "1" "$(brand_rows)"
+brand_fit 39; check "刚好差一行也退" "1" "$(brand_rows)"
+ROWS=50; BRAND_COMPACT=0
+
+# ---- 颜色：绿色，不是反显 ----
+panel_palette 1
+check "大字标题是绿色的" "yes" \
+      "$(if [[ "$(brand_bar 80 x)" == *$'\033[1;32m'* ]]; then echo yes; else echo no; fi)"
+# 反显（背景色）在真控制台上是一整条扎眼的色块，和 ASCII 框线是两种视觉语言。
+check "界面上任何地方都不许用反显/背景色" "0" \
+      "$(brand_bar 80 x | grep -c '4[0-7]m' || true)"
+check "去掉转义码之后和不上色时一字不差" "$BIG" \
+      "$(brand_bar 80 'CONFIGURATION REVIEW' | strip_ansi)"
+panel_palette 0
+
+# 开机那张和各个页面用的必须是**同一套**大字 —— 两处各画各的，改一处就对不上了
+check "开机 banner 和页面标题共用同一套艺术字" "yes" \
+      "$(if declare -f banner | grep -q '_BRAND_ART'; then echo yes; else echo no; fi)"
+
+# 每一块整屏页面都要有它 —— 少一块，那一页就"掉牌子"了
+for f in cfg_panel dash_burn dash_disk select_duration; do
+  check "$f 第一行是标题条" "1" "$(declare -f "$f" | grep -c 'brand_bar' || true)"
+done
+check "破坏性写确认那屏也要有" "1" \
+      "$(grep -c 'brand_bar' "$LIB/storage.sh" || true)"
+check "最终结论那屏也要有" "1" "$(grep -c '^brand_bar' "$FT" || true)"
 
 # ---- 抬头三段不许重复（截图看出来的）----
 # 第一版把 label 同时当中间段和右边段用，屏幕上就成了
