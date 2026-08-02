@@ -41,6 +41,19 @@
 | 9 | **非 Broadcom 阵列卡的管理工具** | `perccli64`/`arcconf`/`ssacli`/`sas3ircu` 这几个闭源二进制我们手上没有，测试里全是桩 | 放好对应工具后，`raw/raid/` 下要有**真的输出**（型号、固件版本、逻辑盘状态），不是一行报错。没放工具时那一项必须是 SKIP，**绝不能是 FAIL** |
 | 10 | **需要固件才能起来的网卡** | QEMU 里只有 virtio | 插 `bnx2x`（Broadcom 10G）或 `ice`（Intel E810）的机器上，`ip link` 要看得到物理口，`dmesg` 里不许有 `Direct firmware load ... failed`。1.5.0 之前这些卡在盘里根本起不来 |
 
+### 1.7.0 新增的，一样只能上真机验
+
+| # | 项 | 为什么盖不到 | 看什么才算过 |
+|---|---|---|---|
+| 11 | **`gpu_burn` 在真显卡上跑得起来** | 无 GPU 直通 | **这条优先级仅次于阵列卡。** 1.6.0 及以前的盘里 `gpu_burn` 只带了 sm_120 一代的 cubin（`nvprune --arch` 重复写不叠加），H200 / 4090 / A100 / 3060 上 cuBLAS 会找不到可用核、非零退出，然后被判成「显卡故障」。1.7.0 改成 `-gencode` 并补了 sm_75。**修法在构建期有自检，但"真卡上真能跑"一次都没验过** —— 第一张能借到的 N 卡上要看到 `stress_gpu` PASS、`gpu-burn.log` 里 `GPU N: OK` |
+| 12 | **内存 ECC 计数（`verify_ecc`）** | QEMU 无 EDAC | 有 EDAC 的机器上 `raw/counters-pre.txt` 要有 `ECC` 行、且**标签是插槽名**（`CPU0_DIMM_A1` 这种，能对到主板丝印）。读不到就该是 SKIP，**绝不能是 FAIL** |
+| 13 | **CPU 热节流计数（`verify_throttle`）** | QEMU 无 `thermal_throttle` | `counters-pre.txt` 有 `THROTTLE` 行。想主动验一次：把风扇调到最低跑 QUICK，应判 WARN 而不是 FAIL |
+| 14 | **PCIe AER 计数（`verify_aer`）** | QEMU 不开 AER | `counters-pre.txt` 有 `AER` 行。固件没开 AER 的机器上该是 SKIP |
+| 15 | **LLDP 邻居** | QEMU 无交换机 | 接了交换机的口上 `raw/deep/lldp-neighbors.txt` 要有对端设备名和端口号。**同时确认交换机侧看不到我们发的通告**（我们只用接收模式） |
+| 16 | **`fwupdmgr` / `turbostat` / `sg_ses` / `mstflint` / NVMe 厂商插件** | 都要真硬件 | 各自的 `raw/deep/*.txt` 里是真输出而不是一行报错。**这几样都只留档、不参与判定**，读不到不影响任何结论 |
+| 17 | **新界面在真 BMC KVM 上** | QEMU 的显示不等于 BMC 的 KVM | 配置核对面板和压测仪表盘的框线要是整齐的 ASCII，不能有乱码或错位；80 列的串口/KVM 下也不许折行 |
+| 18 | **HWE 内核（如果启用了 `KLBURN_KERNEL=hwe`）** | 引导链和驱动集全变了 | 默认是 `generic`。要切之前，先在真机上确认：认得到所有硬盘和网卡、`nvidia-smi` 正常、BMC 和阵列卡照常。**这一项没在任何真机上跑过** |
+
 ---
 
 ## 二、破坏性写盘：QEMU 里过了，真机上还得再过一次

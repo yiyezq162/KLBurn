@@ -18,7 +18,18 @@ git tag -l --sort=version:refname
 ```
 
 已有：`v0.4.0` `v0.8.0` `v1.1.0` `v1.2.0` `v1.3.0` `v1.4.0` `v1.4.2`
-`v1.5.0` `v1.6.0`。
+`v1.5.0` `v1.6.0` `v1.7.0`。
+
+1.7.0 改动比较大（四块互不相干的事），所以除了版本 tag，还**按功能各打了一个**，
+方便日后只回看/只回退其中一块：
+
+| tag | 指向 | 那一块是什么 |
+|---|---|---|
+| `v1.7.0-ui` | 界面那个 commit | 配置核对面板 + 整屏重绘的压测仪表盘 |
+| `v1.7.0-report` | 报告那个 commit | 内部报告重做（中性用词、九节结构、文件索引） |
+| `v1.7.0-hw-compat` | pci.ids 那个 commit | 认得出新硬件 + gpu_burn 只带一代 cubin 的修复 |
+| `v1.7.0-diag` | collect/verify 那个 commit | 内存 ECC / 热节流 / PCIe AER 三条新判定 |
+| **`v1.7.0`** | **那张盘构建自的 commit** | 版本 tag，`GIT_COMMIT` 和它对得上 |
 
 **版本号和 tag 不是一一对应的**，对不上的都有原因，别当成漏打：
 
@@ -143,6 +154,148 @@ git tag -l --sort=version:refname
   折叠块）。**单文件、内嵌 CSS、不引任何外部资源**（现场无网络，报告要能离线
   双击打开），并补了打印样式（工程人员会打出来夹进机器箱）。
   这三条都有断言守着。
+
+### 硬件兼容性：这一版取向反过来，兼容性优先、体积次要
+
+- **`pci.ids` 从 2024-03-31 更新到构建当天。** 两年前的库认不出新卡：
+  H200 / RTX 50xx / ConnectX-8 / 新阵列卡在 lspci 里只显示成 `Device 2335`。
+  而网卡型号（`nic_pci_model`）和阵列卡型号（`collect_raid`）都是按总线地址
+  从 lspci 反查的 —— 库一旧整条链就断了，报告里"这台机器装了什么卡"直接失真。
+  `usb.ids` 和 smartmontools 的 drivedb 同理。
+
+  下载放在构建脚本**外层**（那里已经要求有 curl），**失败一律降级用镜像自带
+  那份，绝不让构建失败** —— 现场可能根本没有外网。
+  新增断言：`pci.ids` / `usb.ids` 的日期不能比**今天**早两年以上
+  （比的是今天而不是 ISO 里记的构建日期 —— 拿后者当基准等于自己给自己打分）。
+
+- **`amdgpu` / `radeon` 固件加回来了**（1.5.0 为了控体积剪掉的）。模块还在、
+  固件没了的表现是：装了 AMD 独显的机器显示驱动起不来、屏幕点不亮，
+  而且全程零报错。`check-firmware.sh` 现在盯着这两个目录的文件数。
+
+- ⚠️ **修好一个一直存在、但从没被发现的 gpu_burn bug。**
+  查 `GPU_ARCHS` 时顺带挖出来的，比上面两条严重得多：
+
+      nvprune 的 --arch 重复写**不叠加，最后一个赢**。实测 CUDA 12.8：
+        --arch=sm_75                  -> 71,072,022
+        --arch=sm_90                  -> 82,703,390
+        --arch=sm_75 --arch=sm_90     -> 82,703,390   和只留 sm_90 一模一样
+        -gencode ...75 -gencode ...90 -> 83,980,894   这才是两代都留
+
+  也就是说 **1.6.0 及以前出的盘，`gpu_burn` 只带了列表里最后那一代
+  （sm_120 / Blackwell）的 cubin**。后果不是"跑得慢"：H200 / 4090 / A100 /
+  3060 上 cuBLAS 找不到可用核 → `gpu_burn` 非零退出 → `gpu_stress` 判
+  FAIL「gpu_burn 异常退出」→ **一张好卡被判成坏卡**。
+  一直没被发现，是因为至今没有一次构建在真显卡上跑过。
+
+  改用 `-gencode`，并加了自检：多代裁剪的结果必须**严格大于**只留单独一代，
+  哪天参数语义又变了会当场跑红。`GPU_ARCHS` 同时补上 **75（Turing / T4）**。
+
+- **盘里补上六个深度诊断工具**（全在 Ubuntu 官方源，不需要闭源二进制）：
+  `rasdaemon`（逐条 DIMM 的 ECC 计数）、`edac-utils`、`mstflint`（迈络思固件）、
+  `cpuid`、`msr-tools`、`lldpd`（网口对端交换机与端口）。
+  装它们是为了那几条**命令**，不是为了 daemon —— service 一律 mask，
+  理由和 smartd 一样：压测期间不能有别的东西在后台动硬件、抢 IO。
+
+- **NVIDIA 驱动覆盖范围：维持只带 open 内核模块，不做双驱动。**
+  查了 595.84 自带的 `supported-gpus.json`（2320 条），3060（Ampere）和
+  H200（Hopper）都在 open 模块支持范围内，这一版对这两张卡都是好的。
+  再往下覆盖 Pascal/Volta 的双驱动方案**没有做**：手上没有那一代的卡、
+  QEMU 也没有真显卡，做出来就是把一套没跑过的"开机按 PCI ID 选 modprobe
+  哪一套模块"的机制直接发到现场。退而求其次那条路已经成立并补了端到端测试
+  （见下）。
+
+### 新采的数据要有人判、有人看
+
+新增三条判定，判的都是**压测前后的差值**（一台用过的机器带着历史计数是正常的，
+要回答的是"这一轮压测把什么逼出来了"，和 SMART 前后对比同一个口径）：
+
+| 判定 | PASS | WARN | SKIP | FAIL |
+|---|---|---|---|---|
+| `verify_ecc` | 前后无新增 | 新增**可纠正** | 内核无 EDAC 接口 | 新增**不可纠正** |
+| `verify_throttle` | 压测期间没节流 | 压测期间有节流 | 无 thermal_throttle | — |
+| `verify_aer` | 前后无新增 | 新增可纠正 | 固件未开放 AER | 新增不可纠正 |
+
+- **`verify_ecc` 是这一版最有价值的新数据。** 一条开始出可纠正 ECC 错误的内存，
+  机器照样能跑、压测照样过，但装到客户机房里会越来越频繁，最后变成不可纠正
+  —— 那是宕机。在这之前我们只能扫 dmesg 关键字，既不结构化，
+  也归不到具体是哪一条内存上。
+- **`verify_throttle` 最容易被忽略：** 散热不行、但温度没到告警线的机器，
+  只有它看得出来 —— CPU 自己在降频保护，于是温度曲线反而好看。
+
+⚠️ 三样计数器全部取自**内核自带的 sysfs**，**不依赖 `ras-mc-ctl` / `edac-util`**。
+盘里带那两个工具只是为了多一份人可读的原始记录。这很要紧：工具没带是能力缺失，
+不能因此判故障。读不到接口一律 SKIP —— 很多平台和虚拟机压根没有 EDAC。
+
+其余新采、只留档不判定的：turbostat 逐核采样、NVMe 厂商扩展 SMART 页、
+`sg_ses` 机框/背板状态、`mstflint` 迈络思固件、`fwupdmgr` 全机固件版本清单、
+LLDP 邻居、`cpuid`、`rdmsr`。全部接进内部报告第七节 —— **采了没人看等于没采**。
+`sys_metrics.csv` 加了 `ecc_ce` / `ecc_ue` 两列（**加在末尾**，§11-17）。
+
+LLDP 那个 daemon 只用**接收模式**拉起：出厂测试是来看这台机器的，
+不该往客户的交换机上发我们自己的通告。
+
+### HWE 内核：加了开关，但**没打通，默认仍然是 generic**
+
+新增 `KLBURN_KERNEL=generic|hwe`。24.04 的 HWE 内核（`linux-generic-hwe-24.04`，
+实测 **7.0.0-28-generic，6907 个模块，比 GA 多 428 个**）对新硬件支持广得多，
+是这一版理论上最大的兼容性杠杆。
+
+实际试了四轮，**构建期该过的关全过了**：
+
+- 装上 HWE、把 GA purge 掉，「有且只有一个内核且 == `casper/vmlinuz`」这条硬断言
+  照常成立（只是它现在盯的是新内核）
+- **NVIDIA 595.84 能为 7.0 内核编出 open 模块**（`license = Dual MIT/GPL`）——
+  这是开工前最大的未知数
+- `check-firmware.sh` 36 项全绿：35 个固件在新内核下**重新对账**，一个不缺
+- `exfat` / `megaraid_sas` / `mpt3sas` / `nvme` / `mpi3mr` / `smartpqi` 都在
+
+**卡在最后一关：重新生成的 initrd 不是 casper 的 live initrd。**
+e2e 冒烟实测，开机停在
+
+```
+No root device specified. Boot arguments must include a root= parameter.
+BusyBox v1.36.1 ... (initramfs)
+```
+
+报告一个字都写不出来。已经查明两件事：`casper` 包和 `linux-firmware` 是一模一样的坑
+（dpkg 说装了、文件被镜像剪光，要 `--reinstall` 装回来，已做）；装回来之后
+initramfs-tools 仍然不带它的 boot 脚本，因为 `initramfs.conf` 里是 `BOOT=local`，
+要 `BOOT=casper` 才会带 —— **下一步就从这里接着走，但还没验，后面也可能还有别的
+live 集成细节。**
+
+所以这一项按计划**单独停在这儿，不硬上**：默认留 `generic`，这一版出的盘和
+1.6.0 用的是同一个 6.8.0-100 内核。`chroot-setup.sh` 里加了一条自检
+（生成完检查 initrd 里到底有没有 casper 的 boot 脚本），
+**最坏的结果是构建停下，不会做出一张开不了机的盘。**
+
+另外 `hwe` 模式一律强制重解 ISO 与 rootfs：那条路的 chroot 会改掉 rootfs 里的内核，
+而 `casper/vmlinuz` 要等 chroot 跑完才替换，两者不同步时下一轮就对不上
+（第一次失败之后直接重跑就撞上了）。
+
+### 顺带修好的两个构建期问题
+
+这两个都是做 HWE 内核时撞出来的，但**和 HWE 无关，generic 路径一样会中招** ——
+只是一直没人从全新工作区构建过，所以没暴露：
+
+- **`amd64-microcode` 会被 `autoremove` 收走。** `config.sh` 里 `PKGS_PLATFORM`
+  那段的原话是「显式列在这里 = 手动安装标记 = autoremove 不会碰」，
+  而这句话建立在"`apt-get install` 一定会把包标成 manual"这个假设上 ——
+  实测**不总是成立**：全新工作区里 `amd64-microcode` 从 3.20250311 升到
+  3.20251202，装完是在的，等清理内核那步 purge 掉 GA 内核再 autoremove，
+  它就连包带文件一起没了。
+
+  1.5.0 加的那条微码断言当场把构建拦下了（它就是为这个加的）。
+  根因修法：清理内核**之前**显式 `apt-mark manual "${PKGS_PLATFORM[@]}"` ——
+  直接改标记，不依赖任何关于 apt 行为的假设。断言保留，另加一层重装兜底。
+
+  > 缺微码的后果：本该被微码修掉的 CPU 勘误会在压测里冒出来，
+  > 然后被记成"这台机器不稳定"—— 又是一次把好机器拦在出货前。
+
+- **`tests/test-screen-render.sh` 提交时没有可执行位。** 源码在 Windows 上编辑，
+  git 的 `core.filemode` 是 false，新文件默认 100644。而 `run-all.sh` 是
+  `./tests/xxx.sh` 直接执行的 —— 没有可执行位就是 Permission denied，
+  整条套件**不计数也不报错**，屏幕上看起来只是少了一节。
+  只有在 ext4 的 worktree 里逐个 commit 复核时才看得见。已修到引入它的那个 commit 上。
 
 ---
 

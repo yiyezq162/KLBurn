@@ -110,6 +110,46 @@ if [[ -z "${INCLUDE_NVIDIA:-}" ]]; then
   fi
 fi
 
+# ---------- 用哪个内核 ----------
+# generic = 24.04 的 GA 内核（6.8），源 ISO 自带的那个，一直用到 1.6.0
+# hwe     = 24.04 的 HWE 内核（linux-generic-hwe-24.04），对**新硬件**支持广得多：
+#           新网卡、新 NVMe、新阵列卡、新平台的 PCIe / EDAC
+#
+#     KLBURN_KERNEL=hwe sudo -E ./build/build-iso.sh
+#
+# ⚠️⚠️ **hwe 这条路 1.7.0 还没打通，默认必须留 generic。**
+#
+# 1.7.0 实际试了四轮，进展和卡点都很明确：
+#
+#   已经过了的关：
+#     装 linux-generic-hwe-24.04（7.0.0-28-generic，6907 个模块，比 GA 多 428 个）
+#     NVIDIA 595.84 能为 7.0 内核编出 open 模块（license = Dual MIT/GPL）
+#     清理多余内核之后只剩新内核，和 casper/vmlinuz 对得上
+#     check-firmware 36 项全绿（35 个固件在新内核下重新对账，一个不缺）
+#     exfat / megaraid_sas / mpt3sas / nvme / mpi3mr / smartpqi 模块都在
+#
+#   卡在哪：**重新生成的 initrd 不是 casper 的 live initrd。**
+#     直接 update-initramfs 出来的是个普通 initrd，开机停在
+#         No root device specified. Boot arguments must include a root= parameter.
+#         BusyBox ... (initramfs)
+#     报告一个字都写不出来（e2e 冒烟实测，截图在手）。
+#     已经查明两件事：casper 包和 linux-firmware 一样被镜像剪光了文件（要
+#     --reinstall 装回来，已做）；装回来之后 initramfs-tools 仍然不带它的 boot
+#     脚本，因为 initramfs.conf 里 BOOT=local，要改成 BOOT=casper 才会带。
+#     **下一步就是从这里接着走**，但还没验，也可能后面还有别的 live 集成细节。
+#
+#   chroot-setup.sh 里有一条自检（生成完检查 initrd 里有没有 casper 的 boot 脚本），
+#   所以现在最坏的结果是**构建停下**，不会做出一张开不了机的盘。
+#
+# 换内核之后必须重新过的关，一关都不能少：
+#   build-iso.sh 的内核唯一性 + 与 casper/vmlinuz 对版本          [已过]
+#   tests/check-firmware.sh（驱动要的固件文件名会随内核版本变）    [已过]
+#   exfat / megaraid_sas / mpt3sas / nvme 模块自检                 [已过]
+#   e2e 冒烟 BIOS 和 UEFI **都要**（引导链完全不同）               [没过：停在 initramfs]
+#   e2e --stage full --disk-stress 完整跑一遍                      [没跑到]
+KLBURN_KERNEL="${KLBURN_KERNEL:-generic}"
+HWE_KERNEL_PKG="linux-generic-hwe-24.04"
+
 # ---------- squashfs 层裁剪 ----------
 # 24.04.4 的 live server ISO 有 5 层 squashfs，依赖链靠文件名里的点表示
 # （下面是压缩后的体积，解开约 3~4 倍）：

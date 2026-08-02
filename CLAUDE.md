@@ -34,6 +34,9 @@ wsl -d Ubuntu-24.04 -u root -e bash -c "cd /mnt/c/Users/li/Desktop/project/KLBur
 - 首次约 10~15 分钟，增量约 5~8 分钟；产物自动拷回项目的 `out/`
 - 带显卡驱动是**自动**的：`vendor/nvidia/*.run` 在就带上。
   `--without-nvidia` 强制不带，`--with-nvidia` 强制带（缺驱动会直接报错）
+- 换 HWE 内核：`KLBURN_KERNEL=hwe`（**默认 generic，别随手改默认**，
+  理由和验收清单见 [`docs/architecture.md`](docs/architecture.md) 的
+  「用哪个内核」一节）。hwe 一律强制重解 ISO 与 rootfs，所以要多花几分钟
 - 构建第一步会强制校验源 ISO 的 sha256（`config.sh` 里钉着官方值），
   每次构建都跑，没有 stamp 跳过
 

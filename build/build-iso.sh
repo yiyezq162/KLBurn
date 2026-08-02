@@ -100,6 +100,40 @@ if (( OPT_CLEAN )); then
 fi
 
 mkdir -p "$CACHE_DIR" "$OUT_DIR" "$STAMP_DIR"
+
+# ---------------------------------------------------------------- 换内核要强制重解
+# 增量构建复用上一轮的 ISO 目录树和 rootfs。而 KLBURN_KERNEL 一换，这两样
+# 都不能再复用：
+#   hwe -> generic  casper/vmlinuz 还是上一轮换上去的 HWE 内核、rootfs 里也只有
+#                   HWE 的模块，而 generic 模式不会把 GA 装回来 —— 于是做出来的
+#                   盘明明是 HWE 的，却自称 generic。
+#   generic -> hwe  这个方向本来是安全的（chroot 里会装新内核再清旧的），
+#                   但一并处理更省心，也省得下次有人改了顺序又踩回去。
+# 所以把上一轮的模式记在 stamp 里，一旦不同就当 --rebuild-fs 处理。
+KERNEL_STAMP="$STAMP_DIR/kernel-flavour"
+PREV_KERNEL="$(cat "$KERNEL_STAMP" 2>/dev/null || true)"
+if [[ -n "$PREV_KERNEL" && "$PREV_KERNEL" != "$KLBURN_KERNEL" ]]; then
+  warn "内核从 $PREV_KERNEL 换成 $KLBURN_KERNEL —— 强制重新解包 ISO 与 rootfs（不能复用上一轮的）"
+  OPT_REBUILD_FS=1
+fi
+printf '%s\n' "$KLBURN_KERNEL" > "$KERNEL_STAMP"
+
+# hwe 模式**一律**重解，不做增量。
+#
+# 理由：hwe 那条路的 chroot 会**改掉 rootfs 里的内核**（装 HWE、purge GA），
+# 而 casper/vmlinuz 要等 chroot 跑完才被替换。这两样一旦不同步，下一轮就对不上：
+#
+#   实测：第一次 hwe 构建在最后的微码断言上失败了 —— 此时 rootfs 里已经只剩
+#   7.0.0-28，而 casper/vmlinuz 还是 6.8.0-100。直接重跑一次，ISO_KVER 读成
+#   6.8.0-100、chroot 里却只有 7.0.0-28，报
+#   "ISO_KVER=6.8.0-100-generic 在 /lib/modules 下不存在"。
+#
+# 只在"上一次成功"时增量才是对的 —— 而"只要上次没失败就没问题"这种前提，
+# 这个项目一向不接受。多花几分钟重解，换掉一整类查起来很绕的失败。
+if [[ "$KLBURN_KERNEL" == "hwe" ]]; then
+  (( OPT_REBUILD_FS )) || log "hwe 模式：强制重新解包 ISO 与 rootfs（chroot 会改掉内核，增量不安全）"
+  OPT_REBUILD_FS=1
+fi
 ledger_init "$LEDGER"
 
 # ---------------------------------------------------------------- 异常清理
@@ -162,6 +196,8 @@ ISO_KVER="$(bzimage_kver "$ISO_DIR/casper/vmlinuz" || true)"
   || die "读不出 casper/vmlinuz 的内核版本。没有它就只能靠猜哪套模块该留，
      而猜错的表现是开机认不到任何硬盘 —— 宁可在这里停下。"
 log "引导内核: $ISO_KVER"
+[[ "$KLBURN_KERNEL" == "hwe" ]] \
+  && log "KLBURN_KERNEL=hwe：chroot 里会装 ${HWE_KERNEL_PKG}，之后替换 casper/vmlinuz 与 initrd"
 
 # 记录原始卷标，重打包时原样保留（避免 UEFI grub 找不到介质）
 ISO_LABEL="$(xorriso -indev "$SRC_ISO" -pvd_info 2>/dev/null \
@@ -330,6 +366,11 @@ NVIDIA_VERSION="${NVIDIA_VERSION}"
 # casper/vmlinuz 的内核版本。chroot 里看不到 ISO 目录树，只能从外面传进去；
 # 里面**不许**再用 \`ls /lib/modules | head -1\` 猜（那时候常常有两套内核）。
 ISO_KVER="${ISO_KVER}"
+# 用哪个内核。config.sh 里那行是 \`\${KLBURN_KERNEL:-generic}\`，而 chroot 里
+# 没有外面的环境变量 —— 不钉死的话 \`KLBURN_KERNEL=hwe ./build-iso.sh\`
+# 在 chroot 里会读成 generic，于是 HWE 那一段静默不执行。
+# 和 INCLUDE_NVIDIA 同一个道理。
+KLBURN_KERNEL="${KLBURN_KERNEL}"
 EOF
 
 # rootfs 覆盖层（去 CRLF 后再拷）
@@ -381,6 +422,36 @@ if ! in_chroot "$ROOTFS_DIR" /bin/bash /tmp/klburn-stage/chroot-setup.sh; then
   die "chroot 定制失败，详见上方输出"
 fi
 chroot_umount "$ROOTFS_DIR"
+
+# ---------------------------------------------------------------- HWE：换引导文件
+# chroot 里装了新内核、也重新生成了 casper 的 initramfs，现在把这两个文件
+# 换进 ISO 目录树。**必须在 rm -rf "$STAGE" 之前做**（那两个文件就在 STAGE 里）。
+#
+# 换完立刻重新读一次 casper/vmlinuz 的版本：下面那条"内核唯一性 + 与
+# casper/vmlinuz 对版本"的硬断言用的就是 ISO_KVER，不更新的话它会拿旧的 GA
+# 版本去比，然后**误报**成"对不上"——而真正对不上的时候它反倒可能放过去。
+if [[ "${KLBURN_KERNEL:-generic}" == "hwe" ]]; then
+  # 不走交接文件：chroot 收尾时会 `rm -rf /tmp/*`，而 $STAGE 就在那底下。
+  # 直接按 rootfs 里**唯一**那个内核版本去 /boot 取（唯一性下面还会再断言一次）。
+  HWE_MODROOT="$ROOTFS_DIR/usr/lib/modules"
+  [[ -d "$HWE_MODROOT" ]] || HWE_MODROOT="$ROOTFS_DIR/lib/modules"
+  mapfile -t HWE_KVERS < <(
+    find "$HWE_MODROOT" -mindepth 1 -maxdepth 1 -type d -printf '%f\n' 2>/dev/null | sort
+  )
+  (( ${#HWE_KVERS[@]} == 1 )) \
+    || die "hwe：rootfs 里有 ${#HWE_KVERS[@]} 套内核模块（应该只剩 1 套）: ${HWE_KVERS[*]:-空}"
+  HWE_KVER="${HWE_KVERS[0]}"
+  [[ -f "$ROOTFS_DIR/boot/vmlinuz-$HWE_KVER" && -f "$ROOTFS_DIR/boot/initrd.img-$HWE_KVER" ]] \
+    || die "hwe：rootfs 的 /boot 下没有 $HWE_KVER 的 vmlinuz/initrd —— 看上面 chroot 的输出"
+  install -m 0644 "$ROOTFS_DIR/boot/vmlinuz-$HWE_KVER"    "$ISO_DIR/casper/vmlinuz"
+  install -m 0644 "$ROOTFS_DIR/boot/initrd.img-$HWE_KVER" "$ISO_DIR/casper/initrd"
+  ISO_KVER="$(bzimage_kver "$ISO_DIR/casper/vmlinuz" || true)"
+  [[ -n "$ISO_KVER" ]] \
+    || die "换完 HWE 内核之后读不出 casper/vmlinuz 的版本 —— 拷过去的可能不是个 bzImage"
+  [[ "$ISO_KVER" == "$HWE_KVER" ]] \
+    || die "hwe：casper/vmlinuz 读出来是 $ISO_KVER，而模块目录是 $HWE_KVER —— 对不上"
+  log "casper/vmlinuz 已换成 HWE 内核: $ISO_KVER"
+fi
 
 rm -rf "$STAGE"
 log "chroot 定制完成"

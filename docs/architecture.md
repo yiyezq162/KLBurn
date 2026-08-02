@@ -578,6 +578,37 @@ HP Gen8-9 上到处都是）必须先加载固件才能起来；固件不在 →
 被 `gpu.sh` 判 FAIL「驱动加载失败」，好卡判成坏卡。
 `chroot-setup.sh` 里有断言把这件事钉在构建期。
 
+### 用哪个内核：`KLBURN_KERNEL=generic|hwe`
+
+`generic`（默认）用源 ISO 自带的 24.04 GA 内核；`hwe` 换成
+`linux-generic-hwe-24.04`，对**新硬件**支持广得多（新网卡、新 NVMe、新阵列卡、
+新平台的 PCIe / EDAC）。
+
+```bash
+KLBURN_KERNEL=hwe sudo -E ./build/build-iso.sh
+```
+
+`hwe` 那条路做的事：chroot 里装 HWE 内核 → 把 `$KVER` 换成新版本
+（于是 NVIDIA 模块直接为新内核编译）→「清理多余内核」照常把 GA 那套 purge 掉
+→ 用新内核重新生成 casper 的 initramfs → 出了 chroot 把 `casper/vmlinuz` 和
+`casper/initrd` 换成新的 → 重新读一次 `ISO_KVER`。
+**「有且只有一个内核、且版本 == `casper/vmlinuz`」这条硬断言一点没放松**，
+只是它现在盯的是新内核。
+
+⚠️ **`hwe` 模式一律强制重解 ISO 与 rootfs，不做增量。** 因为那条路的 chroot
+会**改掉 rootfs 里的内核**，而 `casper/vmlinuz` 要等 chroot 跑完才被替换 ——
+两者一旦不同步（比如上一次 hwe 构建中途失败了），下一轮 `ISO_KVER` 读到的是旧的、
+chroot 里却只有新的，报「ISO_KVER 在 /lib/modules 下不存在」。
+"只要上次没失败就没问题"这种前提不能要。
+
+> ⚠️ **`hwe` 这条路 1.7.0 还没打通，别改默认。** 构建期该过的关都过了
+> （装 7.0.0-28、NVIDIA 为新内核编出 open 模块、只剩一个内核、35 个固件重新对账
+> 全绿、exfat/megaraid_sas/mpt3sas/nvme 都在），卡在**重新生成的 initrd
+> 不是 casper 的 live initrd** —— 开机停在 `(initramfs)` 提示符，报告写不出来。
+> 已查明的两点和下一步写在 `config.sh` 的 `KLBURN_KERNEL` 那段。
+> `chroot-setup.sh` 里有自检（生成完检查 initrd 里有没有 casper 的 boot 脚本），
+> 所以最坏的结果是**构建停下**，不会做出一张开不了机的盘。
+
 ### 盘里只能有一个内核
 
 `casper/vmlinuz` 引导哪个内核，`/lib/modules` 下就只该有哪个。

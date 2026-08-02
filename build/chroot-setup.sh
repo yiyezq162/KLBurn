@@ -85,6 +85,41 @@ KVER="${ISO_KVER:-}"
   || fail "ISO_KVER=$KVER 在 /lib/modules 下不存在，现有: $(ls -1 /lib/modules | tr '\n' ' ')"
 say "目标内核（casper/vmlinuz 引导的那个）: $KVER"
 
+# ---------------------------------------------------------------- 可选：换 HWE 内核
+# 24.04 的 HWE 内核对**新硬件**支持广得多（新网卡、新 NVMe、新阵列卡、
+# 新平台的 PCIe / EDAC）。默认不开，见 config.sh 里 KLBURN_KERNEL 那段。
+#
+# 换法是"装上新的、把旧的清掉"，**不是"留两个"** —— 盘里只能有一个内核这条
+# 不变量不放松（两套内核意味着"开机会加载哪一套"不确定，而搞反的表现是
+# 开机认不到任何硬盘）。下面「清理多余内核」那一段照常会把 GA 那套 purge 掉，
+# 因为这里已经把 $KVER 改成新内核了。
+if [[ "${KLBURN_KERNEL:-generic}" == "hwe" ]]; then
+  say "=== 换 HWE 内核（KLBURN_KERNEL=hwe）==="
+  GA_KVER="$KVER"
+  apt-get install -y -qq --no-install-recommends "${HWE_KERNEL_PKG:?}" \
+    || fail "装 ${HWE_KERNEL_PKG} 失败"
+
+  # 新内核 = /lib/modules 下不是 GA 那个的、版本号最大的那个。
+  # 用 glob 不用 `ls | grep`（shellcheck SC2010，而且内核版本号里带点和减号，
+  # 交给 ls 解析本来就没必要）。
+  KCANDS=()
+  for kd in /lib/modules/*/; do
+    kb="$(basename "$kd")"
+    [[ "$kb" == "$GA_KVER" ]] && continue
+    [[ -d "$kd" ]] && KCANDS+=("$kb")
+  done
+  NEW_KVER=""
+  if ((${#KCANDS[@]})); then
+    NEW_KVER="$(printf '%s\n' "${KCANDS[@]}" | sort -V | tail -1)"
+  fi
+  [[ -n "$NEW_KVER" ]] \
+    || fail "装完 ${HWE_KERNEL_PKG} 之后 /lib/modules 下没有出现新内核，
+     现有: $(printf '%s ' /lib/modules/*/)"
+  [[ -d "/lib/modules/$NEW_KVER" ]] || fail "新内核目录 /lib/modules/$NEW_KVER 不存在"
+  KVER="$NEW_KVER"
+  say "HWE 内核: $KVER（原 GA 内核 $GA_KVER 会在「清理多余内核」那步被清掉）"
+fi
+
 # exfat 内核模块必须在（报告要写进 U 盘的 exFAT 分区）
 if find "/lib/modules/$KVER" -name 'exfat.ko*' | grep -q .; then
   say "exfat 内核模块 OK ($KVER)"
@@ -405,6 +440,23 @@ fi
 # 增量构建复用上一轮的 rootfs，光挡住新的没用，得把已经躺在里面的清掉。
 say "=== 清理多余内核（只留 $KVER）==="
 
+# ⚠️ 先把"绝不能被 autoremove 收走"的包**显式打上手动标记**。
+#
+# config.sh 里 PKGS_PLATFORM 那段的原话是「显式列在这里 = 手动安装标记 =
+# autoremove 不会碰」—— 那句话建立在"apt-get install 一定会把包标成 manual"
+# 这个假设上，而这个假设**不总是成立**：
+#
+#   实测（KLBURN_KERNEL=hwe，全新工作区）：amd64-microcode 在装包阶段被从
+#   3.20250311 升级到 3.20251202，装完是在的；等清理内核那步 purge 掉 GA 内核、
+#   再 autoremove，它就**连包带文件一起没了**（dpkg 里查是"未安装"）。
+#   下面那条微码断言当场把构建拦下 —— 那正是 1.5.0 加它的原因。
+#
+# apt-mark manual 是直接改标记，不依赖任何关于 apt 行为的假设。
+# 微码缺了的后果：本该被微码修掉的 CPU 勘误会在压测里冒出来，
+# 然后被记成"这台机器不稳定"—— 又是一次把好机器拦在出货前。
+say "给平台包打手动标记（挡住 autoremove）: ${PKGS_PLATFORM[*]}"
+apt-mark manual "${PKGS_PLATFORM[@]}" >/dev/null 2>&1 || true
+
 # 先拆元包：它们钉着"最新内核"，不先拆掉，下面 purge 具体版本会被依赖挡回来。
 apt-get purge -y -qq linux-generic linux-image-generic linux-headers-generic \
   >/dev/null 2>&1 || true
@@ -452,13 +504,69 @@ if (( ${#LEFT_KVERS[@]} != 1 )) || [[ "${LEFT_KVERS[0]}" != "$KVER" ]]; then
 fi
 say "只剩 $KVER（$(du -sh "/lib/modules/$KVER" | cut -f1)）"
 
+# ---------------------------------------------------------------- HWE：交出新的引导文件
+# 换了内核就必须**重新生成 casper 的 initramfs**，否则开机加载的还是旧内核的
+# 模块集 —— 表现是认不到任何硬盘。casper 的 initramfs hook 在 live 层里本来就有，
+# 这里只要触发一次生成。
+#
+# 放在清理内核之后：那时候模块集才是最终的（NVIDIA 的模块也已经编好了）。
+if [[ "${KLBURN_KERNEL:-generic}" == "hwe" ]]; then
+  say "=== 为 $KVER 重新生成 casper 的 initramfs ==="
+
+  # ⚠️ **先把 casper 装回来。** 它和 linux-firmware 是一模一样的坑：
+  # dpkg 里 casper 是 "install ok installed"，但**文件被剪掉了** ——
+  # 它的 initramfs 脚本原本在我们丢弃的 installer 层里。
+  #
+  # 不装回来的话，update-initramfs 生成的是一个**普通的 initramfs，不是 live 的**：
+  # 里面没有 casper 的 boot 脚本，开机走到挂根文件系统那一步直接停在
+  #     No root device specified. Boot arguments must include a root= parameter.
+  #     BusyBox ... (initramfs)
+  # 报告一个字都写不出来。这是实测出来的 —— 第一次 hwe 构建一切都成功，
+  # e2e 却卡在 initramfs 提示符上。
+  say "装回 casper（它的 initramfs 脚本和 linux-firmware 一样被镜像剪掉了）"
+  apt-get install -y -qq --reinstall casper || fail "装 casper 失败"
+  [[ -d /usr/share/initramfs-tools/scripts/casper-bottom ]] \
+    || fail "装完 casper 之后仍然没有 initramfs 脚本 —— 生成出来的会是个进不去系统的 initrd"
+
+  # 包安装时可能已经生成过一份，-c 遇到已存在会失败，所以先删再建
+  update-initramfs -d -k "$KVER" >/dev/null 2>&1 || true
+  update-initramfs -c -k "$KVER" \
+    || fail "为 $KVER 生成 initramfs 失败 —— 做出来的盘开机会认不到任何硬盘"
+
+  # 生成出来的必须**真的是 live 的**：里面要有 casper 的 boot 脚本。
+  # 只看"文件生成了"不够 —— 上面那次翻车就是文件正常生成、内容不对。
+  if ! lsinitramfs "/boot/initrd.img-$KVER" 2>/dev/null | grep -q 'scripts/casper'; then
+    fail "生成的 initrd 里没有 casper 的 boot 脚本 —— 开机会停在 (initramfs) 提示符，
+     报告一个字都写不出来。检查上面 casper 是不是真的装回来了。"
+  fi
+  say "initrd 自检通过：里面有 casper 的 boot 脚本"
+
+  # ⚠️ **不要把它们拷到 $STAGE 里交出去。** 下面「收尾」那一步有
+  #    `rm -rf /tmp/*`，而 $STAGE 就在 /tmp 下 —— 拷过去会被自己删掉，
+  #    然后 build-iso.sh 报"chroot 没有交出 vmlinuz/initrd"（实测踩过）。
+  #    留在 /boot 里就行：外面按 rootfs 里唯一那个内核版本去取，不需要交接文件。
+  [[ -f "/boot/vmlinuz-$KVER"    ]] || fail "/boot/vmlinuz-$KVER 不存在"
+  [[ -f "/boot/initrd.img-$KVER" ]] || fail "/boot/initrd.img-$KVER 不存在"
+  say "vmlinuz / initrd 已就绪（$(du -sh "/boot/initrd.img-$KVER" | cut -f1)），
+     build-iso.sh 会从 rootfs 的 /boot 里取走换进 casper/"
+fi
+
 # autoremove 顺手收走别的东西这件事已经发生过一次（amd64-microcode），
 # 所以清理完再把关键工具点一遍名。
 verify_tools "清理内核后"
 for d in intel-ucode amd-ucode; do
+  if [[ -d "/lib/firmware/$d" && -n "$(ls -A "/lib/firmware/$d" 2>/dev/null)" ]]; then
+    continue
+  fi
+  # 兜底再装一次。上面已经 apt-mark manual 过，正常不该走到这儿；
+  # 走到了就说明还有别的路径能把它弄没，装回来之后下面那条断言仍然说了算。
+  say "WARN: /lib/firmware/$d 不见了，尝试重新安装微码包"
+  apt-get install -y -qq --reinstall amd64-microcode intel-microcode >/dev/null 2>&1 || true
   [[ -d "/lib/firmware/$d" && -n "$(ls -A "/lib/firmware/$d" 2>/dev/null)" ]] \
-    || fail "CPU 微码 /lib/firmware/$d 没了 —— 多半又被 autoremove 收走了。
-     显式装它的地方在 config.sh 的 PKGS_PLATFORM。"
+    || fail "CPU 微码 /lib/firmware/$d 没了，重装也没回来。
+     显式装它的地方在 config.sh 的 PKGS_PLATFORM，清理内核前有 apt-mark manual。
+     缺微码的后果：本该被微码修掉的 CPU 勘误会在压测里冒出来，
+     然后被记成「这台机器不稳定」——又是一次把好机器拦在出货前。"
 done
 say "CPU 微码 intel-ucode / amd-ucode 都在"
 
