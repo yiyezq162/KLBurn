@@ -930,6 +930,24 @@ check "4090 端点被识别" "1" "$(printf '%s\n' "$rows" | grep -c '^c8:00\.0')
 check "4090 的额定/实际解析正确" "c8:00.0|NVIDIA Corporation AD102 [GeForce RTX 4090]|16|16|16|16" \
       "$(printf '%s\n' "$rows" | grep '^c8:00\.0')"
 
+# 1.7.5 起 check_pcie_link 要先分得清板载和插槽，没有 DMI 插槽表就判 SKIP。
+# 这里先给它一张插槽表：27:00.0 和 c8:00.0 都是"Bus Address 填卡自己"那种写法。
+cat > "$RAW_DIR/dmidecode.txt" <<'EOF'
+Handle 0x0900, DMI type 9, 17 bytes
+System Slot Information
+	Designation: OCP/Slot2_CPU0
+	Type: x8 PCI Express 2
+	Current Usage: In Use
+	Bus Address: 0000:27:00.0
+
+Handle 0x0901, DMI type 9, 17 bytes
+System Slot Information
+	Designation: Slot9_CPU1
+	Type: x16 PCI Express 4
+	Current Usage: In Use
+	Bus Address: 0000:c8:00.0
+EOF
+
 LAST_STATUS=""; check_pcie_link
 check "两个端点都满速 -> PASS（桥的降速不算数）" "PASS" "$LAST_STATUS"
 
@@ -942,6 +960,139 @@ check "WARN 文案里要点名是哪个设备" "1" "$(printf '%s' "$LAST_DETAIL"
 rm -f "$RAW_DIR/lspci-vv.txt"
 LAST_STATUS=""; check_pcie_link
 check "没有 lspci-vv 数据 -> SKIP" "SKIP" "$LAST_STATUS"
+
+# ================================================================
+echo
+echo "=== PCIe 链路：板载集成设备不参与判定，插槽上的卡照常判 ==="
+# 1.7.4 那台海光：**板载**千兆口协商到 x2（额定 x4），报告里报了个 WARN。
+# 板载走线宽度是主板厂商的设计，现场既拔不下来也插不进去 —— 那条 WARN 只会
+# 让客户以为机器有毛病。而插槽上的卡降速是能修的（没插到底/插错槽/riser 差），
+# 必须照报。这一组钉的就是这条分界线。
+#
+# DMI 的三种填法全都要认，样本取自两台真机：
+#   端点式：Bus Address 就是卡自己       27:00.0（6530 的 OCP 网卡）
+#   桥式  ：Bus Address 是插槽那个桥     26:05.0 -> 后面挂着 28:00.0 阵列卡
+#   空槽  ：Bus Address 在 lspci 里没有  00:01.1（海光那台的 J8）
+RAW_DIR="$TMP/pcieslot"; RUN_DIR="$TMP/pcieslot"
+rm -rf "$RAW_DIR"; mkdir -p "$RAW_DIR"
+
+cat > "$RAW_DIR/dmidecode.txt" <<'EOF'
+Handle 0x0900, DMI type 9, 17 bytes
+System Slot Information
+	Designation: OCP/Slot2_CPU0
+	Type: x8 PCI Express 2
+	Current Usage: In Use
+	Bus Address: 0000:27:00.0
+
+Handle 0x0901, DMI type 9, 17 bytes
+System Slot Information
+	Designation: RAID_Slot1
+	Type: x8 PCI Express 3
+	Current Usage: In Use
+	Bus Address: 0000:26:05.0
+
+Handle 0x0902, DMI type 9, 17 bytes
+System Slot Information
+	Designation: J8
+	Type: x4 PCI Express
+	Current Usage: Available
+	Bus Address: 0000:00:01.1
+EOF
+
+cat > "$RAW_DIR/lspci-vv.txt" <<'EOF'
+00:01.6 PCI bridge [0604]: Chengdu Haiguang IC Design Co., Ltd. PCIE GPP Bridge [1d94:1453] (prog-if 00 [Normal decode])
+	Bus: primary=00, secondary=03, subordinate=03, sec-latency=0
+	Capabilities: [58] Express (v2) Root Port (Slot-), MSI 00
+		LnkCap:	Port #6, Speed 8GT/s, Width x4, ASPM L1, Exit Latency L1 <64us
+		LnkSta:	Speed 5GT/s, Width x2
+26:05.0 PCI bridge [0604]: Intel Corporation Device [8086:352a] (rev 30) (prog-if 00 [Normal decode])
+	Bus: primary=26, secondary=28, subordinate=28, sec-latency=0
+	Capabilities: [40] Express (v2) Root Port (Slot+), MSI 00
+		LnkCap:	Port #9, Speed 32GT/s, Width x8, ASPM not supported
+		LnkSta:	Speed 8GT/s, Width x8
+03:00.0 Ethernet controller [0200]: Beijing Wangxun Technology Co., Ltd. WX1860A2 Gigabit Ethernet Controller [8088:0101] (rev 01)
+	Capabilities: [80] Express (v2) Endpoint, MSI 00
+		LnkCap:	Port #0, Speed 5GT/s, Width x4, ASPM L0s L1, Exit Latency L0s <1us, L1 <2us
+		LnkSta:	Speed 5GT/s, Width x2 (downgraded)
+03:00.1 Ethernet controller [0200]: Beijing Wangxun Technology Co., Ltd. WX1860A2 Gigabit Ethernet Controller [8088:0101] (rev 01)
+	Capabilities: [80] Express (v2) Endpoint, MSI 00
+		LnkCap:	Port #0, Speed 5GT/s, Width x4, ASPM L0s L1, Exit Latency L0s <1us, L1 <2us
+		LnkSta:	Speed 5GT/s, Width x2 (downgraded)
+27:00.0 Ethernet controller [0200]: Intel Corporation 82599ES 10-Gigabit SFI/SFP+ Network Connection [8086:10fb] (rev 01)
+	Capabilities: [a0] Express (v2) Endpoint, MSI 00
+		LnkCap:	Port #4, Speed 5GT/s, Width x8, ASPM L0s, Exit Latency L0s <1us
+		LnkSta:	Speed 5GT/s, Width x8
+27:00.1 Ethernet controller [0200]: Intel Corporation 82599ES 10-Gigabit SFI/SFP+ Network Connection [8086:10fb] (rev 01)
+	Capabilities: [a0] Express (v2) Endpoint, MSI 00
+		LnkCap:	Port #4, Speed 5GT/s, Width x8, ASPM L0s, Exit Latency L0s <1us
+		LnkSta:	Speed 5GT/s, Width x8
+28:00.0 Serial Attached SCSI controller [0107]: Broadcom / LSI MegaRAID SAS-3 3108 [Invader] [1000:005d] (rev 02)
+	Capabilities: [b0] Express (v2) Endpoint, MSI 00
+		LnkCap:	Port #0, Speed 8GT/s, Width x8, ASPM not supported
+		LnkSta:	Speed 8GT/s, Width x8
+EOF
+
+SMAP="$(pcie_slot_map "$RAW_DIR/dmidecode.txt" "$RAW_DIR/lspci-vv.txt")"
+slot_of() { printf '%s\n' "$SMAP" | awk -F'|' -v b="$1" '$1==b{print $2; exit}'; }
+
+check "端点式：DMI 直接写了 27:00.0 -> 插槽"       "slot"    "$(slot_of 27:00.0)"
+check "端点式：同一张卡的第二个功能也算插槽（DMI 只列 function 0）" \
+      "slot" "$(slot_of 27:00.1)"
+check "桥式：26:05.0 后面的 28:00.0 阵列卡 -> 插槽" "slot"    "$(slot_of 28:00.0)"
+check "板载：海光那两个千兆口 -> 板载"             "onboard" "$(slot_of 03:00.0)"
+check "板载：第二个口也是板载"                     "onboard" "$(slot_of 03:00.1)"
+check "空槽 J8（00:01.1 在 lspci 里根本没有）不许盖住任何设备" "0" \
+      "$(printf '%s\n' "$SMAP" | grep -c 'J8')"
+check "桥自己不出现在分类表里" "0" \
+      "$(printf '%s\n' "$SMAP" | grep -cE '^(00:01\.6|26:05\.0)\|')"
+check "插槽名要带出来（内部报告靠它显示卡在第几槽）" "1" \
+      "$(printf '%s\n' "$SMAP" | grep -c '^28:00\.0|slot|RAID_Slot1$')"
+
+# ---- 判定：板载降速不进客户报告 ----
+LAST_STATUS=""; LAST_DETAIL=""; check_pcie_link
+check "只有板载口降速 -> 不报 WARN" "PASS" "$LAST_STATUS"
+for b in 03:00.0 03:00.1; do
+  check "板载口 $b 不许出现在客户可见文案里" "0" \
+        "$(printf '%s' "$LAST_DETAIL" | grep -c "$b")"
+done
+# ⚠️ 这里必须先 cat 再 grep：文件不存在时 `grep -c` 一个字都不输出（退出码 2），
+# 于是断言比的是 "0" vs ""，永远红。cat 空输入时 grep -c 老老实实给 0。
+check "板载降速也不许进「其他实测指标」（那张表同样在客户报告里）" "0" \
+      "$(cat "$RUN_DIR/metrics.jsonl" 2>/dev/null | grep -c '03:00' || true)"
+check "但工程留档里必须有它，而且标着 onboard" "2" \
+      "$(grep -cE '^03:00\.[01] +onboard' "$RAW_DIR/pcie-link.txt" || true)"
+check "插槽上那三张卡照常留档" "3" \
+      "$(grep -cE '^(27:00\.[01]|28:00\.0) +slot' "$RAW_DIR/pcie-link.txt" || true)"
+
+# ---- 反过来：插槽上的卡降速，必须照报 ----
+# 豁免扩大化是这条最危险的失败方式：放过板载的同时顺手把插槽也放过，
+# 于是"卡没插到底"这种真能修的问题从此再没人看得到。
+sed -i 's/^\t\tLnkSta:\tSpeed 8GT\/s, Width x8$/\t\tLnkSta:\tSpeed 8GT\/s, Width x4/' "$RAW_DIR/lspci-vv.txt"
+LAST_STATUS=""; LAST_DETAIL=""; check_pcie_link
+check "插槽上的阵列卡降到 x4 -> 照常 WARN" "WARN" "$LAST_STATUS"
+check "WARN 文案里要点名 28:00.0" "1" "$(printf '%s' "$LAST_DETAIL" | grep -c '28:00\.0')"
+check "同一份文案里仍然不许出现板载口" "0" \
+      "$(printf '%s' "$LAST_DETAIL" | grep -c '03:00\.')"
+
+# ---- 固件没给插槽表：分不清就不判，绝不拿板载走线去吓客户 ----
+printf 'Handle 0x0001, DMI type 1, 27 bytes\nSystem Information\n\tManufacturer: X\n' \
+  > "$RAW_DIR/dmidecode.txt"
+LAST_STATUS=""; LAST_DETAIL=""; check_pcie_link
+check "固件没提供插槽信息 -> SKIP（不是 WARN）" "SKIP" "$LAST_STATUS"
+check "SKIP 文案要说明不影响整机结论" "1" \
+      "$(printf '%s' "$LAST_DETAIL" | grep -c '不影响整机结论')"
+
+# ---- 插槽都是空的（海光那台就是这样）----
+cat > "$RAW_DIR/dmidecode.txt" <<'EOF'
+Handle 0x0900, DMI type 9, 17 bytes
+System Slot Information
+	Designation: J8
+	Type: x4 PCI Express
+	Current Usage: Available
+	Bus Address: 0000:00:01.1
+EOF
+LAST_STATUS=""; check_pcie_link
+check "插槽全空、只有板载设备 -> SKIP（没有需要判定的链路）" "SKIP" "$LAST_STATUS"
 
 # ================================================================
 echo

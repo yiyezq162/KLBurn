@@ -186,6 +186,11 @@ RAW_INDEX = (
      "查这台机器装了什么卡时", "网卡型号、阵列卡型号都是从这里按总线地址反查的"),
     (r"^lspci-vv\.txt$", "系统", "PCI 设备的完整配置空间信息",
      "卡的型号或链路速率对不上时", "搜 LnkSta 看实际协商速率，和同一设备的 LnkCap 比"),
+    (r"^pcie-link\.txt$", "系统",
+     "每个 PCIe 端点的额定/实际链路，以及它是**板载**还是插在**插槽**上",
+     "想知道某个设备为什么没进（或进了）PCIe 链路那条判定时",
+     "第二列 slot/onboard 就是判定范围：只有 slot 的降速才会报 WARN，"
+     "onboard 的走线宽度是主板设计，只在这里留档"),
     (r"^deep/dmidecode-slots\.txt$", "系统", "所有 PCIe / 内存插槽的定义与在用状态",
      "查「这台机器还有几个空槽」、卡插在第几槽时", "看 In Use / Current Usage"),
     (r"^deep/dmidecode-(cache|array|oem)\.txt$", "系统",

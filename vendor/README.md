@@ -135,9 +135,36 @@ vendor/gpu_burn/compare.fatbin
 **下载地址**：Broadcom 官网支持页 https://www.broadcom.com/support/download-search
 搜索 `StorCLI`，选 "Management Software and Tools" 分类。
 
-下载得到的是一个 zip，解压后路径类似 `Unified_storcli_all_os/Linux/storcli64`
-（有的版本在 `Linux/` 下是 rpm 包，可以用
-`rpm2cpio storcli-*.rpm | cpio -idmv` 解出 `opt/MegaRAID/storcli/storcli64`）。
+`docs.broadcom.com` 上有直链，形如
+`https://docs.broadcom.com/docs-and-downloads/<版本>_storcli_rel.zip`
+（2026-08 当前是 `007.2705.0000.0000_storcli_rel.zip`，约 33MB）。
+版本号会变，直链失效就回上面那个搜索页。
+
+**这个 zip 套了两层**，而且里面**没有裸的 `storcli64`**，只有各平台的安装包：
+
+```
+storcli_rel.zip
+└── Unified_storcli_all_os.zip
+    └── Unified_storcli_all_os/
+        ├── Linux/storcli-<版本>-1.noarch.rpm
+        ├── Ubuntu/storcli_<版本>_all.deb      ← 我们的盘是 Ubuntu，用这个
+        ├── ARM/ EFI/ FreeBSD/ VMware/ Windows/
+        └── readme.txt
+```
+
+二进制在包里的 `/opt/MegaRAID/storcli/storcli64`，取出来：
+
+```bash
+dpkg-deb -x Unified_storcli_all_os/Ubuntu/storcli_*_all.deb /tmp/storcli-x
+cp /tmp/storcli-x/opt/MegaRAID/storcli/storcli64 vendor/storcli/
+```
+
+只有 rpm 的话：`rpm2cpio storcli-*.rpm | cpio -idmv`，同样在
+`opt/MegaRAID/storcli/storcli64`。
+
+> 取出来的应该是一个 **静态链接的 ELF x86-64** 可执行文件（`file` 一下确认），
+> 8MB 上下。静态链接这点要紧：盘里的 rootfs 很精简，动态链接的版本会因为
+> 缺库跑不起来，而 `collect_raid` 只会看到"命令跑不出东西"，不会告诉你为什么。
 
 **放置**：
 

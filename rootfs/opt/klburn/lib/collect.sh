@@ -771,12 +771,120 @@ pcie_link_scan() {
   ' "$f"
 }
 
+# ---------------------------------------------------------------- 板载 vs 插槽
+#
+# 1.7.4 那台海光：板载千兆口协商到 x2（额定 x4），报告里报了个 WARN。
+# **那条 WARN 没有意义。** 板载设备的通道数是主板厂商的走线设计，现场既拔不下来
+# 也插不进去，客户看到只会以为机器有毛病。而插在真插槽上的卡降速是**能修的**
+# （没插到底、插错槽、riser 信号差），那个必须照报。
+#
+# 判据是 SMBIOS Type 9（System Slot）的 Bus Address。两种填法都见过，都要认，
+# 而且**不能靠猜，要去 lspci 里查这个地址到底是什么**：
+#
+#   地址在 lspci 里是端点   -> "填卡自己"（Intel 6530：RAID_Slot1 -> 28:00.0）
+#                              同一张卡的别的功能号也算在槽里
+#   地址在 lspci 里是桥     -> "填插槽那个桥"（6530 空槽：RAID_Slot1 -> 26:05.0）
+#                              桥的 secondary..subordinate 总线范围内的都算在槽里
+#   地址在 lspci 里查不到   -> 空槽/被固件藏了，**什么都不匹配**
+#
+# ⚠️ 「填卡自己」那种要比到 bus:dev 就停，**不能带功能号**：DMI 只列 function 0，
+#    而双口网卡的 27:00.1、显卡的 c8:00.1（HDMI 音频）是同一块板子上的别的功能。
+#    带着功能号比，插在槽上的卡降了速也不报 —— 恰好是这次要修的反面。
+#    这条有成对断言钉着。
+# ⚠️ 「填桥」那种反过来**必须带功能号**：00:01.1 / 00:01.4 / 00:01.6 是三个
+#    互不相干的 root port，砍掉功能号会把三个槽混成一个。
+#
+# pcie_slot_map [dmidecode文件] [lspci-vv文件] -> 每行 "BDF|slot|插槽名" / "BDF|onboard|"
+# 抽成纯函数便于脱机回归测试，见 tests/test-hw-checks.sh
+pcie_slot_map() {
+  local dmi="${1:-$RAW_DIR/dmidecode.txt}" vv="${2:-$RAW_DIR/lspci-vv.txt}"
+  [[ -f "$dmi" && -f "$vv" ]] || return 0
+  # 盘里是 mawk，不能用 gawk 才有的 strtonum()，所以自己转十六进制
+  awk '
+    function hex2dec(s,   i, c, v, r) {
+      r = 0
+      for (i = 1; i <= length(s); i++) {
+        c = tolower(substr(s, i, 1)); v = index("0123456789abcdef", c) - 1
+        if (v < 0) return -1
+        r = r * 16 + v
+      }
+      return r
+    }
+    function devof(b) { sub(/\.[0-9a-f]+$/, "", b); return b }
+
+    # ---- 第一遍：dmidecode 的 System Slot ----
+    NR == FNR {
+      if ($0 ~ /^System Slot Information/) { insl = 1; desig = ""; next }
+      if (insl && $0 ~ /Designation:/) { sub(/^[^:]*: */, ""); desig = $0; next }
+      if (insl && $0 ~ /Bus Address:/) {
+        sub(/^[^:]*: */, ""); a = $0; sub(/^0000:/, "", a)
+        if (a ~ /^[0-9a-f]+:[0-9a-f]+\.[0-9a-f]+$/) { slotdesig[a] = desig; slots[++ns] = a }
+        insl = 0; next
+      }
+      if ($0 ~ /^Handle /) insl = 0
+      next
+    }
+
+    # ---- 第二遍：lspci -vv ----
+    # 认桥用**类号 0604**，不用 "PCI bridge" 这个名字 —— 名字来自 pci.ids，
+    # 换一版库或换个 locale 就可能不一样；类号是 PCI 规范定死的。
+    /^[0-9a-f]+:[0-9a-f]+\.[0-9a-f] / {
+      bdf = $1
+      order[++n] = bdf
+      present[bdf] = 1
+      isbridge[bdf] = ($0 ~ /\[0604\]: /) ? 1 : 0
+      next
+    }
+    # 注意别写成 /^\tBus: primary=/ —— lspci 这几行是**两个 tab** 缩进
+    /Bus: primary=/ {
+      if (match($0, /secondary=[0-9a-f]+/))   brsec[bdf] = substr($0, RSTART + 10, RLENGTH - 10)
+      if (match($0, /subordinate=[0-9a-f]+/)) brsub[bdf] = substr($0, RSTART + 12, RLENGTH - 12)
+      next
+    }
+
+    END {
+      # 固件压根没给插槽表 -> **一行都不输出**。
+      # 这时候把所有设备标成 "onboard" 是在撒谎：我们不是判定它板载，
+      # 是根本分不清。调用方按"表是空的"走 SKIP，别让它和"插槽都空着"混起来。
+      if (ns == 0) exit
+
+      # 每个 DMI 插槽地址先定性：端点式 / 桥式 / 查不到
+      for (i = 1; i <= ns; i++) {
+        a = slots[i]
+        if (!(a in present)) continue                 # 空槽，什么都不盖
+        if (isbridge[a]) { brslot[a] = 1 }            # 桥式：按总线范围盖
+        else             { devslot[devof(a)] = slotdesig[a] }   # 端点式：按 bus:dev 盖
+      }
+      for (i = 1; i <= n; i++) {
+        b = order[i]
+        if (isbridge[b]) continue                     # 桥自己不参与（见 pcie_link_scan 的说明）
+        where = "onboard"; label = ""
+        k = devof(b)
+        if (k in devslot) { where = "slot"; label = devslot[k] }
+        else {
+          split(b, p, ":"); mybus = hex2dec(p[1])
+          for (a in brslot) {
+            if (brsec[a] == "" || brsub[a] == "") continue
+            if (hex2dec(brsec[a]) <= mybus && mybus <= hex2dec(brsub[a])) {
+              where = "slot"; label = slotdesig[a]; break
+            }
+          }
+        }
+        printf "%s|%s|%s\n", b, where, label
+      }
+    }
+  ' "$dmi" "$vv"
+}
+
 # 判 WARN 不判 FAIL，两个理由：
 #   1. 空闲时降速是正常的电源管理行为 —— N 卡尤其明显，没负载时会自己掉到
 #      Gen1，一加载就回满。采集是在空闲状态做的，判 FAIL 会误杀一大片。
 #   2. x16 的卡插在 x8 槽上有时是机器设计如此（槽位本来就只有 x8 电气通道），
 #      不一定是装配错误。
 # WARN 会在报告抬头单独列一块，该看见的看得见，又不会把好机器拦在出货前。
+#
+# **只判插槽上的扩展卡**（1.7.5 起）。板载的照样采、照样落进 raw/pcie-link.txt
+# 供工程排查，但不进客户报告 —— 理由见上面 pcie_slot_map 那一段。
 check_pcie_link() {
   info "Checking PCIe link width/speed ..."
 
@@ -787,10 +895,20 @@ check_pcie_link() {
     return
   fi
 
-  local total=0 degraded=() line bdf name capsp capw stasp staw
+  # BDF -> slot/onboard。取不到插槽信息时整张表是空的，下面按"分不清"处理。
+  local -A slot_of=() slot_name=()
+  local sb sw sn
+  while IFS='|' read -r sb sw sn; do
+    [[ -n "$sb" ]] || continue
+    slot_of["$sb"]="$sw"; slot_name["$sb"]="$sn"
+  done < <(pcie_slot_map)
+
+  local slot_total=0 board_total=0 degraded=() board_degraded=()
+  local bdf name capsp capw stasp staw
+  : > "$RAW_DIR/pcie-link.txt"
   while IFS='|' read -r bdf name capsp capw stasp staw; do
     [[ -n "$bdf" ]] || continue
-    total=$((total+1))
+    local where="${slot_of[$bdf]:-unknown}"
     local why=""
     # 宽度是整数，直接比；速率带小数（2.5），交给 awk 比
     if [[ "$staw" =~ ^[0-9]+$ && "$capw" =~ ^[0-9]+$ ]] && (( staw < capw )); then
@@ -800,22 +918,49 @@ check_pcie_link() {
       [[ -n "$why" ]] && why="${why}、"
       why="${why}速率 ${stasp}GT/s（额定 ${capsp}GT/s）"
     fi
-    if [[ -n "$why" ]]; then
-      degraded+=("${bdf} ${name}：${why}")
-      metric_add "pcie" "${bdf} 链路" "x${staw} ${stasp}GT/s / 额定 x${capw} ${capsp}GT/s"
+
+    printf '%-12s %-8s %-22s cap=x%-3s %-6sGT/s  sta=x%-3s %-6sGT/s  %s\n' \
+      "$bdf" "$where" "${slot_name[$bdf]:--}" "$capw" "$capsp" "$staw" "$stasp" \
+      "${why:-满足额定值}" >> "$RAW_DIR/pcie-link.txt"
+
+    if [[ "$where" == "slot" ]]; then
+      slot_total=$((slot_total+1))
+      if [[ -n "$why" ]]; then
+        degraded+=("${bdf} ${name}：${why}")
+        # metric 会进客户报告的「其他实测指标」，所以只记插槽上的
+        metric_add "pcie" "${bdf} 链路" "x${staw} ${stasp}GT/s / 额定 x${capw} ${capsp}GT/s"
+      fi
+    else
+      board_total=$((board_total+1))
+      [[ -n "$why" ]] && board_degraded+=("${bdf}")
     fi
   done <<< "$rows"
 
+  # 固件没给插槽表 -> 分不清板载和插槽。宁可不判，也不要拿板载走线去吓客户。
+  if (( ${#slot_of[@]} == 0 )); then
+    result_add "check_pcie_link" "PCIe 链路" "$ST_SKIP" \
+      "本机固件未提供 PCIe 插槽信息，无法区分板载集成设备与插槽上的扩展卡\
+（部分平台与虚拟机不提供）。此项不影响整机结论。" "raw/pcie-link.txt"
+    return
+  fi
+
   if (( ${#degraded[@]} > 0 )); then
     result_add "check_pcie_link" "PCIe 链路" "$ST_WARN" \
-      "$(printf '%s；' "${degraded[@]}")共检查 ${total} 个端点设备。\
+      "$(printf '%s；' "${degraded[@]}")共检查 ${slot_total} 张插槽上的扩展卡。\
 链路没跑到额定值会直接砍掉一半带宽，常见原因：卡没插到底、插在了电气通道更少的槽位、\
 转接板/riser 信号质量不好。注意空闲状态下部分设备（尤其是显卡）会主动降速省电，\
-加载后会自动回满，这种属于正常现象——请对照该设备满载时的读数确认。" \
-      "raw/lspci-vv.txt"
+加载后会自动回满，这种属于正常现象——请对照该设备满载时的读数确认。\
+（板载集成设备的链路宽度由主板走线决定，不属于装配问题，不参与本项判定。）" \
+      "raw/pcie-link.txt"
+  elif (( slot_total == 0 )); then
+    result_add "check_pcie_link" "PCIe 链路" "$ST_SKIP" \
+      "本机 PCIe 插槽上未安装扩展卡，没有需要判定的链路\
+（板载集成设备的链路宽度由主板走线决定，不参与本项判定）。此项不影响整机结论。" \
+      "raw/pcie-link.txt"
   else
     result_add "check_pcie_link" "PCIe 链路" "$ST_PASS" \
-      "${total} 个端点设备的链路宽度与速率均达到额定值" "raw/lspci-vv.txt"
+      "${slot_total} 张插槽上的扩展卡，链路宽度与速率均达到额定值\
+（板载集成设备的链路宽度由主板走线决定，不参与本项判定）。" "raw/pcie-link.txt"
   fi
 }
 

@@ -58,6 +58,8 @@ MUTATIONS=(
 "net-servers${S}NET_TIME_SERVERS 改回裸赋值（现场在 klburn.conf 里换内网 NTP 会被静默顶掉）${S}test-hw-checks${S}$RT/lib/network.sh${S}mut_net_servers"
 "fd0-overreach${S}把软驱豁免扩大成所有设备（真盘的 I/O error 会被一起吃掉，坏盘查不出来）${S}test-hw-checks${S}$RT/lib/verify.sh${S}mut_fd0_overreach"
 "aer-init-noexempt${S}退回 1.7.3：不豁免 AER 启用日志（§2-2：固件把 AER 交给 OS 的平台，每台好机器都判 FAIL）${S}test-hw-checks${S}$RT/lib/verify.sh${S}mut_aer_init_noexempt"
+"pcie-all-onboard${S}把所有设备都当板载（插槽上的卡降速从此没人报，整条判定变成空跑）${S}test-hw-checks${S}$RT/lib/collect.sh${S}mut_pcie_all_onboard"
+"pcie-devof-fn${S}插槽比对带上功能号（DMI 只列 function 0，双口卡的第二个口会被误判成板载）${S}test-hw-checks${S}$RT/lib/collect.sh${S}mut_pcie_devof_fn"
 "disk-none-fail${S}没装硬盘时判 FAIL 而不是 WARN（§2-2：能力缺失 ≠ 硬件故障，会把无盘机器拦在出货前）${S}test-hw-checks${S}$RT/lib/collect.sh${S}mut_disk_none_fail"
 "counter-postfix${S}断言计数改回 (( PASS++ ))（X=0 时返回 1，让 cond && ok || bad 两边都跑）${S}lint${S}tests/lint.sh${S}mut_counter_postfix"
 "media-blind${S}scan_disks 不再反查启动 U 盘（Ventoy 下前两层同时落空，fio 会把测试盘写穿）${S}test-hw-checks${S}$RT/lib/storage.sh${S}mut_media_blind"
@@ -209,6 +211,24 @@ mut_aer_init_noexempt() {
   replace_line "$RT/lib/verify.sh" \
     "|dev fd[0-9]|AER: enabled with IRQ' \\" \
     "    | grep -viE 'thermal throttl.*not|nouveau|dev fd[0-9]' \\"
+}
+
+# 「板载不判」这条豁免最危险的失败方式，和软驱那条是同一种：**扩大化**。
+# 一旦所有设备都被当成板载，PCIe 链路那条判定就变成了空跑 —— 报告上还是绿的，
+# 而"卡没插到底"从此再没人看得到。这条守的是 1.7.5 那条分界线本身。
+mut_pcie_all_onboard() {
+  replace_line "$RT/lib/collect.sh" \
+    'local where="${slot_of[$bdf]:-unknown}"' \
+    '    local where="onboard"'
+}
+
+# 更阴的一种：分界线还在，只是比对的粒度错了。DMI Type 9 只列 function 0，
+# 带着功能号比，双口网卡的第二个口、四口卡的后三个口全会掉进"板载"，
+# 于是插在槽上的卡降了速也只报一半。
+mut_pcie_devof_fn() {
+  replace_line "$RT/lib/collect.sh" \
+    'function devof(b) { sub(/\.[0-9a-f]+$/, "", b); return b }' \
+    '    function devof(b) { return b }'
 }
 
 # 「本机未安装硬盘」和「硬盘坏了」是两回事。判成 FAIL 的话，出厂只测
