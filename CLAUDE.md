@@ -110,7 +110,13 @@ wsl -d Ubuntu-24.04 -u root -e bash -c "cd /mnt/c/Users/li/Desktop/project/KLBur
 5. **改了会进盘里的代码（`rootfs/**`、`build/**`）→ 自己重新构建，然后跑
    `e2e-qemu.sh` 冒烟**（约 3 分钟）。软驱那条误判就是它跑出来的，
    单元测试造不出来那个场景。发货前再跑一次 `--stage full`（约 20 分钟）
-6. 全绿之后**主动汇报结果**（构建版本、断言数、e2e 结果），
+6. **改了现场界面（`lib/ui.sh`）→ 跑 `--stage full` 并且真的去看截图**
+   （`shot-config-review.ppm` / `shot-burn-in.ppm` / `shot-burn-done.ppm`，
+   用 `pnmtopng` 转一下再看）。1.7.2/1.7.3 有七个问题是**只有看图才发现的**，
+   当时断言全绿：抬头语义重复、Python 生成器往屏幕打中文变 `◆◆◆◆`、
+   每 2 秒闪一下、面板右边挂着上一屏残留、收尾那屏被自己按的键刷成满屏
+   `Unknown option.`。**"断言全绿"和"这屏能看"是两回事。**
+7. 全绿之后**主动汇报结果**（构建版本、断言数、e2e 结果），
    而不是丢一条命令让用户自己去跑一遍确认
 
 ## 三条最容易踩的红线
@@ -129,3 +135,6 @@ wsl -d Ubuntu-24.04 -u root -e bash -c "cd /mnt/c/Users/li/Desktop/project/KLBur
 更多不变量（bash 陷阱、界面刷新、CSV 列顺序等）见
 [`docs/architecture.md` 第十一节](docs/architecture.md#十一不变量清单改代码前必读)，
 那一节的每一条都对应一次真实翻车，改到相关代码前先读。
+**要动 `lib/ui.sh` 的话，先读[第十三节](docs/architecture.md#十三现场界面是怎么画出来的)** ——
+那块的分层（渲染是纯函数、颜色只在边框层、每帧先数行数再画）不是风格，
+是"整屏重绘不错位"的前提。
