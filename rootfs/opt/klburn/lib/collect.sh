@@ -344,46 +344,70 @@ collect_smart() {
 # 都会出现在 SDR 里，所以"有定义"不能证明"真的装了卡"——但如果定义了却
 # 一条读数都没有，至少说明"现在没有任何卡在这些槽位上响应"，值得提一句，
 # 免得装了卡但没插到位（松动/转接板没到位）被当成"本来就没装"静默放过。
+# ⚠️ 1.7.7 在这里修了两件事，一起看：
+#
+# 1. **它以前设的标志位根本传不出去。** 调用方写的是
+#        hint="$(raid_bmc_hint)"
+#    命令替换是**子 shell**，里面 `RAID_BMC_SILENT=1` 出了子 shell 就没了，
+#    `raid_absent_status` 永远读到 0、永远返回 SKIP —— 那条"抬成 WARN"的折中
+#    从上线起一次都没生效过。测试没抓住，因为它把两半**分开**测：一边验提示
+#    文本、一边手工 `RAID_BMC_SILENT=1` 再验状态，**中间那根线一次都没测过**。
+#    现在改成直接设全局、不经过命令替换，测试也改成验标志位本身。
+#    （现场证据：海光那台 1.7.6 的报告里提示文本在，状态却是 SKIP。）
+#
+# 2. **但这条提示不再进客户报告，也不再抬 WARN。** 接线修好之后才看清后果：
+#    海光那台真没装阵列卡、机器完全正常，却会因此在交付报告上多一条告警。
+#    这个判据**分不开「本来就没装」和「卡坏到 PCI 都枚举不到」** ——
+#    分不开的东西不该去染客户的结论（§2-2：把好机器拦在出货前，比漏判更糟）。
+#    改成：现场屏幕和 klburn.log 上照常提示操作员去看一眼，
+#    raw/raid-bmc-note.txt 留档给内部报告，客户报告里只写「未安装阵列卡」。
+#    那次"卡坏到不枚举"的教训没有丢，只是换了个不会误伤客户的出口。
 raid_bmc_hint() {
   RAID_BMC_SILENT=0
-  [[ "${IPMI_OK:-0}" == "1" ]] || { printf ''; return; }
+  [[ "${IPMI_OK:-0}" == "1" ]] || return 0
   local f="$RAW_DIR/ipmi-sdr.txt"
   [[ -s "$f" ]] || f="$RAW_DIR/ipmi-sensors.txt"
-  [[ -s "$f" ]] || { printf ''; return; }
+  [[ -s "$f" ]] || return 0
 
   local lines total populated
   lines="$(grep -iE 'raid|hba|riser|slot[0-9]' "$f" 2>/dev/null || true)"
-  [[ -n "$lines" ]] || { printf ''; return; }
+  [[ -n "$lines" ]] || return 0
 
   total="$(printf '%s\n' "$lines" | grep -c .)"
   populated="$(printf '%s\n' "$lines" | grep -vciE '\bna\b|no reading')"
   if (( total > 0 && populated == 0 )); then
-    # 调用方靠这个标志把结论从 SKIP 抬成 WARN，见 collect_raid
     RAID_BMC_SILENT=1
-    printf '；BMC 上为阵列卡/HBA 预留的温度和插槽供电传感器均无读数（板子设计上支持装卡，'
-    printf '但这次没读到任何反馈——如果确实装了卡，建议检查卡和转接板/riser 是否插到位）'
   fi
+  return 0
 }
 
-# 「lspci 看不到卡」这一种情况的结论：默认 SKIP（真没装卡），
-# 但如果 BMC 明明定义了 RAID/HBA 的温度和插槽供电传感器、却一条读数都没有，
-# 就抬成 WARN。
+# 「lspci 看不到卡」时那条提示往哪儿走。
 #
-# 这条是被现场真事逼出来的：同一台机器连着测两次——
+# 背景是现场真事：同一台机器连着测两次——
 #   第一次 阵列卡在 lspci 里还看得见，但 dmesg 里已经是 FW FAULT / reset 三次失败
-#          / killing adapter，判 WARN（"检测到阵列卡但没有 storcli64"）
-#   第二次 卡坏到连 PCI 枚举都过不去，lspci 里整个消失，判 **SKIP「未安装阵列卡」**
-# 两次整机结论都是 PASS。一张物理上插着的卡坏成这样，报告写的是"没装卡"。
+#          / killing adapter
+#   第二次 卡坏到连 PCI 枚举都过不去，lspci 里整个消失，判「未安装阵列卡」
+# 一张物理上插着的卡坏成这样，报告写的是"没装卡"。
 #
-# 单看一次运行，「主板本来就没装卡」和「卡坏到不枚举」在数据上确实分不开，
-# 所以不能判 FAIL（无卡机型会被误杀）。WARN 是折中：报告抬头会单独列出来，
-# 提示人工确认，又不拉低整机结论。
-raid_absent_status() {
-  if (( ${RAID_BMC_SILENT:-0} == 1 )); then
-    printf '%s' "$ST_WARN"
-  else
-    printf '%s' "$ST_SKIP"
-  fi
+# 1.7.0 的对策是"BMC 传感器全哑就抬成 WARN"，但那条线因为子 shell 从没接通
+# （见上面 raid_bmc_hint 的说明）。接通之后才看清：**这个判据分不开
+# 「本来就没装」和「卡坏到不枚举」**，于是每台没装卡的好机器都会吃一条告警。
+#
+# 所以现在的出口是「说给人听，不写进客户结论」：
+#   现场屏幕 + klburn.log    -> 操作员当场看得到，可以立刻去摸一把卡
+#   raw/raid-bmc-note.txt    -> 内部工程报告留档，日后复盘查得到
+#   客户报告                 -> 只写「未安装阵列卡」，状态 SKIP，不影响整机结论
+raid_bmc_note() {
+  (( ${RAID_BMC_SILENT:-0} == 1 )) || return 0
+  warn "No RAID/HBA card on the PCI bus, and every BMC RAID/HBA/riser sensor is silent."
+  info "  -> If a card IS installed, check the card and its riser are fully seated."
+  {
+    printf 'BMC 上为阵列卡/HBA 预留的温度和插槽供电传感器均无读数。\n'
+    printf '板子设计上支持装卡，本次一条反馈都没读到。\n\n'
+    printf '「本来就没装卡」和「卡坏到 PCI 都枚举不到」在数据上分不开，\n'
+    printf '所以这条只作留档：不进客户报告，也不改变整机结论。\n'
+    printf '如果这台机器确实装了阵列卡，去现场确认卡和转接板/riser 是否插到位。\n'
+  } > "$RAW_DIR/raid-bmc-note.txt"
 }
 
 # ---------------------------------------------------------------- 阵列卡
@@ -445,11 +469,10 @@ collect_raid() {
   local raid_pci
   raid_pci="$(grep -iE 'RAID bus controller|Serial Attached SCSI|MegaRAID' "$RAW_DIR/lspci.txt" 2>/dev/null || true)"
 
-  # 必须先算出 hint —— 它同时会设置 RAID_BMC_SILENT，raid_absent_status 要读。
-  # 别图省事写成 result_add ... "$(raid_absent_status)" "未安装阵列卡$(raid_bmc_hint)"：
-  # bash 从左到右展开参数，状态那个会在 hint 之前算，标志位还没被设上。
-  local hint; hint="$(raid_bmc_hint)"
-  local absent_st; absent_st="$(raid_absent_status)"
+  # ⚠️ **直接调用，绝不能写成 `x="$(raid_bmc_hint)"`。** 命令替换是子 shell，
+  # 它设的 RAID_BMC_SILENT 出了子 shell 就没了 —— 1.7.0~1.7.6 就是这么让
+  # 整条线变成死代码的（详见 raid_bmc_hint 上面那段）。
+  raid_bmc_hint
 
   # ---- 先试 storcli64 ----
   # 它单独一段、raw/ 文件名写死不动：报告生成器是按 storcli-show.txt 这个名字
@@ -496,7 +519,9 @@ collect_raid() {
 阵列卡不做压力测试，此项不影响整机结论。" \
       "raw/lspci.txt"
   else
-    result_add "collect_raid" "阵列卡" "$absent_st" "未安装阵列卡${hint}" ""
+    # BMC 全哑那条提示走屏幕 + klburn.log + raw 留档，不进这句客户可见的文案
+    raid_bmc_note
+    result_add "collect_raid" "阵列卡" "$ST_SKIP" "未安装阵列卡" ""
   fi
 }
 

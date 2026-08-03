@@ -61,6 +61,8 @@ MUTATIONS=(
 "pcie-all-onboard${S}把所有设备都当板载（插槽上的卡降速从此没人报，整条判定变成空跑）${S}test-hw-checks${S}$RT/lib/collect.sh${S}mut_pcie_all_onboard"
 "pcie-devof-fn${S}插槽比对带上功能号（DMI 只列 function 0，双口卡的第二个口会被误判成板载）${S}test-hw-checks${S}$RT/lib/collect.sh${S}mut_pcie_devof_fn"
 "disk-hide-fail${S}硬盘那两项连 FAIL 也一起藏（新增坏道的盘从客户报告里消失，坏盘直接出厂）${S}test-report-render${S}$RT/report/generate_report.py${S}mut_disk_hide_fail"
+"raid-hint-subshell${S}退回 1.7.6：raid_bmc_hint 用命令替换调（子 shell，标志位传不出来，整条线是死代码）${S}test-hw-checks${S}$RT/lib/collect.sh${S}mut_raid_hint_subshell"
+"deep-to-customer${S}「扩展信息留档」重新进客户报告（判的是我们的存档，不是机器）${S}test-report-render${S}$RT/report/generate_report.py${S}mut_deep_to_customer"
 "disk-none-fail${S}没装硬盘时判 FAIL 而不是 WARN（§2-2：能力缺失 ≠ 硬件故障，会把无盘机器拦在出货前）${S}test-hw-checks${S}$RT/lib/collect.sh${S}mut_disk_none_fail"
 "counter-postfix${S}断言计数改回 (( PASS++ ))（X=0 时返回 1，让 cond && ok || bad 两边都跑）${S}lint${S}tests/lint.sh${S}mut_counter_postfix"
 "media-blind${S}scan_disks 不再反查启动 U 盘（Ventoy 下前两层同时落空，fio 会把测试盘写穿）${S}test-hw-checks${S}$RT/lib/storage.sh${S}mut_media_blind"
@@ -240,6 +242,24 @@ mut_disk_hide_fail() {
   replace_line "$RT/report/generate_report.py" \
     'and r.get("status") in ("PASS", "SKIP"))]' \
     '                         and True)]'
+}
+
+# 1.7.0~1.7.6 的真事：调用方写的是 `hint="$(raid_bmc_hint)"`，命令替换是**子 shell**，
+# 里面设的 RAID_BMC_SILENT 出了子 shell 就没了 —— 那条判定从上线起就是死代码，
+# 而两边的单元测试各自都绿（一边验文本、一边手工设标志位再验状态），
+# **中间那根线一次都没测过**。这条变异把命令替换塞回去，钉住"接线本身"。
+mut_raid_hint_subshell() {
+  replace_line "$RT/lib/collect.sh" \
+    '  raid_bmc_hint' \
+    '  local _h; _h="$(raid_bmc_hint)"; : "$_h"'
+}
+
+# 「扩展信息留档」判的是我们的存档做没做，不是机器好不好 —— 它失败了客户
+# 一个字都不会少拿。放回客户报告就是拿内部流程去占客户的版面（report-policy 二-4）。
+mut_deep_to_customer() {
+  replace_line "$RT/report/generate_report.py" \
+    'INTERNAL_ONLY_ROWS = ("collect_deep",)' \
+    '    INTERNAL_ONLY_ROWS = ()'
 }
 
 # 「本机未安装硬盘」和「硬盘坏了」是两回事。判成 FAIL 的话，出厂只测

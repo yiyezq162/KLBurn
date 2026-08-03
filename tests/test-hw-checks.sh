@@ -465,6 +465,18 @@ check "lspci.txt 不存在应给空，不报错" \
 # ================================================================
 echo
 echo "=== 阵列卡 / BMC 交叉核对（raid_bmc_hint）==="
+#
+# ⚠️ 断言**必须直接调用 raid_bmc_hint 再读全局**，不能写成
+#       "$([[ -n "$(raid_bmc_hint)" ]] && ...)"
+# 1.7.6 以前就是那么写的，于是这一组和下面「BMC 全哑 -> 状态」那一组各自都绿，
+# 而**中间那根线是断的**：真实调用方也用了命令替换，子 shell 里设的
+# RAID_BMC_SILENT 根本传不出来，整条判定从上线起就是死代码。
+# 现在验的是这个函数真正的产出 —— 那个全局标志位本身。
+flag_after_hint() {   # 直接调用（不套 $(...)），回 silent / quiet
+  RAID_BMC_SILENT=0
+  raid_bmc_hint
+  (( RAID_BMC_SILENT == 1 )) && echo silent || echo quiet
+}
 
 IPMI_OK=1
 
@@ -487,25 +499,42 @@ EOF
 
 RAW_DIR="$TMP/case-noraid"; mkdir -p "$RAW_DIR"
 cp "$TMP/ipmi-sdr-noraid.txt" "$RAW_DIR/ipmi-sdr.txt"
-check "板子定义了 RAID/HBA/Slot 传感器但全部 No Reading -> 应给出提示" \
-      "hint" "$([[ -n "$(raid_bmc_hint)" ]] && echo hint || echo empty)"
+check "板子定义了 RAID/HBA/Slot 传感器但全部 No Reading -> 标志位置上" \
+      "silent" "$(flag_after_hint)"
 
 RAW_DIR="$TMP/case-hasraid"; mkdir -p "$RAW_DIR"
 cp "$TMP/ipmi-sdr-hasraid.txt" "$RAW_DIR/ipmi-sdr.txt"
-check "传感器有实际读数 -> 说明真有东西在响应，不该给这条模棱两可的提示" \
-      "empty" "$([[ -n "$(raid_bmc_hint)" ]] && echo hint || echo empty)"
+check "传感器有实际读数 -> 真有东西在响应，标志位不置" \
+      "quiet" "$(flag_after_hint)"
 
 RAW_DIR="$TMP/case-none"; mkdir -p "$RAW_DIR"
 cp "$TMP/ipmi-sdr-none.txt" "$RAW_DIR/ipmi-sdr.txt"
-check "板子压根没定义 RAID/HBA/Slot 相关传感器 -> 不该瞎猜，给空" \
-      "empty" "$([[ -n "$(raid_bmc_hint)" ]] && echo hint || echo empty)"
+check "板子压根没定义 RAID/HBA/Slot 相关传感器 -> 不该瞎猜，标志位不置" \
+      "quiet" "$(flag_after_hint)"
 
 RAW_DIR="$TMP/case-noipmi"; mkdir -p "$RAW_DIR"
 cp "$TMP/ipmi-sdr-noraid.txt" "$RAW_DIR/ipmi-sdr.txt"
 IPMI_OK=0
 check "没有 BMC（IPMI_OK=0）时不该假装读到了什么" \
-      "empty" "$([[ -n "$(raid_bmc_hint)" ]] && echo hint || echo empty)"
+      "quiet" "$(flag_after_hint)"
 IPMI_OK=1
+
+# ---- 这条提示的**出口**：走留档，不进客户报告 ----
+# 它分不开「本来就没装卡」和「卡坏到 PCI 都枚举不到」。分不开的东西不该去染
+# 客户的结论 —— 海光那台真没装卡、机器完全正常，抬成 WARN 就是白惹一次解释。
+RAW_DIR="$TMP/case-noraid"
+RAID_BMC_SILENT=0; raid_bmc_hint; raid_bmc_note
+check "BMC 全哑时要落一份留档给内部报告" "1" \
+      "$([[ -s "$RAW_DIR/raid-bmc-note.txt" ]] && echo 1 || echo 0)"
+check "留档里要写清「如果确实装了卡该去做什么」" "1" \
+      "$(grep -c '插到位' "$RAW_DIR/raid-bmc-note.txt" || true)"
+check "留档里要说明它不进客户报告、不改变结论" "1" \
+      "$(grep -c '不改变整机结论' "$RAW_DIR/raid-bmc-note.txt" || true)"
+
+RAW_DIR="$TMP/case-hasraid"
+RAID_BMC_SILENT=0; raid_bmc_hint; raid_bmc_note
+check "传感器正常时不该凭空落这份留档" "0" \
+      "$([[ -e "$RAW_DIR/raid-bmc-note.txt" ]] && echo 1 || echo 0)"
 
 RAW_DIR="$TMP"
 
@@ -1189,15 +1218,35 @@ source "$LIB/network.sh"      # 把被替身掉的 net_phys_ifaces 还原回来
 # ================================================================
 echo
 echo "=== 阵列卡：坏到不枚举 vs 本来就没装 ==="
-# 现场实证：同一台机器连测两次，第一次卡在 lspci 里还看得见（判 WARN），
-# 第二次卡坏到 PCI 枚举都过不去、lspci 里整个消失，判 SKIP「未安装阵列卡」，
-# 两次整机结论都是 PASS。单看一次运行这两种情况分不开，所以不能判 FAIL
-# （无卡机型会被误杀），但 BMC 明明预留了 RAID/HBA 传感器却一条读数都没有时，
-# 抬成 WARN 提示人工确认。
-RAID_BMC_SILENT=1
-check "BMC 预留了 RAID 传感器却全无读数 -> WARN" "WARN" "$(raid_absent_status)"
-RAID_BMC_SILENT=0
-check "BMC 上压根没有 RAID 相关传感器 -> SKIP（就是没装卡）" "SKIP" "$(raid_absent_status)"
+# 现场实证：同一台机器连测两次，第一次卡在 lspci 里还看得见，
+# 第二次卡坏到 PCI 枚举都过不去、lspci 里整个消失，判「未安装阵列卡」。
+#
+# 1.7.0 的对策是"BMC 传感器全哑就抬成 WARN"。1.7.7 改了两点：
+#   接线修好了（原来靠 $(raid_bmc_hint) 传标志位，命令替换是子 shell，传不出来）
+#   接通之后发现这个判据**分不开「没装卡」和「卡坏到不枚举」**，
+#   于是每台没装卡的好机器都会吃一条告警 —— 所以状态一律 SKIP，
+#   提示改走屏幕 / klburn.log / raw 留档。断言钉的就是"不许再抬 WARN"。
+RAW_DIR="$TMP/raid-absent"; RUN_DIR="$TMP/raid-absent"
+rm -rf "$RAW_DIR"; mkdir -p "$RAW_DIR"
+: > "$RAW_DIR/lspci.txt"                      # lspci 里一张卡都没有
+cp "$TMP/ipmi-sdr-noraid.txt" "$RAW_DIR/ipmi-sdr.txt"   # BMC 传感器全哑
+IPMI_OK=1
+LAST_STATUS=""; LAST_DETAIL=""; collect_raid
+check "BMC 预留了 RAID 传感器却全无读数 -> 仍然 SKIP，不许抬成 WARN" \
+      "SKIP" "$LAST_STATUS"
+check "客户可见文案里只写「未安装阵列卡」" "未安装阵列卡" "$LAST_DETAIL"
+check "而那条提示要落进 raw 留档（给内部报告和现场看）" "1" \
+      "$([[ -s "$RAW_DIR/raid-bmc-note.txt" ]] && echo 1 || echo 0)"
+
+# 反过来：BMC 传感器有读数时，连留档都不该有
+RAW_DIR="$TMP/raid-absent2"; RUN_DIR="$TMP/raid-absent2"
+rm -rf "$RAW_DIR"; mkdir -p "$RAW_DIR"
+: > "$RAW_DIR/lspci.txt"
+cp "$TMP/ipmi-sdr-hasraid.txt" "$RAW_DIR/ipmi-sdr.txt"
+LAST_STATUS=""; LAST_DETAIL=""; collect_raid
+check "BMC 上传感器有读数 -> SKIP，且不落那份留档" "SKIP" "$LAST_STATUS"
+check "不该凭空落留档" "0" \
+      "$([[ -e "$RAW_DIR/raid-bmc-note.txt" ]] && echo 1 || echo 0)"
 
 RAW_DIR="$TMP"; RUN_DIR="$TMP"
 
@@ -1469,6 +1518,11 @@ check "续行拼接必须生效（否则整条守卫是摆设）" "yes" \
 # 报 "Invalid collation character" 然后**什么都不输出** —— 于是 offenders 恒为空，
 # 这条守卫看着全绿、实际上永远不会红。改成"先取所有引号串，再留下含非 ASCII 的"，
 # 只用 ASCII 端点的区间，任何 locale 下都成立。
+# ⚠️ 已知的一个粗糙之处，踩之前先知道：Python 里的三引号 docstring 会被
+#    `"[^"]*"` 当成**一个巨大的字符串**整块取出来，里面只要同时有中文和工具名
+#    就会误报（1.7.7 写 raid_vd_of 的说明时踩过）。docstring 进不了报告，
+#    但这条守卫看不出来。**解法是把那种说明写成 # 注释，不是放宽这里** ——
+#    放宽它就等于给"长文案藏在续行里"那类漏网重新开门。
 customer_text_offenders() {
   grep -oE '"[^"]*"' | grep -E '[^ -~]' | grep -vE '^\s*#' | grep -E "$FORBIDDEN" || true
 }

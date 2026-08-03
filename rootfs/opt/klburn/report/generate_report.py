@@ -576,8 +576,73 @@ class Data(object):
         return out
 
     # ---------- 阵列卡 ----------
+    RAID_PCI_RE = re.compile(r"RAID bus controller|Serial Attached SCSI|MegaRAID", re.I)
+
+    def raid_pci_models(self):
+        """lspci 里认到的阵列卡 / HBA -> [(BDF, 型号名), ...]，按 lspci 的顺序。
+
+        **型号这一列必须有值。** 现场按报告备件、换卡，型号空着就可能装错。
+        只要卡还在 PCI 总线上，这条路就一定拿得到名字 —— 不依赖任何厂商工具。
+        """
+        out = []
+        for line in read_text(self.rawpath("lspci.txt")).splitlines():
+            if not self.RAID_PCI_RE.search(line):
+                continue
+            m = re.match(r"^([0-9a-f]{2,4}:?[0-9a-f]{2}:[0-9a-f]{2}\.[0-9a-f])\s", line, re.I)
+            bdf = (m.group(1).lower() if m else "")
+            name = line.split(":", 2)[-1].strip()
+            # 去掉尾巴上的 [1000:005d] (rev 02)：那串 ID 对客户没意义
+            name = re.sub(r"\s*\[[0-9a-f]{4}:[0-9a-f]{4}\].*$", "", name, flags=re.I).strip()
+            if name:
+                out.append((bdf, name))
+        return out
+
+    # 厂商工具给的 `PCI Address = 00:28:00:00` -> lspci 的 `28:00.0`
+    #
+    # 四段是 域:总线:设备:功能，**总线那段是十六进制**（同一份输出里
+    # `Bus Number = 40` 是十进制的 0x28，两边对得上）。多卡机器上靠它把
+    # 控制器和 lspci 的条目一一对上，比按出现顺序配对可靠 ——
+    # 顺序配对在「lspci 认到 2 张卡、工具只认得其中 1 张」时会串行。
+    @staticmethod
+    def _storcli_bdf(addr):
+        if not addr:
+            return ""
+        p = [x.strip() for x in str(addr).split(":")]
+        if len(p) != 4:
+            return ""
+        try:
+            return "%s:%s.%d" % (p[1].lower(), p[2].lower(), int(p[3], 16))
+        except ValueError:
+            return ""
+
+    # 某个控制器上配了几个逻辑盘。
+    #
+    # 「没配逻辑盘」和「读不到」是两回事，必须分开：前者是这台机器的事实
+    # （卡跑直通/JBOD、盘直连就是这样），后者是我们没数据。
+    # 读不到回 None，那一列留空 —— 别把"没查到"写成"没有"。
+    #
+    # ⚠️ 这段说明写成 # 注释而不是 docstring 是有原因的：
+    #    tests/test-hw-checks.sh 的客户文案守卫用 `grep -oE '"[^"]*"'` 取引号串，
+    #    三引号 docstring 会被当成一个巨大的字符串整块取出来，里面只要同时有
+    #    中文和厂商工具名就会误报。docstring 进不了报告，但守卫看不出来。
+    def raid_vd_of(self, cnum):
+        txt = read_text(self.rawpath("storcli-vd.txt"))
+        if not txt.strip():
+            return None
+        for block in re.split(r"\n(?=Controller\s*=\s*\d+\s*$)", txt, flags=re.M):
+            m = re.search(r"^Controller\s*=\s*(\d+)\s*$", block, re.M)
+            if not m or m.group(1) != cnum:
+                continue
+            if re.search(r"No VD'?s have been configured", block, re.I):
+                return "未配置"
+            n = len(re.findall(r"^\s*\d+/\d+\s+\S+", block, re.M))
+            return ("%d 个" % n) if n else None
+        return None
+
     def raid(self):
         txt = read_text(self.rawpath("storcli-show.txt"))
+        pci_models = self.raid_pci_models()
+        pci_by_bdf = dict(pci_models)
         cards = []
         if txt:
             # 按 "Controller = N" 切块后逐字段取。
@@ -593,29 +658,61 @@ class Data(object):
                     m = re.search(r"^\s*%s\s*=\s*(.+?)\s*$" % re.escape(key), b, re.M)
                     return clean(m.group(1)) if m else None
 
-                model = g("Product Name") or g("Model")
-                if not model:
-                    continue
-                key = (mc.group(1), model)
+                # 卡自己报的名字。Product Name 是正规商品名（OEM 卡上最准，
+                # 比如 Dell 的 "PERC H730P Mini"）；有些固件只填 Model，
+                # 而且填的是**人格/工作模式**而不是型号 —— 6530 那张 3108 自报的
+                # 就是 "AVAGO JBOD"。所以它不能当唯一的型号来源。
+                selfname = g("Product Name") or g("Model")
+                serial = g("Serial Number")
+                if not selfname and not serial:
+                    continue          # storcli 输出顶部那个只有 Status 的块
+                cnum = mc.group(1)
+                key = (cnum, selfname or serial)
                 if key in seen:
                     continue
                 seen.add(key)
+
+                # 固件版本：storcli 各版本键名不一样，长短两种都要认。
+                # `/call show all` 的 Version 段用长键名（Firmware Package Build /
+                # Firmware Version），`/cx show` 的紧凑输出用短键名（FW Package Build）。
+                # 1.7.6 只认了短的，于是**真装了 storcli 的机器固件版本反而是空的** ——
+                # raw/storcli-show.txt 里明明写着 24.21.0-0067，报告上是个破折号。
+                fw = (g("Firmware Package Build") or g("FW Package Build")
+                      or g("Firmware Version") or g("FW Version"))
+
+                # 型号优先用 PCI 名（认得出、不会因为固件填了个模式名就变成 JBOD），
+                # 拿不到才退回卡自报的。两个都留着，谁也不丢。
+                bdf = self._storcli_bdf(g("PCI Address"))
+                pci_name = pci_by_bdf.get(bdf)
+                if not pci_name and len(cards) < len(pci_models):
+                    pci_name = pci_models[len(cards)][1]   # 对不上地址时退回按顺序
                 cards.append(OrderedDict([
-                    ("控制器", "Controller %s" % mc.group(1)),
-                    ("型号", model),
-                    ("序列号", g("Serial Number")),
-                    ("固件版本", g("FW Package Build") or g("FW Version")),
+                    ("控制器", "Controller %s" % cnum),
+                    ("型号", pci_name or selfname),
+                    ("控制器自报", selfname if selfname and selfname != pci_name else None),
+                    ("序列号", serial),
+                    ("固件版本", fw),
+                    ("逻辑盘", self.raid_vd_of(cnum)),
                 ]))
         if not cards:
-            lspci = read_text(self.rawpath("lspci.txt"))
-            for line in lspci.splitlines():
-                if re.search(r"RAID bus controller|Serial Attached SCSI|MegaRAID", line, re.I):
-                    cards.append(OrderedDict([
-                        ("控制器", "PCI"),
-                        ("型号", line.split(":", 2)[-1].strip()),
-                        ("序列号", None),
-                        ("固件版本", None),
-                    ]))
+            # 没有厂商工具、或者工具认不了这张卡 —— 型号照样要有，走 PCI 那条路。
+            for _bdf, name in pci_models:
+                cards.append(OrderedDict([
+                    ("控制器", "PCI"),
+                    ("型号", name),
+                    ("控制器自报", None),
+                    ("序列号", None),
+                    ("固件版本", None),
+                    ("逻辑盘", None),
+                ]))
+
+        # 「控制器自报」和「逻辑盘」是补充信息，一整列都空的时候整列去掉 ——
+        # 一列破折号只会让人以为漏采了。核心四列（控制器/型号/序列号/固件版本）
+        # 无论如何都留着：空着本身就是信息（"查过了，没有"）。
+        for col in ("控制器自报", "逻辑盘"):
+            if cards and all(not c.get(col) for c in cards):
+                for c in cards:
+                    c.pop(col, None)
         return cards
 
     # ---------- GPU ----------
@@ -868,6 +965,19 @@ def build_html(data):
         shown = [r for r in results
                  if not (r.get("id") in DISK_STRESS_ROWS
                          and r.get("status") in ("PASS", "SKIP"))]
+
+    # ---------------- 判的是我们、不是机器的那些项 ----------------
+    # 判断标准就一句：**这一项要是失败了，客户会在意吗？**
+    #   collect_deep（扩展信息留档）失败 = 我们自己的存档薄了一点，
+    #     客户拿到的报告一个字都不少 -> 不进客户报告
+    #   collect_system（硬件信息采集）失败 = 报告里整块硬件清单都没了
+    #     -> 客户当然在意，留着
+    # 它的文案本身也是内部口径（"供日后追溯"），按 report-policy 二-1 就不该外发。
+    #
+    # 和上面硬盘那组不同，这条**无条件**藏：它任何状态下都不回答
+    # "这台机器合不合格"。results.jsonl 和内部报告照常完整。
+    INTERNAL_ONLY_ROWS = ("collect_deep",)
+    shown = [r for r in shown if r.get("id") not in INTERNAL_ONLY_ROWS]
 
     # 计数按**客户实际看得到的那些**算，否则抬头写着"跳过 4 项"、
     # 下面只列得出 2 条，客户第一眼就会问剩下两条哪儿去了。

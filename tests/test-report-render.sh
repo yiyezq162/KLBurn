@@ -77,7 +77,8 @@ cat > "$RD/results.jsonl" <<'EOF'
 {"id":"check_mem_cap","name":"内存容量核对","status":"WARN","detail":"DMI 显示装机内存 64GB，系统实际只识别 31GB","ref":"","time":"t"}
 {"id":"test_nic","name":"网卡连通性","status":"PASS","detail":"1 个口 ping 通网关","ref":"","time":"t"}
 {"id":"check_psu","name":"电源","status":"WARN","detail":"PSU2 未检测到交流输入","ref":"","time":"t"}
-{"id":"collect_raid","name":"阵列卡","status":"SKIP","detail":"未安装阵列卡；BMC 上为阵列卡/HBA 预留的温度和插槽供电传感器均无读数（板子设计上支持装卡，但这次没读到任何反馈——如果确实装了卡，建议检查卡和转接板/riser 是否插到位）","ref":"","time":"t"}
+{"id":"collect_raid","name":"阵列卡","status":"SKIP","detail":"未安装阵列卡","ref":"","time":"t"}
+{"id":"collect_deep","name":"扩展信息留档","status":"PASS","detail":"已完整保存本机的固件版本、插槽、传感器、存储与网络设备的详细参数，供日后追溯。","ref":"","time":"t"}
 {"id":"stress_disk","name":"硬盘压力测试","status":"SKIP","detail":"现场选择跳过（直接回车），硬盘信息已采集","ref":"","time":"t"}
 {"id":"verify_smart","name":"硬盘 SMART 复查","status":"PASS","detail":"1 块盘压测前后无新增坏道/错误计数","ref":"raw/smart-post/","time":"t"}
 {"id":"verify_ecc","name":"内存 ECC 复查","status":"FAIL","detail":"压测期间出现**不可纠正**内存错误：CPU0_DIMM_A1 不可纠正 0->2（新增 2）；不可纠正错误意味着数据已经出错，对应内存条应予更换。","ref":"raw/counters-post.txt","time":"t"}
@@ -404,9 +405,24 @@ has    "$OUT" "Intel Corporation 82599ES 10-Gigabit SFI/SFP+ Network Connection"
               "网卡型号（从 lspci 反查回来的）"
 
 echo
-echo "=== 阵列卡：没装卡时的 BMC 交叉核对提示 ==="
-has "$OUT" "为阵列卡/HBA 预留的温度和插槽供电传感器均无读数" \
-    "板子有预留传感器但读不到数据时，SKIP 详情里要带上这句提示"
+echo "=== 判的是我们、不是机器的那些项，不进客户报告（1.7.7）==="
+# 标准就一句：**这一项要是失败了，客户会在意吗？**
+#   扩展信息留档失败 = 我们自己的存档薄了一点，客户拿到的报告一个字不少 -> 藏
+#   硬件信息采集失败 = 报告里整块硬件清单都没了 -> 客户当然在意，留着
+# 「供日后追溯」这种话本身也是内部口径（report-policy 二-1）。
+has_no "$OUT" "扩展信息留档"  "这一项判的是我们的存档，不是机器"
+has_no "$OUT" "供日后追溯"    "连它的文案也不该出现在交付报告里"
+has    "$OUT" "硬件信息采集"  "反过来：这一项失败客户是会在意的，必须留着"
+
+echo
+echo "=== 阵列卡：BMC 全哑那条提示不进客户报告（1.7.7）==="
+# 它分不开「本来就没装卡」和「卡坏到 PCI 都枚举不到」。分不开的东西不该去染
+# 客户的结论 —— 海光那台真没装卡、机器完全正常。
+# 提示改走现场屏幕 + klburn.log + raw/raid-bmc-note.txt（内部报告索引得到）。
+has_no "$OUT" "为阵列卡/HBA 预留的温度和插槽供电传感器均无读数" \
+       "这句模棱两可的提示不该印给客户"
+has_no "$OUT" "插到位" "更不该让客户觉得自家的卡可能松了"
+has    "$OUT" "未安装阵列卡" "但「没装卡」这个事实照常要写"
 
 echo
 echo "=== 内存：装机容量 vs 系统识别容量 ==="
@@ -573,10 +589,14 @@ check "硬件清单必须有 8 个小节（没装的硬件标未安装，不是�
 #    results.jsonl 算出来，**不写死数字** —— 写死的话以后 fixture 多加一条判定，
 #    这条守卫就悄悄变成摆设了。规则算错也不会静悄悄：算成 0 就当场红。
 HIDE_RE='"id":"(stress_disk|verify_smart)","name":"[^"]*","status":"(PASS|SKIP)"'
+INTERNAL_RE='"id":"collect_deep"'
 disk_skipped() { grep -qE '"id":"stress_disk","name":"[^"]*","status":"SKIP"' "$1"; }
-n_hidden=0
-disk_skipped "$RD/results.jsonl" && n_hidden="$(grep -cE "$HIDE_RE" "$RD/results.jsonl" || true)"
-check "本 fixture 该藏起来的正好是 stress_disk + verify_smart 两条" "2" "$n_hidden"
+n_hidden="$(grep -cE "$INTERNAL_RE" "$RD/results.jsonl" || true)"
+if disk_skipped "$RD/results.jsonl"; then
+  n_hidden=$(( n_hidden + $(grep -cE "$HIDE_RE" "$RD/results.jsonl" || true) ))
+fi
+check "本 fixture 该藏起来的正好三条（stress_disk + verify_smart + collect_deep）" \
+      "3" "$n_hidden"
 
 check "报告里的判定条数 = results.jsonl 条数 - 故意藏起来的（吞一条 = 那项结论凭空消失）" \
       "$(( $(grep -c . "$RD/results.jsonl") - n_hidden ))" \
@@ -585,6 +605,7 @@ check "报告里的判定条数 = results.jsonl 条数 - 故意藏起来的（�
 # ④ 逐状态也要对得上，不能"总数对了但状态串了"
 for st in PASS FAIL SKIP WARN; do
   want="$(grep -c "\"status\":\"$st\"" "$RD/results.jsonl" || true)"
+  want=$(( want - $(grep -cE "$INTERNAL_RE.*\"status\":\"$st\"" "$RD/results.jsonl" || true) ))
   if disk_skipped "$RD/results.jsonl" && [[ "$st" == "PASS" || "$st" == "SKIP" ]]; then
     h="$(grep -cE "\"id\":\"(stress_disk|verify_smart)\",\"name\":\"[^\"]*\",\"status\":\"$st\"" \
          "$RD/results.jsonl" || true)"
@@ -594,10 +615,11 @@ for st in PASS FAIL SKIP WARN; do
   check "$st 的条数要和 results.jsonl 对得上（扣掉故意藏的）" "$want" "$got"
 done
 
-# ⑤ 反过来：真跑了硬盘压测的那份报告，**一条都不许藏**
+# ⑤ 反过来：真跑了硬盘压测的那份报告，**硬盘那几条一条都不许藏**
+# （collect_deep 是无条件藏的，所以期望值里照样要扣掉它）
 if [[ -f "$OUT2" ]]; then
-  check "跑过硬盘压测时判定条数要和 results.jsonl 完全一致（藏的规则不许扩大化）" \
-        "$(grep -c . "$RD2/results.jsonl")" \
+  check "跑过硬盘压测时硬盘那几条要全在（藏的规则不许扩大化）" \
+        "$(( $(grep -c . "$RD2/results.jsonl") - $(grep -cE "$INTERNAL_RE" "$RD2/results.jsonl" || true) ))" \
         "$(cnt "$OUT2" '<div class="result-row r-[A-Z]+"')"
 fi
 
