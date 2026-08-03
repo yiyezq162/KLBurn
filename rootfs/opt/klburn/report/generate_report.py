@@ -422,7 +422,23 @@ class Data(object):
                 out.append((m.group(1), m.group(2)))
         return out
 
-    def disks(self):
+    def disk_stress_ran(self):
+        """现场这一轮到底跑没跑硬盘压测。
+
+        99% 的情况下现场是跳过的（客户不让往盘里写破坏性数据），跳过时
+        `stress_disk` / `verify_smart` 这两项以及所有和"硬盘压测"沾边的字段
+        整个不进客户报告 —— 一行「SKIP 硬盘压力测试 现场选择跳过」只会让客户
+        以为我们偷工减料，而跳过恰恰是客户自己的选择。
+
+        判据取 results.jsonl 里 stress_disk 的真实状态，**不看 meta 的 budget**：
+        老的 run-dir 里 disk_secs 可能是"候选时长"，跳过了也非零。
+        """
+        for r in self.results:
+            if r.get("id") == "stress_disk":
+                return r.get("status") != "SKIP"
+        return False
+
+    def disks(self, show_stress_col=True):
         lsblk = read_json(self.rawpath("lsblk.json"), {"blockdevices": []})
 
         # "本次压测" 只有在现场真的确认了破坏性写入之后才算数。
@@ -471,8 +487,11 @@ class Data(object):
                     (("%s°C" % sm.get("temperature_c")) if sm.get("temperature_c") is not None else None)),
                 ("SMART健康", "正常" if sm.get("smart_passed") is True
                     else ("异常" if sm.get("smart_passed") is False else None)),
-                ("本次压测", "是" if path in tested else "否"),
             ]))
+            # 没跑硬盘压测就整列不出现 —— 一列全是"否"等于在报告上写
+            # "我们没测"，而那是客户自己选的，不该让他反过来怀疑我们
+            if show_stress_col:
+                out[-1]["本次压测"] = "是" if path in tested else "否"
 
         # 阵列卡后端的物理盘。它们没有自己的 /dev 节点，所以上面按 lsblk 那一圈
         # 扫不到 —— 但客户买的正是这些盘，报告里必须有。
@@ -495,8 +514,9 @@ class Data(object):
                     (("%s°C" % sm.get("temperature_c")) if sm.get("temperature_c") is not None else None)),
                 ("SMART健康", "正常" if sm.get("smart_passed") is True
                     else ("异常" if sm.get("smart_passed") is False else None)),
-                ("本次压测", "—"),
             ]))
+            if show_stress_col:
+                out[-1]["本次压测"] = "—"
         return out
 
     # ---------- 网卡 ----------
@@ -823,12 +843,43 @@ def build_html(data):
     # 注意这不是说机器坏了：下面的提示语写的是"本次测试无效、需重新测试"，
     # 不往硬件头上扣帽子（见 docs/report-policy.md）。
     no_results = not statuses
+    # ⚠️ 整机结论永远看**全部**判定，不看下面过滤后的那份。过滤只影响"给客户看什么"，
+    # 绝不能影响"这台机器合不合格"。
     overall = "FAIL" if ("FAIL" in statuses or no_results) else "PASS"
 
-    n_pass = statuses.count("PASS")
-    n_fail = statuses.count("FAIL")
-    n_warn = statuses.count("WARN")
-    n_skip = statuses.count("SKIP")
+    # ---------------- 硬盘压测没跑时，把它那几项整个藏起来 ----------------
+    #
+    # 现场 99% 会跳过硬盘压测（客户不让往盘里写破坏性数据）。跳过时报告上留着
+    # 一行「SKIP 硬盘压力测试 现场选择跳过（直接回车）」，客户看到的是
+    # "他们少测了一项"，而那恰恰是客户自己的选择 —— 白白惹一次解释。
+    # `verify_smart`（硬盘 SMART 复查）跟着一起藏：没跑压测的话它比的是
+    # "空转前后"，单独留着反而更像凑数。
+    #
+    # ⚠️⚠️ **只藏 PASS / SKIP。WARN 和 FAIL 一律照常显示，一条都不许藏。**
+    # 这是这个改动唯一不能犯的错：verify_smart 判 FAIL 的意思是这一轮盘上
+    # 新增了坏道 —— 那和跑没跑硬盘压测无关（CPU/内存压测照样跑了十几分钟），
+    # 是实打实的硬件问题，客户必须看到。藏掉它就等于把坏盘放出厂。
+    # tests/test-report-render.sh 里有成对断言，mutate.sh 里有 disk-hide-fail 守着。
+    DISK_STRESS_ROWS = ("stress_disk", "verify_smart")
+    disk_ran = data.disk_stress_ran()
+    if disk_ran:
+        shown = results
+    else:
+        shown = [r for r in results
+                 if not (r.get("id") in DISK_STRESS_ROWS
+                         and r.get("status") in ("PASS", "SKIP"))]
+
+    # 计数按**客户实际看得到的那些**算，否则抬头写着"跳过 4 项"、
+    # 下面只列得出 2 条，客户第一眼就会问剩下两条哪儿去了。
+    # 「SMART 复查」这一项到底还在不在报告里 —— 上面 1.4 那句"详见下方…"
+    # 得跟着它走，不能跟着 disk_ran 走：压测没跑但 SMART 复查判了 FAIL 时，
+    # 那一项是留着的，指路的话就不该被删掉。
+    smart_shown = any(r.get("id") == "verify_smart" for r in shown)
+    shown_statuses = [r.get("status") for r in shown]
+    n_pass = shown_statuses.count("PASS")
+    n_fail = shown_statuses.count("FAIL")
+    n_warn = shown_statuses.count("WARN")
+    n_skip = shown_statuses.count("SKIP")
 
     sysinfo = data.system()
     serial = sysinfo.get("整机序列号") or meta.get("serial") or "UNKNOWN"
@@ -876,7 +927,7 @@ def build_html(data):
 
     # 告警项不影响总结论，但必须在抬头就点出来，不能只埋在下面的列表里等人翻。
     # 缺一条内存、少接一路电源线这种事，恰恰是最容易被漏看又最该在出厂拦住的。
-    warn_items = [r for r in results if r.get("status") == "WARN"]
+    warn_items = [r for r in shown if r.get("status") == "WARN"]
     if warn_items:
         A('<div class="notice notice-warn"><b>以下 %d 项为告警，不影响总体结论，'
           "但建议出货前确认：</b><ul style=\"margin:6px 0 0;padding-left:22px\">" % len(warn_items))
@@ -937,10 +988,12 @@ def build_html(data):
     A(table(dimms, "未检测到内存条信息"))
 
     A("<h3>1.4 硬盘</h3>")
-    disks = data.disks()
+    disks = data.disks(show_stress_col=disk_ran)
     if disks:
-        A('<p class="sub">下表为本机硬盘的型号 / 序列号 / 固件 / 容量与 SMART 健康状态。'
-          "坏道类计数在压测前后的变化见下方「硬盘 SMART 复查」。</p>")
+        # 后半句指的是下面那一项判定。它被藏掉时这句话就是指向一个
+        # 报告里根本不存在的小节，所以跟着 smart_shown 走。
+        A('<p class="sub">下表为本机硬盘的型号 / 序列号 / 固件 / 容量与 SMART 健康状态。%s</p>'
+          % ("坏道类计数在压测前后的变化见下方「硬盘 SMART 复查」。" if smart_shown else ""))
         if data.raid_pd_keys():
             A('<p class="sub">标注为「阵列卡 PD<i>n</i>」的是接在阵列卡后面的物理盘 —— '
               "它们在操作系统里看不到独立的盘符，这里的信息是通过阵列卡逐块读取的。</p>")
@@ -970,17 +1023,21 @@ def build_html(data):
     A("<h2>二、压力测试结果</h2>")
 
     budget = meta.get("budget") or {}
-    A(kv_block(OrderedDict([
+    dur = OrderedDict([
         ("测试模式", profile_text(meta.get("profile"))),
         ("计划总时长", fmt_dur(meta.get("planned_secs"))),
         ("实际总耗时", fmt_dur(meta.get("elapsed_secs"))),
         ("CPU 压测时长", fmt_dur(budget.get("cpu_secs"))),
         ("内存压测时长", fmt_dur(budget.get("mem_secs"))),
-        ("硬盘压测时长", fmt_dur(budget.get("disk_secs"))),
-        ("GPU 压测时长", fmt_dur(budget.get("gpu_secs"))),
-    ])))
-    A('<p class="sub">CPU / 内存 / GPU 三项并发压测（互不占用彼此的时间，选多长测多长）；'
-      "硬盘单独测试，不与前三项同时进行，所以以上时长不能直接相加算总耗时。</p>")
+    ])
+    # 「硬盘压测时长 0秒」和那行 SKIP 是一回事，藏就一起藏干净
+    if disk_ran:
+        dur["硬盘压测时长"] = fmt_dur(budget.get("disk_secs"))
+    dur["GPU 压测时长"] = fmt_dur(budget.get("gpu_secs"))
+    A(kv_block(dur))
+    A('<p class="sub">CPU / 内存 / GPU 三项并发压测（互不占用彼此的时间，选多长测多长）。%s</p>'
+      % ("硬盘单独测试，不与前三项同时进行，所以以上时长不能直接相加算总耗时。"
+         if disk_ran else ""))
 
     # 二级编号动态生成：硬盘、GPU 没测的时候它们的小节整个不出现，
     # 写死编号就会出现 2.2 后面直接跳到 2.5 这种断号。
@@ -991,7 +1048,7 @@ def build_html(data):
         return "<h3>2.%d %s</h3>" % (sub_no[0], title)
 
     A(SUB("各项结论"))
-    for r in results:
+    for r in shown:
         st = r.get("status", "SKIP")
         A('<div class="result-row r-%s">' % st)
         A('<span class="badge b-%s">%s</span>' % (st, st))
@@ -1024,8 +1081,9 @@ def build_html(data):
             A('<p class="sub">封装功耗峰值 %d W（读自 RAPL 能量计数器，多路 CPU 已求和）</p>'
               % max(powers))
             A(svg_line_chart([("CPU 封装功耗", powers)], y_label="W", y_suffix="W"))
-        A('<p class="sub">采样间隔 5 秒，覆盖 CPU / 内存 / 硬盘全部压测阶段。'
-          "读不到的项目（部分平台不提供 RAPL 或 CPU 温度驱动）不画图，不影响判定。</p>")
+        A('<p class="sub">采样间隔 5 秒，覆盖%s全部压测阶段。'
+          "读不到的项目（部分平台不提供 RAPL 或 CPU 温度驱动）不画图，不影响判定。</p>"
+          % ("CPU / 内存 / 硬盘" if disk_ran else "CPU / 内存"))
 
     # ---------------- GPU 曲线 ----------------
     gs = data.gpu_series()

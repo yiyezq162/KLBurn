@@ -78,7 +78,8 @@ cat > "$RD/results.jsonl" <<'EOF'
 {"id":"test_nic","name":"网卡连通性","status":"PASS","detail":"1 个口 ping 通网关","ref":"","time":"t"}
 {"id":"check_psu","name":"电源","status":"WARN","detail":"PSU2 未检测到交流输入","ref":"","time":"t"}
 {"id":"collect_raid","name":"阵列卡","status":"SKIP","detail":"未安装阵列卡；BMC 上为阵列卡/HBA 预留的温度和插槽供电传感器均无读数（板子设计上支持装卡，但这次没读到任何反馈——如果确实装了卡，建议检查卡和转接板/riser 是否插到位）","ref":"","time":"t"}
-{"id":"stress_disk","name":"硬盘压力测试","status":"SKIP","detail":"现场选择跳过","ref":"","time":"t"}
+{"id":"stress_disk","name":"硬盘压力测试","status":"SKIP","detail":"现场选择跳过（直接回车），硬盘信息已采集","ref":"","time":"t"}
+{"id":"verify_smart","name":"硬盘 SMART 复查","status":"PASS","detail":"1 块盘压测前后无新增坏道/错误计数","ref":"raw/smart-post/","time":"t"}
 {"id":"verify_ecc","name":"内存 ECC 复查","status":"FAIL","detail":"压测期间出现**不可纠正**内存错误：CPU0_DIMM_A1 不可纠正 0->2（新增 2）；不可纠正错误意味着数据已经出错，对应内存条应予更换。","ref":"raw/counters-post.txt","time":"t"}
 {"id":"verify_throttle","name":"CPU 热节流复查","status":"WARN","detail":"压测期间 CPU 触发热节流共 12 次（涉及 4 个核心、1 个处理器封装）。热节流是 CPU 的自我保护，出现时会主动降频，因此温度读数可能仍在正常范围。此项不影响整机结论，但建议检查散热后复测。","ref":"raw/counters-post.txt","time":"t"}
 {"id":"verify_aer","name":"PCIe 错误计数复查","status":"WARN","detail":"压测期间 PCIe 链路出现可纠正错误：0000:18:00.0 可纠正新增 7；可纠正错误会被链路层自动重传，不影响数据正确性。","ref":"raw/counters-post.txt","time":"t"}
@@ -316,25 +317,81 @@ has    "$OUT" "WS20SNM6"        "硬盘序列号照常要有"
 has    "$OUT" "SMART健康"       "健康状态照常要有"
 
 echo
-echo "=== 硬盘：跳过压测时「本次压测」必须是「否」 ==="
-# 0.3.0 的真实 bug：meta.json 里 disk_tested 写的是"候选盘"而不是"真被写过的盘"，
-# 于是现场明明按回车跳过了破坏性写入，1.4 表格里「本次压测」还是显示「是」，
-# 和下面 stress_disk 的 SKIP 自相矛盾。上面的 fixture 就是照那次现场数据造的
-# （disk_tested 有值、disk_confirmed=0）。
-# 断言用「SMART健康 + 本次压测」这一对相邻单元格，避免误伤正文里别处的是/否。
-has    "$OUT" "<td>正常</td><td>否</td>" "disk_confirmed=0 时哪怕 disk_tested 有值也必须是「否」"
-has_no "$OUT" "<td>正常</td><td>是</td>" "跳过了却标「是」就是 0.3.0 那个 bug"
+echo "=== 硬盘压测没跑：整块从客户报告里消失（1.7.6）==="
+# 现场 99% 会跳过硬盘压测（客户不让往盘里写破坏性数据）。留着一行
+# 「SKIP 硬盘压力测试 现场选择跳过（直接回车）」，客户看到的是"少测了一项"，
+# 而那恰恰是他自己的选择 —— 白白惹一次解释。跳过时这几处一起藏干净：
+#   逐项结论里的 stress_disk / verify_smart、1.4 表的「本次压测」列、
+#   压测时长表的「硬盘压测时长」、以及指向 SMART 复查那一节的那句话。
+# 上面的 fixture 就是这个场景（stress_disk = SKIP）。
+has_no "$OUT" "硬盘压力测试"       "跳过时逐项结论里不出现这一项"
+has_no "$OUT" "现场选择跳过"       "更不能出现「现场选择跳过（直接回车）」这句"
+has_no "$OUT" "硬盘 SMART 复查"    "SMART 复查跟着一起藏（没跑压测时它比的是空转前后）"
+has_no "$OUT" "本次压测"           "1.4 表格里那一列整列不出现"
+has_no "$OUT" "硬盘压测时长"       "压测时长表里那一行也不出现"
+has_no "$OUT" "硬盘单独测试"       "时长表下面那句注解跟着走"
+has_no "$OUT" "CPU / 内存 / 硬盘全部压测阶段" "曲线那句注解也不能再提硬盘"
+# 藏的是"压测"，不是"硬盘"——盘的清单、序列号、SMART 健康照常要有
+has    "$OUT" "1.4 硬盘"    "硬盘清单本身照常在"
+has    "$OUT" "WS20SNM6"    "序列号照常在"
+has    "$OUT" "SMART健康"   "健康状态照常在（这是清单字段，不是压测结论）"
 
-# 反过来：真的确认并压测了，就必须显示「是」，别矫枉过正一律写成否
-RD2="$TMP/run-confirmed"
+echo
+echo "=== 真跑了硬盘压测：一项都不许少 ==="
+# 反过来那一半。跑过就是实打实的工作量，藏了反而亏。
+RD2="$TMP/run-disktested"
 cp -r "$RD" "$RD2"
-sed -i 's/"disk_confirmed": 0/"disk_confirmed": 1/' "$RD2/meta.json"
-OUT2="$TMP/report-confirmed.html"
+sed -i 's/"disk_confirmed": 0/"disk_confirmed": 1/'   "$RD2/meta.json"
+sed -i 's/"disk_secs": 0/"disk_secs": 600/'           "$RD2/meta.json"
+sed -i 's/{"id":"stress_disk","name":"硬盘压力测试","status":"SKIP","detail":"[^"]*"/{"id":"stress_disk","name":"硬盘压力测试","status":"PASS","detail":"顺序写与随机读写各 5 分钟，无 I\/O 错误"/' \
+       "$RD2/results.jsonl"
+OUT2="$TMP/report-disktested.html"
 if python3 "$GEN" --run-dir "$RD2" --out "$OUT2" >/dev/null 2>&1; then
-  has "$OUT2" "<td>正常</td><td>是</td>" "disk_confirmed=1 时要照常显示「是」"
+  has "$OUT2" "硬盘压力测试"     "跑过了就要显示这一项"
+  has "$OUT2" "硬盘 SMART 复查"  "SMART 复查跟着回来"
+  has "$OUT2" "硬盘压测时长"     "时长那一行回来"
+  has "$OUT2" "本次压测"         "「本次压测」列回来"
+  # 断言用「SMART健康 + 本次压测」这一对相邻单元格，避免误伤正文里别处的是/否
+  has "$OUT2" "<td>正常</td><td>是</td>" "真压过的盘要标「是」"
 else
-  bad "confirmed 场景的报告没能生成"
+  bad "跑过硬盘压测的场景没能生成报告：$(python3 "$GEN" --run-dir "$RD2" --out "$OUT2" 2>&1 | tail -3)"
 fi
+
+echo
+echo "=== 藏归藏，坏盘一条都不许藏（这是整个改动唯一不能犯的错）==="
+# verify_smart 判 FAIL 的意思是**这一轮盘上新增了坏道**。那和跑没跑硬盘压测
+# 没关系 —— CPU/内存压测照样跑了十几分钟。把它藏掉就等于把坏盘放出厂，
+# 比留着一行 SKIP 惹客户问一句严重得多。
+RD3="$TMP/run-smartfail"
+cp -r "$RD" "$RD3"
+sed -i 's/{"id":"verify_smart","name":"硬盘 SMART 复查","status":"PASS","detail":"[^"]*"/{"id":"verify_smart","name":"硬盘 SMART 复查","status":"FAIL","detail":"\/dev\/sda 压测后新增重映射扇区 0->8"/' \
+       "$RD3/results.jsonl"
+OUT3="$TMP/report-smartfail.html"
+if python3 "$GEN" --run-dir "$RD3" --out "$OUT3" >/dev/null 2>&1; then
+  has    "$OUT3" "硬盘 SMART 复查"          "SMART 复查判 FAIL 时必须照常显示"
+  has    "$OUT3" "新增重映射扇区 0-&gt;8"    "而且要带上具体读数"
+  has_no "$OUT3" "硬盘压力测试"             "但 stress_disk 那条 SKIP 仍然该藏"
+  has    "$OUT3" "坏道类计数在压测前后的变化" "1.4 里那句指路要跟着 SMART 复查回来"
+else
+  bad "SMART 复查 FAIL 的场景没能生成报告"
+fi
+
+echo
+echo "=== 抬头的计数要和下面列得出来的条数对得上 ==="
+# 藏了两条却还写着"跳过 3 项"，客户第一眼就会问剩下那条哪儿去了。
+count_of() {   # count_of <文件> <状态中文名>
+  grep -oE "通过 [0-9]+ 项 ｜ 失败 [0-9]+ 项 ｜ 告警 [0-9]+ 项 ｜ 跳过 [0-9]+ 项" "$1" \
+    | head -1 | grep -oE "$2 [0-9]+" | grep -oE '[0-9]+'
+}
+# fixture 共 10 条：PASS 3（collect_system / test_nic / verify_smart）
+#                   WARN 4（内存容量 / 电源 / 热节流 / AER）FAIL 1  SKIP 2
+# 藏掉 stress_disk(SKIP) 和 verify_smart(PASS) 之后：PASS 2  WARN 4  FAIL 1  SKIP 1
+check "抬头「通过」数按客户看得到的算" "2" "$(count_of "$OUT" 通过)"
+check "抬头「跳过」数按客户看得到的算" "1" "$(count_of "$OUT" 跳过)"
+check "「失败」数不受影响"             "1" "$(count_of "$OUT" 失败)"
+check "「告警」数不受影响"             "4" "$(count_of "$OUT" 告警)"
+# 屏幕上那个大字结论看的是**全部**判定，绝不能因为藏了行就变
+has "$OUT" 'class="verdict v-FAIL"' "整机结论仍然按全部判定算（verify_ecc 那条 FAIL）"
 
 echo
 echo "=== 网卡：连通性 + Unknown! 归一化 + 型号 ==="
@@ -506,20 +563,43 @@ check "一级章节必须是「硬件清单 / 压力测试结果 / 原始日志�
 check "硬件清单必须有 8 个小节（没装的硬件标未安装，不是整节不见）" \
       "8" "$(cnt "$OUT" '<h3>1\.[0-9]+ ')"
 
-# ③ 判定条数必须和 results.jsonl 一样多。
+# ③ 判定条数必须和 results.jsonl 一样多 —— 减掉**故意藏起来的那几条**。
 #    这是本组里最要紧的一条：报告悄悄吞掉一条结论，是"汇总入口调用链少人"
 #    那个 bug 在报告侧的同款 —— 判定跑过了、结论也写进 results.jsonl 了，
 #    只是没渲染出来，于是报告里那一项凭空消失，既不是 PASS 也不是 SKIP。
-check "报告里的判定条数必须等于 results.jsonl 的条数（吞一条 = 那项结论凭空消失）" \
-      "$(grep -c . "$RD/results.jsonl")" \
+#
+#    1.7.6 起硬盘压测没跑时 stress_disk / verify_smart（且状态是 PASS/SKIP 的）
+#    是**故意**不渲染的。期望值按和 generate_report.py 同一条规则从
+#    results.jsonl 算出来，**不写死数字** —— 写死的话以后 fixture 多加一条判定，
+#    这条守卫就悄悄变成摆设了。规则算错也不会静悄悄：算成 0 就当场红。
+HIDE_RE='"id":"(stress_disk|verify_smart)","name":"[^"]*","status":"(PASS|SKIP)"'
+disk_skipped() { grep -qE '"id":"stress_disk","name":"[^"]*","status":"SKIP"' "$1"; }
+n_hidden=0
+disk_skipped "$RD/results.jsonl" && n_hidden="$(grep -cE "$HIDE_RE" "$RD/results.jsonl" || true)"
+check "本 fixture 该藏起来的正好是 stress_disk + verify_smart 两条" "2" "$n_hidden"
+
+check "报告里的判定条数 = results.jsonl 条数 - 故意藏起来的（吞一条 = 那项结论凭空消失）" \
+      "$(( $(grep -c . "$RD/results.jsonl") - n_hidden ))" \
       "$(cnt "$OUT" '<div class="result-row r-[A-Z]+"')"
 
 # ④ 逐状态也要对得上，不能"总数对了但状态串了"
 for st in PASS FAIL SKIP WARN; do
   want="$(grep -c "\"status\":\"$st\"" "$RD/results.jsonl" || true)"
+  if disk_skipped "$RD/results.jsonl" && [[ "$st" == "PASS" || "$st" == "SKIP" ]]; then
+    h="$(grep -cE "\"id\":\"(stress_disk|verify_smart)\",\"name\":\"[^\"]*\",\"status\":\"$st\"" \
+         "$RD/results.jsonl" || true)"
+    want=$(( want - h ))
+  fi
   got="$(cnt "$OUT" "<div class=\"result-row r-$st\"")"
-  check "$st 的条数要和 results.jsonl 对得上" "$want" "$got"
+  check "$st 的条数要和 results.jsonl 对得上（扣掉故意藏的）" "$want" "$got"
 done
+
+# ⑤ 反过来：真跑了硬盘压测的那份报告，**一条都不许藏**
+if [[ -f "$OUT2" ]]; then
+  check "跑过硬盘压测时判定条数要和 results.jsonl 完全一致（藏的规则不许扩大化）" \
+        "$(grep -c . "$RD2/results.jsonl")" \
+        "$(cnt "$OUT2" '<div class="result-row r-[A-Z]+"')"
+fi
 
 # ⑤ 整机结论大字有且只有一个（多一个 = 页面上自相矛盾）
 check "整机结论大字有且只有一个" "1" "$(cnt "$OUT" 'class="verdict v-[A-Z]+"')"

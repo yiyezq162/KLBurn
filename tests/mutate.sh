@@ -60,6 +60,7 @@ MUTATIONS=(
 "aer-init-noexempt${S}退回 1.7.3：不豁免 AER 启用日志（§2-2：固件把 AER 交给 OS 的平台，每台好机器都判 FAIL）${S}test-hw-checks${S}$RT/lib/verify.sh${S}mut_aer_init_noexempt"
 "pcie-all-onboard${S}把所有设备都当板载（插槽上的卡降速从此没人报，整条判定变成空跑）${S}test-hw-checks${S}$RT/lib/collect.sh${S}mut_pcie_all_onboard"
 "pcie-devof-fn${S}插槽比对带上功能号（DMI 只列 function 0，双口卡的第二个口会被误判成板载）${S}test-hw-checks${S}$RT/lib/collect.sh${S}mut_pcie_devof_fn"
+"disk-hide-fail${S}硬盘那两项连 FAIL 也一起藏（新增坏道的盘从客户报告里消失，坏盘直接出厂）${S}test-report-render${S}$RT/report/generate_report.py${S}mut_disk_hide_fail"
 "disk-none-fail${S}没装硬盘时判 FAIL 而不是 WARN（§2-2：能力缺失 ≠ 硬件故障，会把无盘机器拦在出货前）${S}test-hw-checks${S}$RT/lib/collect.sh${S}mut_disk_none_fail"
 "counter-postfix${S}断言计数改回 (( PASS++ ))（X=0 时返回 1，让 cond && ok || bad 两边都跑）${S}lint${S}tests/lint.sh${S}mut_counter_postfix"
 "media-blind${S}scan_disks 不再反查启动 U 盘（Ventoy 下前两层同时落空，fio 会把测试盘写穿）${S}test-hw-checks${S}$RT/lib/storage.sh${S}mut_media_blind"
@@ -229,6 +230,16 @@ mut_pcie_devof_fn() {
   replace_line "$RT/lib/collect.sh" \
     'function devof(b) { sub(/\.[0-9a-f]+$/, "", b); return b }' \
     '    function devof(b) { return b }'
+}
+
+# 1.7.6 把「硬盘压测没跑就别在客户报告里提」做成了过滤。这类过滤只有一种
+# 失败方式是不可接受的：**连 FAIL 一起藏**。verify_smart 判 FAIL 的意思是
+# 这一轮盘上新增了坏道，藏掉它 = 一块正在坏的盘拿着一份干净报告出厂。
+# 「少写一行 SKIP」最多惹客户问一句，这个是把坏货放出去。
+mut_disk_hide_fail() {
+  replace_line "$RT/report/generate_report.py" \
+    'and r.get("status") in ("PASS", "SKIP"))]' \
+    '                         and True)]'
 }
 
 # 「本机未安装硬盘」和「硬盘坏了」是两回事。判成 FAIL 的话，出厂只测
