@@ -292,10 +292,12 @@ EOF
 #
 # 一个都不放也**完全正常**：collect_raid 会判 SKIP（只报 PCI 反查到的型号），
 # 绝不判 FAIL —— 那是我们这边少带工具，不是被测机器有问题。
+#   arcconf（Microchip / Adaptec）**不备**：它按控制器系列分版本，手上没有对应的
+#   卡就无从判断该下哪一个，备一个错版本还不如不备。真遇到 Adaptec 卡时，
+#   在这张表和 lib/collect.sh 的 RAID_TOOL_ORDER 里各加一行就行。
 VENDOR_RAID_TOOLS=(
   "storcli|storcli64|storcli64 storcli"
   "perccli|perccli64|perccli64 perccli"
-  "arcconf|arcconf|arcconf"
   "ssacli|ssacli|ssacli"
   "sas3ircu|sas3ircu|sas3ircu"
 )
@@ -326,6 +328,43 @@ for entry in "${VENDOR_RAID_TOOLS[@]}"; do
     install -m 0755 "$found" "/opt/klburn/tools/$vname"
     say "$vname 已安装（来自 vendor/${found#"$STAGE/vendor/"}）"
     raid_tools_found=$(( raid_tools_found + 1 ))
+
+    # 动态链接的工具要自检依赖库在不在盘里。
+    #
+    # storcli64 / perccli64 / sas3ircu 都是静态链接，ssacli **不是**（要
+    # libstdc++ / libgcc_s 等 7 个库）。而这张盘的 rootfs 是剪过的 ——
+    # 缺一个库的表现是：现场跑起来什么都不输出，collect_raid 只看到
+    # "这个工具认不了这张卡"，判 SKIP，**没有任何人会知道真正的原因**。
+    # 所以在构建期就查死：用 readelf 读 NEEDED（**不执行**这个二进制），
+    # 逐个去 ldconfig 的缓存里找。缺了直接让构建停下。
+    #
+    # ⚠️ readelf 没有的话**不能静默跳过** —— 那样这条自检就成了摆设，
+    #    而摆设正是这个项目最恨的东西。宁可让构建停下。
+    command -v readelf >/dev/null 2>&1 \
+      || fail "chroot 里没有 readelf，无法自检 $vname 的依赖库（装 binutils）"
+
+    needed="$(readelf -d "/opt/klburn/tools/$vname" 2>/dev/null \
+              | sed -nE 's/.*NEEDED.*\[(.+)\]/\1/p' || true)"
+    if [[ -n "$needed" ]]; then
+      # 变量名别叫 missing —— 上面 need_cmds() 里 missing 是个数组局部变量，
+      # 同名会让 shellcheck 报 SC2178（用作数组的变量又被赋成字符串）。
+      miss_libs=""
+      while IFS= read -r lib; do
+        [[ -n "$lib" ]] || continue
+        # ⚠️ `ldconfig -p` 每行是 **TAB** 开头，不是空格：
+        #       \tlibc.so.6 (libc6,x86-64) => /lib/x86_64-linux-gnu/libc.so.6
+        #    第一版写的 `grep -qF " $lib "` 一个都匹配不上，于是**每个库都被判成缺**，
+        #    构建当场停在这儿。取第一个字段再整词比，别再拿子串去猜。
+        ldconfig -p 2>/dev/null | awk '{print $1}' | grep -qxF "$lib" \
+          || miss_libs="$miss_libs $lib"
+      done <<< "$needed"
+      if [[ -n "$miss_libs" ]]; then
+        fail "$vname 是动态链接的，但盘里缺这些库：$miss_libs
+       —— 现场表现是它什么都不输出、阵列卡那项静默判 SKIP，没人查得出原因。
+       要么把对应的包加进装包列表，要么换一个静态链接的版本。"
+      fi
+      say "  $vname 动态链接，$(printf '%s\n' "$needed" | grep -c . || true) 个依赖库自检通过"
+    fi
   fi
 done
 if (( raid_tools_found == 0 )); then

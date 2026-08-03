@@ -388,10 +388,41 @@ class Data(object):
                 return "未接入"      # na / no reading = 这个模块没在工作
         return None
 
+    # 空的电源位，BIOS 照样报 `Present, OK` —— 6530 那台的 PSU4 就是：
+    # 厂商/型号/序列号全是 "To Be Filled By O.E.M."、额定功率 0 W，状态却写着在位。
+    # 列进表里客户一数电源就发现对不上（判定那边 lib/collect.sh 的
+    # dmi_psu_list 用的是同一条规则，两边口径必须一致）。
+    #
+    # 三个条件**同时**成立才算幽灵，缺一不可（每条都对着一种会误杀真电源的写法）：
+    #   1. Max Power Capacity 那行**显式存在**且值为 0
+    #      —— 有些 BIOS 对真电源也不填额定功率，字段缺失不能当 0
+    #   2. 身份字段（厂商/型号/序列号）**至少存在一个**
+    #      —— 最小 DMI 只有 Location + Status，那是 BIOS 懒，不是空槽位
+    #   3. 存在的身份字段**全是占位符**
+    #      —— 同一台的 PSU3 厂商是占位符，但序列号和 2700W 都是真的
+    ID_KEYS = ("Manufacturer", "Name", "Model Part Number", "Serial Number")
+
+    @classmethod
+    def _psu_is_phantom(cls, p):
+        cap = p.get("Max Power Capacity")
+        if cap is None:
+            return False
+        try:
+            if float(re.sub(r"[^0-9.]", "", cap) or 0) > 0:
+                return False
+        except ValueError:
+            return False
+        present = [k for k in cls.ID_KEYS if k in p]
+        if not present:
+            return False
+        return not any(clean(p.get(k)) for k in present)
+
     def psus(self):
         out = []
         for i, b in enumerate(dmi_blocks(self.dmi, "System Power Supply"), 1):
             p = b["props"]
+            if self._psu_is_phantom(p):
+                continue
             loc = clean(p.get("Location")) or clean(p.get("Name")) or ("PSU%d" % i)
             m = re.search(r"\d+", loc)
             out.append(OrderedDict([
@@ -1191,7 +1222,9 @@ def build_html(data):
             A('<p class="sub">封装功耗峰值 %d W（读自 RAPL 能量计数器，多路 CPU 已求和）</p>'
               % max(powers))
             A(svg_line_chart([("CPU 封装功耗", powers)], y_label="W", y_suffix="W"))
-        A('<p class="sub">采样间隔 5 秒，覆盖%s全部压测阶段。'
+        # 1.7.6 把「/ 硬盘」做成可选之后，这句拼出来是「覆盖CPU / 内存全部压测阶段」——
+        # 中文和 ASCII 之间少了空格。文案是给客户看的，别留这种毛刺。
+        A('<p class="sub">采样间隔 5 秒，覆盖 %s 全部压测阶段。'
           "读不到的项目（部分平台不提供 RAPL 或 CPU 温度驱动）不画图，不影响判定。</p>"
           % ("CPU / 内存 / 硬盘" if disk_ran else "CPU / 内存"))
 

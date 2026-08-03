@@ -647,7 +647,7 @@ chroot 里却只有新的，报「ISO_KVER 在 /lib/modules 下不存在」。
 | `vendor/nvidia/NVIDIA-Linux-x86_64-*.run` | 出一张不含显卡驱动的盘，有卡的机器 GPU 项记 SKIP |
 | `vendor/gpu_burn/{gpu_burn,compare.fatbin}` | 显卡型号/显存/驱动版本照常进报告，但不做满载压测 |
 | `vendor/storcli/storcli64` | 阵列卡只能报 PCI 型号，读不到固件版本和逻辑盘状态 |
-| `vendor/{perccli,arcconf,ssacli,sas3ircu}/` | 同上，对应 Dell PERC / Adaptec / HPE Smart Array / IT 模式 HBA。采集时挨个试、命中即用；一个都不放也正常，那一项判 SKIP **不判 FAIL** |
+| `vendor/{perccli,ssacli,sas3ircu}/` | 同上，对应 Dell PERC / HPE Smart Array / IT 模式 HBA。采集时挨个试、命中即用；一个都不放也正常，那一项判 SKIP **不判 FAIL**。动态链接的工具装完会自检依赖库在不在盘里，缺库直接让构建停下 |
 | `vendor/logo.png` | 报告抬头不显示 logo |
 
 `INCLUDE_NVIDIA` **默认按 `vendor/nvidia/` 里有没有驱动自动决定**；
@@ -919,6 +919,17 @@ check_fans() {
     一边手工把标志位设上再验状态，中间那根线一次都没测过。
     **测函数的真实产出（那个全局），别测"两半各自对不对"。**
     `mutate.sh` 里 `raid-hint-subshell` 钉着这条。
+26. **否定式关键字必须显式排掉**（1.7.8）。`[[ "$st" == *"Present"* ]]` 会把
+    **`Not Present`** 也算成在位（子串），于是 DMI 明写"槽位空着"的机器被判成
+    「N 个电源模块在位、一切正常」—— 判错方向是最糟的那个，真缺一路电源的
+    机器被说成正常。这是 §11-1（不要拿关键字当判定）在电源这条路上的同款。
+    **写 `*"X"*` 之前先想一遍："Not X" / "No X" / "X: disabled" 会不会也命中。**
+    `mutate.sh` 里 `psu-not-present` 钉着这条。
+27. **占位符 ≠ 字段缺失**（1.7.8）。DMI 里 `To Be Filled By O.E.M.` 是"填了个
+    占位符"，字段整行不存在是"没填"。判空槽位（PSU4：0W + 身份全占位符）时把
+    两者混为一谈，会把最小 DMI（只有 `Location` + `Status`）的**真电源**整条吃掉。
+    这类"看起来等价"的判据一律要**成对断言**：一条验它抓得住，一条验它不误杀。
+    `mutate.sh` 里 `psu-ghost-count` 钉着这条。
 
 ---
 
@@ -1068,7 +1079,7 @@ FAIL 第 4 个分区挂不上              <- 连文件系统都没了
 | 场景 | 为什么没做 | 怎么补 |
 |---|---|---|
 | **Ventoy 的 dm 设备链** | QEMU 里没法真装 Ventoy。反查逻辑由 `test-disk-exclusion.sh`（loop + dm-linear 同构设备链）和 `test-hw-checks.sh` 里那组"Ventoy 形状的启动盘必须被排除"覆盖，后者还有 `media-blind` 变异守着 | 真机上用 Ventoy 盘跑一次 |
-| **厂商管理工具的真实输出** | `perccli64` / `arcconf` / `ssacli` / `sas3ircu` 这几个闭源二进制我们手上没有，测试里全是桩 | 拿到真卡时核 `raw/raid/` 下的原始输出 |
+| **厂商管理工具的真实输出** | `perccli64` / `ssacli` / `sas3ircu` 已经备进 `vendor/`，但**手上没有对应的卡**（只有 Broadcom 那张，storcli 已在真卡上验过），测试里仍是桩 | 拿到 Dell / HPE / IT 模式的卡时核 `raw/raid/` 下的原始输出 |
 
 > 顺带：那张排除表的措辞是 e2e 截图看出问题的 —— 软驱 `/dev/fd0` 原来被标成
 > "virtual / software RAID device"。那块屏幕是操作员决定"要不要擦这些盘"时

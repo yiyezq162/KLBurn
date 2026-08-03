@@ -339,7 +339,7 @@ sudo ./build/build-iso.sh --skip-download    # 源 ISO 不存在就报错，不�
 | `vendor/nvidia/NVIDIA-Linux-x86_64-*.run` | 出一张不含显卡驱动的盘 |
 | `vendor/gpu_burn/{gpu_burn,compare.fatbin}` | 显卡信息照常采集，但不做满载压测 |
 | `vendor/storcli/storcli64` | 阵列卡只能报 PCI 型号，读不到固件版本和逻辑盘状态（**卡后面物理盘的 SMART 不受影响**，那条路不依赖它） |
-| `vendor/{perccli,arcconf,ssacli,sas3ircu}/` | 同上，分别对应 Dell PERC / Adaptec / HPE Smart Array / IT 模式 HBA。一张卡只有对得上的那个工具认得，放几个算几个 |
+| `vendor/{perccli,ssacli,sas3ircu}/` | 同上，分别对应 Dell PERC / HPE Smart Array / IT 模式 HBA。一张卡只有对得上的那个工具认得，放几个算几个 |
 | `vendor/logo.png` | 报告抬头不显示 logo |
 
 详见 [`vendor/README.md`](vendor/README.md)。gpu_burn 需要自己编译一次：
@@ -550,7 +550,7 @@ journalctl -u klburn.service -b --no-pager
 **阵列卡这项是 SKIP，只有型号没有固件版本** —— 这张盘里没带对得上的管理工具。
 这类工具都是各家的闭源二进制，不在 Ubuntu 源里，只能手工下载后放进 `vendor/`
 再重新出盘：Broadcom/LSI 用 `storcli64`、Dell PERC 用 `perccli64`、
-HPE Smart Array 用 `ssacli`、Adaptec 用 `arcconf`、IT 模式的 HBA 用 `sas3ircu`。
+HPE Smart Array 用 `ssacli`、IT 模式的 HBA 用 `sas3ircu`。
 步骤见 [`vendor/README.md`](vendor/README.md)。
 **阵列卡始终只采集不压测**，所以这一项永远不会是 FAIL。
 

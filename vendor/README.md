@@ -11,8 +11,6 @@ vendor/
 │   └── storcli64                      # Broadcom / LSI 阵列卡命令行工具
 ├── perccli/                           # 可选：Dell PERC
 │   └── perccli64
-├── arcconf/                           # 可选：Microchip / Adaptec
-│   └── arcconf
 ├── ssacli/                            # 可选：HPE Smart Array
 │   └── ssacli
 ├── sas3ircu/                          # 可选：LSI/Broadcom HBA（IT 模式）
@@ -32,7 +30,7 @@ vendor/
 | `nvidia/*.run` | 出一张不含显卡驱动的盘；有卡的机器 GPU 项记 SKIP，不算故障 |
 | `gpu_burn/` | 显卡型号/显存/驱动版本照常进报告，但不做满载压测，也就没有温度功耗曲线 |
 | `storcli/storcli64` | 阵列卡只能报 PCI 反查到的型号，读不到固件版本和逻辑盘状态（见下方说明：**卡后面物理盘的 SMART 不依赖它**） |
-| `perccli/` `arcconf/` `ssacli/` `sas3ircu/` | 同上，只是对应的是 Dell PERC / Adaptec / HPE Smart Array / IT 模式 HBA。一个都不放也正常，那一项判 SKIP 不判 FAIL |
+| `perccli/` `ssacli/` `sas3ircu/` | 同上，只是对应的是 Dell PERC / HPE Smart Array / IT 模式 HBA。一个都不放也正常，那一项判 SKIP 不判 FAIL |
 | `logo.png` | 报告抬头不显示 logo |
 
 ---
@@ -199,17 +197,28 @@ vendor/storcli/storcli64
 一个都没带也完全正常 —— 那一项判 SKIP，只报 PCI 反查到的型号，
 **永远不会因此判 FAIL**（少带工具是我们这边的事，不是被测机器的毛病）。
 
-| 放到 | 装进盘里的名字 | 认哪些卡 | 上哪儿拿 |
+| 放到 | 装进盘里的名字 | 认哪些卡 | 怎么从下载包里取出来 |
 |---|---|---|---|
-| `vendor/perccli/` | `perccli64` | **Dell PERC**（H7xx/H8xx…） | Dell 支持站按服务器型号搜 `PERCCLI`，或 Broadcom 站 "PercCLI" |
-| `vendor/arcconf/` | `arcconf` | **Microchip / Adaptec**（`smartpqi`、`aacraid`），HPE SR 系也常见 | Microchip 官网 Adaptec 支持页搜 `ARCCONF` |
-| `vendor/ssacli/` | `ssacli` | **HPE Smart Array**（P4xx/P8xx、Gen9~Gen10） | HPE 支持站 SPP 里的 `ssacli` rpm，`rpm2cpio ... \| cpio -idmv` 解出来 |
-| `vendor/sas3ircu/` | `sas3ircu` | **LSI/Broadcom HBA 的非 RAID（IT）模式**（9300/9400 系） | Broadcom 站搜 `SAS3IRCU` |
+| `vendor/perccli/` | `perccli64` | **Dell PERC**（H7xx/H8xx…） | `Perccli_*_Linux.tar.gz` → 里面是 rpm：`rpm2cpio perccli-*.rpm \| cpio -idm` → `opt/MegaRAID/perccli/perccli64` |
+| `vendor/ssacli/` | `ssacli` | **HPE Smart Array**（P4xx/P8xx、Gen9~Gen10） | `ssacli-*.rpm`：`rpm2cpio ... \| cpio -idm` → `opt/smartstorageadmin/ssacli/bin/ssacli` |
+| `vendor/sas3ircu/` | `sas3ircu` | **LSI/Broadcom HBA 的非 RAID（IT）模式**（9300/9400 系） | `SAS3IRCU_P16.zip` 解开 → `SAS3IRCU_P16/sas3ircu_rel/sas3ircu/sas3ircu_linux_x64_rel/sas3ircu` |
 
 和 storcli 一样：**可以直接把整个解压结果原样丢进对应目录**，
 构建脚本会往下递归找那个可执行文件，构建日志里会打出它最终用的是哪个路径
 （`[chroot] ssacli 已安装（来自 vendor/...）`），最后还会汇总一句
 `[chroot] 阵列卡管理工具共装了 N 个`。
+
+> **`arcconf`（Microchip / Adaptec）不备。** 它按控制器系列分版本，手上没有
+> 对应的卡就无从判断该下哪一个，备个错版本还不如不备。真拿到 Adaptec 卡时，
+> 在 `build/chroot-setup.sh` 的 `VENDOR_RAID_TOOLS` 和 `lib/collect.sh` 的
+> `RAID_TOOL_ORDER` 里各加一行就行 —— `raid_tool_run` 里那个 case 分支还留着。
+
+> ⚠️ **静态链接的优先。** 这张盘的 rootfs 是剪过的，动态链接的工具会因为缺库
+> 跑不起来，而现场看到的只是"阵列卡那项判了 SKIP"，查不出原因。
+> 构建期已经有自检兜底：装完会用 `readelf` 读它的 NEEDED、逐个去盘里找，
+> 缺库直接让构建停下并打出缺哪几个。
+> （当前这四个里 `ssacli` 是动态链接的，要 `libstdc++` / `libgcc_s` 等 7 个库，
+> 24.04 的基础系统里都有，自检通过。）
 
 > ⚠️ `perccli64` 和 `storcli64` 是同一套东西换的皮，**子命令完全一样，
 > 但版本对不上会认不到卡**（storcli 认不了 PERC，反过来也一样）。

@@ -165,11 +165,47 @@ System Power Supply
 	Max Power Capacity: 2700 W
 	Status: Present, OK
 	Plugged: Yes
+
+Handle 0x0060, DMI type 39, 22 bytes
+System Power Supply
+	Power Unit Group: 4
+	Location: PSU4
+	Name: To Be Filled By O.E.M.
+	Manufacturer: To Be Filled By O.E.M.
+	Serial Number: To Be Filled By O.E.M.
+	Max Power Capacity: 0 W
+	Status: Present, OK
+	Plugged: Yes
 EOF
-check "三个电源应解析出三行「位置|状态」" \
-      "PSU1|Present, OK
-PSU2|Present, Critical
-PSU3|Present, OK" "$(dmi_psu_list "$TMP/dmidecode-psu.txt")"
+# 第三个字段：这一位到底有没有真的插着电源。
+# PSU4 取自 6530 那台的真实 DMI —— **空的电源位，BIOS 照样报 Present, OK**。
+# 照单全收的话报告写「共 4 个电源模块在位」，客户一数电源就发现对不上。
+check "四条 type 39 解析出四行「位置|状态|真伪」" \
+      "PSU1|Present, OK|1
+PSU2|Present, Critical|1
+PSU3|Present, OK|1
+PSU4|Present, OK|0" "$(dmi_psu_list "$TMP/dmidecode-psu.txt")"
+
+# 成对钉死：判据必须两个条件同时成立，少一个都不许判成幽灵。
+# PSU3 就是反例 —— 厂商/型号是占位符，但额定 2700W 是真的，它是真电源。
+check "PSU3：身份是占位符但额定功率真实 -> 仍算真电源" "1" \
+      "$(dmi_psu_list "$TMP/dmidecode-psu.txt" | awk -F'|' '$1=="PSU3"{print $3}')"
+check "PSU4：0W + 身份全占位符 -> 判为空槽位" "0" \
+      "$(dmi_psu_list "$TMP/dmidecode-psu.txt" | awk -F'|' '$1=="PSU4"{print $3}')"
+
+# 只有 0W、身份是真的（有些 BIOS 对真电源不填额定功率）-> 不许当幽灵
+cat > "$TMP/dmidecode-psu-0w.txt" <<'EOF'
+Handle 0x0061, DMI type 39, 22 bytes
+System Power Supply
+	Location: PSU1
+	Name: CRPS2700D2
+	Manufacturer: Great Wall
+	Serial Number: 33000285DHB06810
+	Max Power Capacity: 0 W
+	Status: Present, OK
+EOF
+check "额定 0W 但身份真实（BIOS 没填功率）-> 仍算真电源，不许漏掉" "1" \
+      "$(dmi_psu_list "$TMP/dmidecode-psu-0w.txt" | awk -F'|' '{print $3}')"
 
 check "没有 type 39 输出时不产出任何行、不报错" \
       "" "$(dmi_psu_list "$TMP/does-not-exist.txt")"
@@ -257,6 +293,58 @@ SENS_UNRELATED='CPU0_Temp | 45.000 | degrees C | ok | 3.100'
 
 psu_case "$DMI_OK_OK" "$SENS_BOTH_HOT"
 check "两路都有电、状态都正常 -> PASS" "PASS" "$LAST_STATUS"
+
+# ⚠️ `Not Present` 里含有 `Present` 子串。原来判在位写的是 *"Present"*，
+# 于是槽位明写 "Not Present" 也被算成在位 —— 海光那台两个槽位 DMI 全是
+# `Status: Not Present` / `Plugged: No`，报告却打出「共 2 个电源模块在位，
+# 交流输入与模块状态均正常」PASS。判错方向是最糟的那个：真缺一路电源
+# 会被说成正常。（一号红线在电源这条路上的同款。）
+DMI_NOT_PRESENT='Handle 0x1, DMI type 39, 22 bytes
+System Power Supply
+	Location: PSU1
+	Name: CRPS2700D2
+	Serial Number: SN0001
+	Max Power Capacity: 2700 W
+	Status: Present, OK
+
+Handle 0x2, DMI type 39, 22 bytes
+System Power Supply
+	Location: PSU2
+	Name: CRPS2700D2
+	Serial Number: SN0002
+	Max Power Capacity: 2700 W
+	Status: Not Present'
+psu_case "$DMI_NOT_PRESENT" "$SENS_BOTH_HOT"
+check "标记 Not Present 的槽位不许算进「在位」数" "1" \
+      "$(printf '%s' "$LAST_DETAIL" | grep -c '共 1 个电源模块在位')"
+check "而且不许因此判故障（少插一路不是模块坏了）" "PASS" "$LAST_STATUS"
+
+# 海光那台的真实形状：两个槽位全是占位符 + Not Present。
+# 「上报了但全是空槽位」和「压根没上报」都判 SKIP，但要分开说。
+DMI_ALL_GHOST='Handle 0x1, DMI type 39, 22 bytes
+System Power Supply
+	Location: To Be Filled By O.E.M.
+	Name: To Be Filled By O.E.M.
+	Manufacturer: To Be Filled By O.E.M.
+	Serial Number: To Be Filled By O.E.M.
+	Max Power Capacity: Unknown
+	Status: Not Present
+
+Handle 0x2, DMI type 39, 22 bytes
+System Power Supply
+	Location: To Be Filled By O.E.M.
+	Name: To Be Filled By O.E.M.
+	Manufacturer: To Be Filled By O.E.M.
+	Serial Number: To Be Filled By O.E.M.
+	Max Power Capacity: Unknown
+	Status: Not Present'
+psu_case "$DMI_ALL_GHOST" "$SENS_BOTH_HOT"
+check "槽位全是占位符 + 未在位 -> SKIP，绝不许说成「N 个在位、一切正常」" \
+      "SKIP" "$LAST_STATUS"
+check "SKIP 文案要说明不影响整机结论" "1" \
+      "$(printf '%s' "$LAST_DETAIL" | grep -c '不影响整机结论')"
+check "更不许出现「交流输入与模块状态均正常」这种凭空的结论" "0" \
+      "$(printf '%s' "$LAST_DETAIL" | grep -c '均正常')"
 
 psu_case "$DMI_OK_OK" "$SENS_PSU2_DEAD"
 check "PSU2 没接交流输入但模块没报异常 -> WARN（无冗余，不是故障）" "WARN" "$LAST_STATUS"

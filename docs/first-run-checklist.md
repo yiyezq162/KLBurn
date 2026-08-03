@@ -38,7 +38,7 @@
 | 6 | **CPU 温度来源** | QEMU 无 coretemp | `sys_metrics.csv` 的 `cpu_temp_c` 非空；空了不算故障，但要知道这台机器的驱动是哪个 |
 | 7 | **PCIe 链路降级** | 虚拟设备无 LnkCap/LnkSta | 有降级的机器上要**只报端点、不报桥**（§11-5） |
 | 8 | **网卡协商速率** | 虚拟网卡无 ethtool 速率 | 万兆口跑满时 PASS；**故意插千兆线**应判 WARN |
-| 9 | **非 Broadcom 阵列卡的管理工具** | `perccli64`/`arcconf`/`ssacli`/`sas3ircu` 这几个闭源二进制我们手上没有，测试里全是桩 | 放好对应工具后，`raw/raid/` 下要有**真的输出**（型号、固件版本、逻辑盘状态），不是一行报错。没放工具时那一项必须是 SKIP，**绝不能是 FAIL** |
+| 9 | **非 Broadcom 阵列卡的管理工具** | `perccli64`/`ssacli`/`sas3ircu` 1.7.8 起已备进 `vendor/`，但**手上没有对应的卡**，测试里仍是桩（Broadcom 那条已在真卡上验过：型号/固件版本/逻辑盘都读到了） | 拿到 Dell / HPE / IT 模式的卡时，`raw/raid/` 下要有**真的输出**，不是一行报错。没对上的工具那一项必须是 SKIP，**绝不能是 FAIL** |
 | 10 | **需要固件才能起来的网卡** | QEMU 里只有 virtio | 插 `bnx2x`（Broadcom 10G）或 `ice`（Intel E810）的机器上，`ip link` 要看得到物理口，`dmesg` 里不许有 `Direct firmware load ... failed`。1.5.0 之前这些卡在盘里根本起不来 |
 
 ### 1.7.0 新增的，一样只能上真机验

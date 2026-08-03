@@ -63,6 +63,8 @@ MUTATIONS=(
 "disk-hide-fail${S}硬盘那两项连 FAIL 也一起藏（新增坏道的盘从客户报告里消失，坏盘直接出厂）${S}test-report-render${S}$RT/report/generate_report.py${S}mut_disk_hide_fail"
 "raid-hint-subshell${S}退回 1.7.6：raid_bmc_hint 用命令替换调（子 shell，标志位传不出来，整条线是死代码）${S}test-hw-checks${S}$RT/lib/collect.sh${S}mut_raid_hint_subshell"
 "deep-to-customer${S}「扩展信息留档」重新进客户报告（判的是我们的存档，不是机器）${S}test-report-render${S}$RT/report/generate_report.py${S}mut_deep_to_customer"
+"psu-not-present${S}退回裸 *Present* 匹配（Not Present 含 Present 子串，缺一路电源的机器被判正常）${S}test-hw-checks${S}$RT/lib/collect.sh${S}mut_psu_not_present"
+"psu-ghost-count${S}空电源槽位（0W + 身份全占位符）重新计入在位数（报告写 4 个，实际 3 个）${S}test-hw-checks${S}$RT/lib/collect.sh${S}mut_psu_ghost_count"
 "disk-none-fail${S}没装硬盘时判 FAIL 而不是 WARN（§2-2：能力缺失 ≠ 硬件故障，会把无盘机器拦在出货前）${S}test-hw-checks${S}$RT/lib/collect.sh${S}mut_disk_none_fail"
 "counter-postfix${S}断言计数改回 (( PASS++ ))（X=0 时返回 1，让 cond && ok || bad 两边都跑）${S}lint${S}tests/lint.sh${S}mut_counter_postfix"
 "media-blind${S}scan_disks 不再反查启动 U 盘（Ventoy 下前两层同时落空，fio 会把测试盘写穿）${S}test-hw-checks${S}$RT/lib/storage.sh${S}mut_media_blind"
@@ -260,6 +262,25 @@ mut_deep_to_customer() {
   replace_line "$RT/report/generate_report.py" \
     'INTERNAL_ONLY_ROWS = ("collect_deep",)' \
     '    INTERNAL_ONLY_ROWS = ()'
+}
+
+# 一号红线（拿关键字当判定）在电源这条路上的同款：`Not Present` 里含有
+# `Present` 子串，裸的 *"Present"* 会把明写"未在位"的槽位算成在位。
+# 海光那台就是这么打出「共 2 个电源模块在位，交流输入与模块状态均正常」的 ——
+# 而它 DMI 里两个槽位全是 Not Present / Plugged: No。
+# 判错方向是最糟的那个：真缺一路电源的机器被说成正常。
+mut_psu_not_present() {
+  replace_line "$RT/lib/collect.sh" \
+    '[[ "$st" == *"Present"* && "$st" != *"Not Present"* ]] || continue' \
+    '    [[ "$st" == *"Present"* ]] || continue'
+}
+
+# 空的电源位 BIOS 照样报 Present, OK（6530 那台的 PSU4：0W + 身份全是占位符）。
+# 计进去的话报告写「共 4 个电源模块在位」，客户一数电源就发现对不上。
+mut_psu_ghost_count() {
+  replace_line "$RT/lib/collect.sh" \
+    '      real = (capseen && cap + 0 == 0 && idseen && !idreal) ? 0 : 1' \
+    '      real = 1'
 }
 
 # 「本机未安装硬盘」和「硬盘坏了」是两回事。判成 FAIL 的话，出厂只测

@@ -422,7 +422,10 @@ raid_bmc_note() {
 # 顺序就是试的顺序，命中即用。storcli64 不在这张表里，它在 collect_raid 里
 # **单独先试**：报告生成器是按 storcli-show.txt 这个固定文件名去读并嵌进报告的，
 # 那条路径不能动。
-RAID_TOOL_ORDER=(perccli64 arcconf ssacli sas3ircu)
+# arcconf（Microchip / Adaptec）不在这张表里：它按控制器系列分版本，
+# 手上没有对应的卡就无从判断该备哪一个。真遇到 Adaptec 卡时，这里和
+# build/chroot-setup.sh 的 VENDOR_RAID_TOOLS 各加一行、再补一个 case 分支即可。
+RAID_TOOL_ORDER=(perccli64 ssacli sas3ircu)
 
 # raid_tool_run <工具名> -> 0 = 这张卡它认得（原始输出已落 raw/raid/）
 #
@@ -443,6 +446,8 @@ raid_tool_run() {
       ;;
     arcconf)
       # Microchip / Adaptec（smartpqi、aacraid）
+      # ⚠️ 这个分支当前**走不到** —— arcconf 不在 RAID_TOOL_ORDER 里（见上面的说明）。
+      # 故意留着：真拿到 Adaptec 卡时，把它加回那张表就能直接用。
       capture -t 90 "raid/${t}-list.txt"   "$bin" LIST
       capture -t 90 "raid/${t}-config.txt" "$bin" GETCONFIG 1
       grep -qiE 'Controller [0-9]|Controllers found' "$RAW_DIR/raid/${t}-list.txt" 2>/dev/null
@@ -615,18 +620,49 @@ collect_ipmi() {
 # DMI type 39 -> 每行 "位置|状态"
 #
 # 用 awk 段落模式（RS=""）按 dmidecode 的空行分块，比在 bash 里逐行攒状态可靠。
+#
+# 第三个字段是"这一位到底有没有真的插着电源"。**空的电源位，BIOS 照样报
+# `Present, OK`** —— 6530 那台的 PSU4 就是：厂商/型号/序列号全是
+# `To Be Filled By O.E.M.`，额定功率 0 W，可状态写着在位。照单全收的话报告上
+# 会写「共 4 个电源模块在位」，实际只有 3 个，客户一数电源就发现对不上。
+#
+# 判据要三个条件**同时**成立才算幽灵：
+#   1. Max Power Capacity 那行**显式存在**，而且值是 0
+#   2. 厂商/型号/序列号里**至少有一个字段存在**
+#   3. 存在的那些身份字段**全是占位符**
+#
+# 三条缺一不可，每一条都对着一种会误杀真电源的写法：
+#   只看功率     -> 有些 BIOS 对真电源也不填额定功率
+#   只看身份     -> 6530 的 PSU3 厂商是占位符，但序列号和 2700W 都是真的
+#   **字段缺失当占位符** -> 最小 DMI（只有 Location + Status）的真电源会被整条吃掉。
+#     这条是写完第一版被测试当场抓住的：字段"没写"和字段"写了个占位符"
+#     是两件事，前者只是 BIOS 懒，后者才是空槽位。
 dmi_psu_list() {
   local f="${1:-$RAW_DIR/dmidecode-psu.txt}"
   [[ -f "$f" ]] || return 0
   awk 'BEGIN{RS="";FS="\n"}
+    function junk(s) {
+      s = tolower(s); gsub(/^[ \t]+|[ \t]+$/, "", s)
+      return (s == "" || s == "to be filled by o.e.m." || s == "not specified" \
+              || s == "default string" || s == "unknown" || s == "n/a" \
+              || s == "none" || s == "not present" || s == "o.e.m.")
+    }
     /System Power Supply/ {
-      loc=""; st="";
+      loc=""; st=""; cap=""; capseen=0; idseen=0; idreal=0
       for (i = 1; i <= NF; i++) {
         line = $i
         if (line ~ /^\tLocation:/)    { sub(/^\tLocation:[ \t]*/,    "", line); loc = line }
         else if (line ~ /^\tStatus:/) { sub(/^\tStatus:[ \t]*/,      "", line); st  = line }
+        else if (line ~ /^\tMax Power Capacity:/) {
+          sub(/^\tMax Power Capacity:[ \t]*/, "", line); cap = line; capseen = 1
+        }
+        else if (line ~ /^\t(Manufacturer|Name|Serial Number|Model Part Number):/) {
+          sub(/^\t[^:]*:[ \t]*/, "", line); idseen = 1
+          if (!junk(line)) idreal = 1
+        }
       }
-      if (loc != "" || st != "") printf "%s|%s\n", loc, st
+      real = (capseen && cap + 0 == 0 && idseen && !idreal) ? 0 : 1
+      if (loc != "" || st != "") printf "%s|%s|%s\n", loc, st, real
     }' "$f"
 }
 
@@ -671,6 +707,24 @@ check_psu() {
     return
   fi
 
+  # 上报了、但每一条都是空槽位（占位符 + 未在位）。和"压根没上报"是两回事，
+  # 得分开说：前者是 BIOS 把表填满了占位符，后者是根本没这张表。
+  # 两种都判 SKIP —— 我们确实没有可用的电源数据，说不出这台机器电源好不好。
+  local usable=0
+  for line in "${psus[@]}"; do
+    local _st="${line#*|}"; _st="${_st%%|*}"
+    local _real="${line##*|}"
+    [[ "$_real" == "1" ]] || continue
+    [[ "$_st" == *"Present"* && "$_st" != *"Not Present"* ]] || continue
+    usable=$((usable+1))
+  done
+  if (( usable == 0 )); then
+    result_add "check_psu" "电源" "$ST_SKIP" \
+      "BIOS 上报的电源槽位均标记为未在位、且没有型号或序列号，据此无法判定电源状态\
+（部分机型的 BIOS 不填这张表）。此项不影响整机结论。" "raw/dmidecode-psu.txt"
+    return
+  fi
+
   # BMC 历史事件里的电源相关记录，单独摘一份出来存证
   local sel_psu=0
   if [[ -f "$RAW_DIR/ipmi-sel-pre.txt" ]]; then
@@ -683,15 +737,26 @@ check_psu() {
   local noac=() broken=() suspect=()
   for line in "${psus[@]}"; do
     idx=$((idx+1))
-    total=$((total+1))
-    local loc="${line%%|*}" st="${line#*|}"
+    local loc="${line%%|*}" rest="${line#*|}"
+    local st="${rest%%|*}" real="${rest##*|}"
     [[ -n "$loc" ]] || loc="PSU${idx}"
+
+    # 幽灵槽位（0 W + 身份全是占位符）整条不算 —— 不进总数，也不进"在位"数
+    [[ "$real" == "1" ]] || { dbg "psu $loc 判为空槽位（额定 0W 且无身份信息），不计入"; continue; }
+    total=$((total+1))
 
     # 位置名里带编号就用它（PSU2 -> 2），否则按出现顺序当编号
     local n; n="$(printf '%s' "$loc" | grep -oE '[0-9]+' | head -1)"
     [[ -n "$n" ]] || n="$idx"
 
-    [[ "$st" == *"Present"* ]] || continue      # 槽位空着，不算
+    # ⚠️ **`Not Present` 里含有 `Present` 子串。** 原来写的是
+    #       [[ "$st" == *"Present"* ]] || continue
+    #    于是槽位明写 "Not Present" 也被算成在位 —— 海光那台两个槽位 DMI 全是
+    #    `Status: Not Present` / `Plugged: No`，报告却打出「共 2 个电源模块在位，
+    #    交流输入与模块状态均正常」PASS。判错的方向还是最糟的那个：
+    #    真缺一路电源的机器会被说成正常。这就是一号红线（拿关键字当判定）
+    #    在电源这条路上的同款。
+    [[ "$st" == *"Present"* && "$st" != *"Not Present"* ]] || continue
     present=$((present+1))
 
     local ac; ac="$(psu_ac_state "$n")"
