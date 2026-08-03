@@ -190,8 +190,24 @@ dmesg_scan_hw_errors() {
   #
   # 这条是 QEMU 端到端测试（tests/e2e-qemu.sh）跑出来的 —— 单元测试永远
   # 造不出这个场景，因为没人会想到往样本里塞一行软驱日志。
+  #
+  # AER: enabled with IRQ = 内核**打开** AER 上报功能时打的初始化日志，
+  #   "pcieport 0000:00:01.4: AER: enabled with IRQ 25"
+  # 每个 root port 一行。上面的模式里有裸的 "AER:"，于是它全部命中，
+  # 整机判 FAIL，理由写着「机器在上电初始化时就有硬件异常」——
+  # 而这几行的含义恰恰相反：**AER 功能正常启用了**，一个错误都还没发生。
+  #
+  # 为什么以前没炸：命中与否取决于固件把 AER 交不交给操作系统。Intel 那批板子的
+  # BIOS 不交（dmesg 里是 "_OSC: platform does not support [... AER ...]"，
+  # 没冒号，不命中），所以一直没露出来；海光 C86（OPN3350）这台交了，
+  # 4 个 root port 就是 4 条误报，一台完好的机器被拦在出货前。
+  # 凡是固件把 AER 交给 OS 的平台都会中招，和 CPU 厂商无关。
+  #
+  # 豁免必须窄，只放"启用"这一句。真正的 AER 报错（Corrected error received /
+  # Uncorrected / can't recover / device recovery failed …）一条都不受影响，
+  # 下面有成对断言钉着。
   grep -EI "$(dmesg_hw_error_pattern)" "$in" 2>/dev/null \
-    | grep -viE 'thermal throttl.*not|nouveau|dev fd[0-9]' \
+    | grep -viE 'thermal throttl.*not|nouveau|dev fd[0-9]|AER: enabled with IRQ' \
     > "$out" || true
   return 0
 }

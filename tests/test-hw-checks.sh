@@ -785,13 +785,17 @@ cat > "$DMESG_NOISE" <<'EOF'
 [Wed Nov 26 02:16:24 2025] EDAC i10nm: No hbm memory
 [Sat Aug  1 16:13:10 2026] I/O error, dev fd0, sector 0 op 0x0:(READ) flags 0x0 phys_seg 1 prio class 2
 [Sat Aug  1 16:13:10 2026] blk_update_request: I/O error, dev fd0, sector 0 op 0x0:(READ) flags 0x0 phys_seg 1 prio class 2
+[Mon Aug  3 10:35:25 2026] pcieport 0000:00:01.4: AER: enabled with IRQ 25
+[Mon Aug  3 10:35:25 2026] pcieport 0000:00:01.6: AER: enabled with IRQ 26
+[Mon Aug  3 10:35:25 2026] pcieport 0000:00:07.1: AER: enabled with IRQ 27
+[Mon Aug  3 10:35:25 2026] pcieport 0000:00:08.1: AER: enabled with IRQ 29
 EOF
 
 dmesg_scan_hw_errors "$DMESG_BAD" "$TMP/hits-bad.txt"
 check "阵列卡完整故障链 9 行必须全部命中" "9" "$(count_lines "$TMP/hits-bad.txt")"
 
 dmesg_scan_hw_errors "$DMESG_NOISE" "$TMP/hits-noise.txt"
-check "开机正常噪声一条都不许命中（含 NMI / AER无冒号 / EDAC 初始化 / Correctable Errors）" \
+check "开机正常噪声一条都不许命中（含 NMI / AER无冒号 / AER启用 / EDAC 初始化 / Correctable Errors）" \
       "0" "$(count_lines "$TMP/hits-noise.txt")"
 
 # 逐条钉死几个最容易被改坏的，免得以后有人把裸 NMI 或裸 CE 加回来
@@ -799,6 +803,7 @@ for bad_line in \
   'ACPI: X2APIC_NMI (uid[0xffffffff] high edge lint[0x1])' \
   'NMI watchdog: Enabled. Permanently consumes one hw-PMU counter.' \
   'acpi PNP0A08:00: _OSC: platform does not support [SHPCHotplug AER LTR DPC]' \
+  'pcieport 0000:00:01.4: AER: enabled with IRQ 25' \
   'EDAC MC0: Giving out device to module i10nm_edac controller Intel_10nm Socket#0 IMC#0: DEV 0000:7e:0c.0 (INTERRUPT)' \
   'RAS: Correctable Errors collector initialized.' \
   'megaraid_sas 0000:98:00.0: FW now in Ready state'
@@ -832,6 +837,37 @@ for real_dev in sda nvme0n1 vdb sdak; do
   check "真盘 $real_dev 的 I/O error 必须照常命中（豁免不许扩大化）" \
         "1" "$(count_lines "$TMP/real-hit.txt")"
 done
+
+# ---- AER 启用日志：豁免它，但真正的 AER 报错一条都不许跟着漏掉 ----
+#
+# 1.7.4 那台海光 C86（OPN3350）判 FAIL 的全部理由，就是下面这一行 ×4：
+#   pcieport 0000:00:01.4: AER: enabled with IRQ 25
+# 那是内核**打开** AER 上报的初始化日志，含义和"出错了"正好相反。
+# 固件把 AER 交给操作系统的平台都会打，和 CPU 厂商无关 ——
+# Intel 那批板子的 BIOS 不交（打的是没冒号的 "_OSC: ... [... AER ...]"），
+# 所以这个误报一直藏到海光这台才露出来。
+#
+# 和软驱那组一样成对钉死：启用日志放过，真报错一条都不许放过。
+printf '%s\n' \
+  '[Mon Aug  3 10:35:25 2026] pcieport 0000:00:01.4: AER: enabled with IRQ 25' \
+  > "$TMP/aer-init.txt"
+dmesg_scan_hw_errors "$TMP/aer-init.txt" "$TMP/aer-init-hit.txt"
+check "AER 启用日志不算故障（固件把 AER 交给 OS 的平台每个 root port 都有一行）" \
+      "0" "$(count_lines "$TMP/aer-init-hit.txt")"
+
+while IFS= read -r aer_line; do
+  printf '[Mon Aug  3 10:35:25 2026] %s\n' "$aer_line" > "$TMP/aer-real.txt"
+  dmesg_scan_hw_errors "$TMP/aer-real.txt" "$TMP/aer-real-hit.txt"
+  check "真的 AER 报错必须照常命中: ${aer_line:0:56}" \
+        "1" "$(count_lines "$TMP/aer-real-hit.txt")"
+done <<'EOF'
+pcieport 0000:00:01.4: AER: Corrected error received: 0000:03:00.0
+pcieport 0000:00:01.4: AER: Multiple Corrected error received: 0000:03:00.0
+pcieport 0000:00:01.4: AER: Uncorrected (Non-Fatal) error received: 0000:03:00.0
+megaraid_sas 0000:98:00.0: AER: can't recover (no error_detected callback)
+pcieport 0000:97:01.0: AER: device recovery failed
+nvme 0000:03:00.0: AER: PCIe Bus Error: severity=Corrected, type=Data Link Layer, (Receiver ID)
+EOF
 
 # 真正的 EDAC 报错格式必须还能抓住（收紧模式别把真错误也关在门外）
 printf '[Wed Nov 26 02:16:23 2025] EDAC MC0: 1 CE memory read error on CPU_SrcID#0_MC#0_Chan#0_DIMM#0\n' > "$TMP/one.txt"

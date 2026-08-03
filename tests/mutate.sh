@@ -57,6 +57,7 @@ MUTATIONS=(
 "lint-exempt${S}给 lint 偷偷多加一类豁免（豁免清单本身也要有人守）${S}lint${S}tests/lint.sh${S}mut_lint_exempt"
 "net-servers${S}NET_TIME_SERVERS 改回裸赋值（现场在 klburn.conf 里换内网 NTP 会被静默顶掉）${S}test-hw-checks${S}$RT/lib/network.sh${S}mut_net_servers"
 "fd0-overreach${S}把软驱豁免扩大成所有设备（真盘的 I/O error 会被一起吃掉，坏盘查不出来）${S}test-hw-checks${S}$RT/lib/verify.sh${S}mut_fd0_overreach"
+"aer-init-noexempt${S}退回 1.7.3：不豁免 AER 启用日志（§2-2：固件把 AER 交给 OS 的平台，每台好机器都判 FAIL）${S}test-hw-checks${S}$RT/lib/verify.sh${S}mut_aer_init_noexempt"
 "disk-none-fail${S}没装硬盘时判 FAIL 而不是 WARN（§2-2：能力缺失 ≠ 硬件故障，会把无盘机器拦在出货前）${S}test-hw-checks${S}$RT/lib/collect.sh${S}mut_disk_none_fail"
 "counter-postfix${S}断言计数改回 (( PASS++ ))（X=0 时返回 1，让 cond && ok || bad 两边都跑）${S}lint${S}tests/lint.sh${S}mut_counter_postfix"
 "media-blind${S}scan_disks 不再反查启动 U 盘（Ventoy 下前两层同时落空，fio 会把测试盘写穿）${S}test-hw-checks${S}$RT/lib/storage.sh${S}mut_media_blind"
@@ -196,8 +197,18 @@ mut_lint_exempt() {
 # 而且永远不会有人发现。
 mut_fd0_overreach() {
   replace_line "$RT/lib/verify.sh" \
-    "| grep -viE 'thermal throttl.*not|nouveau|dev fd[0-9]' \\" \
-    "    | grep -viE 'thermal throttl.*not|nouveau|dev [a-z]' \\"
+    "|dev fd[0-9]|AER: enabled with IRQ' \\" \
+    "    | grep -viE 'thermal throttl.*not|nouveau|dev [a-z]|AER: enabled with IRQ' \\"
+}
+
+# 反过来那一半：**漏豁免**。1.7.3 就是这么把一台完好的海光 C86 判成
+# 「上电初始化时就有硬件异常」的 —— 命中的四行全是内核在说"AER 已启用"。
+# 谁踩不踩取决于固件交不交 AER，和 CPU 厂商无关，所以这条只能靠断言守，
+# 不能指望"下次现场再发现一次"（§2-2：把好机器拦在出货前，比漏判更糟）。
+mut_aer_init_noexempt() {
+  replace_line "$RT/lib/verify.sh" \
+    "|dev fd[0-9]|AER: enabled with IRQ' \\" \
+    "    | grep -viE 'thermal throttl.*not|nouveau|dev fd[0-9]' \\"
 }
 
 # 「本机未安装硬盘」和「硬盘坏了」是两回事。判成 FAIL 的话，出厂只测

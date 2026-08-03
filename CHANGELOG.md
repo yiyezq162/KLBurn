@@ -51,6 +51,54 @@ git tag -l --sort=version:refname
 
 ---
 
+## 1.7.4
+
+### 「AER 已启用」被当成了硬件错误 —— 一台完好的海光被拦在出货前
+
+现场那台海光 C86（OPN3350，32GB）**开机内核日志复查判 FAIL**，报告上写着
+「机器在上电初始化时就有硬件异常」。命中的四条，一条不多一条不少，全长这样：
+
+```
+pcieport 0000:00:01.4: AER: enabled with IRQ 25
+```
+
+这是内核**打开** AER 上报功能时打的初始化日志，每个 root port 一行。
+它的含义和「出错了」正好相反：AER 起来了，一个错误都还没发生。
+`dmesg_hw_error_pattern` 里有一条裸的 `AER:`，把它们全收了。
+
+那条裸 `AER:` 是 0.4.0 就在的（当时靠它抓 `AER: can't recover`）。
+0.5.0 之后真正的阵列卡故障链已经由 `DPC: containment event` / `ERR_NONFATAL` /
+`killing adapter` 那一组独立命中，裸 `AER:` 剩下的作用就只有误伤了。
+
+**为什么拖到现在才炸**：命中与否只取决于固件把 AER 交不交给操作系统。
+Intel 那批板子的 BIOS 不交，dmesg 里是 `_OSC: platform does not support
+[SHPCHotplug AER LTR DPC]` —— 没冒号，不命中，所以同一天跑的 6530 是干净的。
+海光这台交了，四个 root port 就是四条误报。**和 CPU 厂商无关**，
+凡是固件交 AER 的平台都会中招。
+
+修法和软驱那条（1.6.0）一个路子：豁免只放「启用」这一句，
+真正的 AER 报错一条都不动。成对断言钉着：
+
+| 这些不许命中 | 这些必须照常命中 |
+|---|---|
+| `AER: enabled with IRQ 25` | `AER: Corrected error received: …` |
+| | `AER: Multiple Corrected error received: …` |
+| | `AER: Uncorrected (Non-Fatal) error received: …` |
+| | `AER: can't recover (no error_detected callback)` |
+| | `AER: device recovery failed` |
+| | `AER: PCIe Bus Error: severity=Corrected, …` |
+
+变异测试加了 `aer-init-noexempt`（把 1.7.3 的漏豁免塞回去，断言必须跑红）；
+`fd0-overreach` 的锚点跟着这一行一起更新了。
+
+> 这台机器**别的都是干净的**：CPU/内存压测无错、ECC 前后 0、SMART 无新增、
+> BMC 事件无新增、压测期间 PCIe 错误计数无新增。唯一剩下的是一条
+> **PCIe 链路 WARN** —— 两个板载 WX1860A2 千兆口协商到 x2（额定 x4，
+> `lspci` 自己标了 `downgraded`）。那是真实读数，WARN 不拉低整机结论，
+> 保持原样：千兆口跑在 Gen2 x2 上带宽远远够，但读数就是读数，不美化。
+
+---
+
 ## 1.7.3
 
 ### 大字标题回来了，而且每一块整屏页面上都有

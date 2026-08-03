@@ -762,14 +762,26 @@ check_fans() {
    要取 `errors:` 到 `temps:` 之间的**全部**数字求和，只匹配第一个会漏掉后面几张卡。
 3. **退出码 137（OOM）必须排在"异常退出"判定之前**，并且判 WARN 不判 FAIL。
 4. **dmesg 关键字不能用裸 `NMI`**（会命中每台机器开机都有的三行正常日志），
-   也不能用 `EDAC.*(CE|UE)`（"CE" 在 SOURCE/DEVICE/INTERFACE 里都有）。
+   也不能用 `EDAC.*(CE|UE)`（"CE" 在 SOURCE/DEVICE/INTERFACE 里都有），
+   **也不能用裸 `AER:`** —— 内核启用 AER 时每个 root port 都会打一行
+   `AER: enabled with IRQ 25`，那是"功能起来了"，不是"出错了"。
    加新关键字必须同时在真故障日志和健康机日志上各跑一遍。
+
+   > 裸 `AER:` 是 1.7.3 才炸的，但它从 0.4.0 就在。**命中与否只取决于固件把
+   > AER 交不交给操作系统**：不交的平台打的是没冒号的
+   > `_OSC: platform does not support [... AER ...]`，一直躲过去了。
+   > 教训是「在我们手上的机器上没误报」证明不了模式是干净的 ——
+   > 换个固件行为就是每台好机器四条误报。
 
    **豁免噪声时反过来也要卡死。** 漏豁免会误伤好机器，至少看得见；
    **豁免扩大化会把真故障一起吃掉，而且永远不会有人发现**。
-   `dev fd[0-9]`（软驱，BMC 虚拟媒体挂的那种真机上也有）是唯一按设备名豁免的，
-   写成 `dev [a-z]` 就会把 `sda`/`nvme0n1` 的 I/O error 一起放过。
-   每加一条设备名豁免，都要同时补一组"真盘必须照常命中"的成对断言。
+   现在只有两条豁免是"按名字放过"的，两条都配着成对断言：
+   `dev fd[0-9]`（软驱，BMC 虚拟媒体挂的那种真机上也有）写成 `dev [a-z]`
+   就会把 `sda`/`nvme0n1` 的 I/O error 一起放过；
+   `AER: enabled with IRQ` 缩成 `AER:` 就会把 `can't recover`、
+   `device recovery failed`、`Uncorrected (Non-Fatal) error received`
+   一起吃掉。**每加一条豁免，都要同时补一组"真的必须照常命中"的成对断言**，
+   并且在 `mutate.sh` 里两个方向各钉一条（`fd0-overreach` / `aer-init-noexempt`）。
 5. **PCIe 链路只查端点，绝对不能查 PCI bridge。** 桥的 LnkCap 是槽位能力、
    LnkSta 是与对端协商的结果，对端是张老卡就必然降速，这是设计如此。
    用**白名单**挑设备类而不是"排除桥"：白名单漏一类顶多少查一个设备，
