@@ -91,6 +91,19 @@ MUTATIONS=(
 "pdf-expand-logs${S}打印样式不再折叠原始日志（一份报告转出来 179 页，171 页是日志）${S}test-report-render${S}$RT/report/generate_report.py${S}mut_pdf_expand_logs"
 "pdf-pre-overflow${S}打印样式不再让长行换行（长行冲出页面，右边整片被切掉）${S}test-report-render${S}$RT/report/generate_report.py${S}mut_pdf_pre_overflow"
 "pdf-flex-row${S}判定行在 PDF 里退回 flex（徽章/名称/详情叠印成一团）${S}test-report-render${S}$RT/report/generate_report.py${S}mut_pdf_flex_row"
+"rapl-double${S}退回 1.8.2：同一个 RAPL package 域两条路径各算一遍（客户报告里的 CPU 功耗整整翻一倍）${S}test-hw-checks${S}$RT/lib/core.sh${S}mut_rapl_double"
+"psu-ac-overclaim${S}读不到任何交流输入传感器时照样写「交流输入…正常」（表里整列是破折号，文案却说核对过了）${S}test-hw-checks${S}$RT/lib/collect.sh${S}mut_psu_ac_overclaim"
+"psu-cap-raw${S}额定功率原样照抄 DMI（0xFFFF 印成「65535 W」，客户每台都要问一遍）${S}test-report-render${S}$RT/report/generate_report.py${S}mut_psu_cap_raw"
+"badindex-content${S}dmidecode 的 <BAD INDEX> 当成厂商/型号内容（四格乱码印进客户报告）${S}test-report-render${S}$RT/report/generate_report.py${S}mut_badindex_content"
+"serial-na${S}整机序列号不认 N/A 这类占位符（报告抬头和报告目录都叫「NA」，而主板序列号是真的）${S}test-hw-checks${S}$RT/lib/core.sh${S}mut_serial_na"
+"gpu-serial-zero${S}消费级显卡的 Serial Number: 0 当成序列号印出去（客户会拿这个 0 去对货）${S}test-report-render${S}$RT/report/generate_report.py${S}mut_gpu_serial_zero"
+"sample-state-persubshell${S}两次采样求差的「上一次读数」传不过子 shell（功耗/占用率/速率全变成「从压测开始到现在的平均值」）${S}test-hw-checks${S}$RT/lib/core.sh${S}mut_sample_state_per_subshell"
+"psu-sdr-outofrange${S}把离散量的 out-of-range 当成没进电（offset 5 明写 but present，会把好电源报成掉电）${S}test-hw-checks${S}$RT/lib/collect.sh${S}mut_psu_sdr_outofrange"
+"psu-sdr-as-fail${S}离散量说有电就够格判 FAIL（FAIL 的证据标准被放低一档，§2-2 反向误杀）${S}test-hw-checks${S}$RT/lib/collect.sh${S}mut_psu_sdr_as_fail"
+"raid-dup-fail-blind${S}坏阵列卡的两条 FAIL 不再互相指认（客户把同一件事读成两处独立故障）${S}test-hw-checks${S}$RT/lib/verify.sh${S}mut_raid_dup_fail_blind"
+"disk-temp-fake-burn${S}没跑硬盘压测也说「压测结束时温度」（客户以为我们烤过盘）${S}test-hw-checks${S}$RT/lib/verify.sh${S}mut_disk_temp_fake_burn"
+"nic-fw-path${S}网卡固件那一格原样印出 rtl_nic/xxx.fw（看着像漏了一条路径出去）${S}test-report-render${S}$RT/report/generate_report.py${S}mut_nic_fw_path"
+"metric-internal-leak${S}内部计数「失败压测项」重新进客户报告（判的是我们，不是机器）${S}test-report-render${S}$RT/report/generate_report.py${S}mut_metric_internal_leak"
 )
 
 # ================================================================
@@ -530,6 +543,112 @@ mut_pdf_flex_row() {
   replace_line "$RT/report/generate_report.py" \
     '  .result-row{display:block}' \
     '  .result-row{display:flex}'
+}
+
+# 同一个 RAPL package 域在 /sys/class/powercap 下有两条路径（zone 自己的
+# class 软链、和从 control type 目录进去），1.8.2 之前两条都加进了总和。
+# 后果是客户报告里那条 CPU 封装功耗曲线**整整翻一倍**：2x Xeon Gold 6530
+# （PL1 270W/颗）报出 1034 W，而 BMC 的 Sys_Total_Power 整机才 570~627 W。
+mut_rapl_double() {
+  delete_line "$RT/lib/core.sh" \
+    '    [[ "$seen" == *" $zone "* ]] && continue'
+}
+
+# 一路交流输入都没读到，文案却写「交流输入与模块状态均正常」——
+# 而同一份报告电源表的「交流输入」那一列整列是破折号。判定保持 PASS 是对的
+# （读不到传感器是我们的能力缺失），说得比测得多才是问题。
+mut_psu_ac_overclaim() {
+  replace_line "$RT/lib/collect.sh" \
+    '  elif (( ac_read == 0 )); then' \
+    '  elif false; then'
+}
+
+# DMI 的 Max Power Capacity 是个 16 位整数，不少 BIOS 填 0xFFFF 表示"没填"。
+# 照抄就是客户报告上的「额定功率 65535 W」。
+mut_psu_cap_raw() {
+  replace_line "$RT/report/generate_report.py" \
+    '                ("额定功率", self.psu_capacity(p.get("Max Power Capacity"))),' \
+    '                ("额定功率", clean(p.get("Max Power Capacity"))),'
+}
+
+# <BAD INDEX> 是 dmidecode 自己打的"这条读不出来"标记（BIOS 把字符串下标
+# 填到了字符串表外面），不是厂商填的内容。Supermicro X11DPG-QT 的两路电源
+# 四个身份字段全是它。
+mut_badindex_content() {
+  replace_line "$RT/report/generate_report.py" \
+    '    "<bad index>", "<out of spec>",' \
+    '    "__mutated_away__",'
+}
+
+# 海光 H210-G30 的 DMI 里整机序列号写的是 `N/A`，而主板序列号是真的、
+# 就在同一份 DMI 里。shell 这边不认这个占位符，报告抬头和报告目录就都叫「NA」。
+# IPMI Power Supply 传感器的 offset 5 叫 "Power Supply input out-of-range,
+# **but present**" —— 电进来了，只是不在标称范围内。拿 out-of-range 当
+# "没进电"的判据就读反了，好电源会被报成掉电。
+mut_psu_sdr_outofrange() {
+  replace_line "$RT/lib/collect.sh" \
+    '  if   [[ "$st" == *lost* ]];               then printf '"'"'absent'"'"'' \
+    '  if   [[ "$st" == *lost* || "$st" == *out-of-range* ]]; then printf '"'"'absent'"'"''
+}
+
+# 离散量只是 BMC 的一句陈述（"在位、没报输入丢失"），不是量出来的电压。
+# 拿它当 FAIL 的门槛 = 把证据标准放低一档，而这条判定的方向是
+# "宁可漏，不可误杀"（§2-2）。
+mut_psu_sdr_as_fail() {
+  replace_line "$RT/lib/collect.sh" \
+    '      if [[ "$vin" == "present" ]]; then' \
+    '      if [[ "$ac" == "present" ]]; then'
+}
+
+# 同一张坏卡在「阵列卡」和「开机内核日志复查」各判一次 FAIL，
+# 抬头写着"失败 2 项"，客户读成两处独立故障。
+mut_raid_dup_fail_blind() {
+  replace_line "$RT/lib/verify.sh" \
+    '    if (( ${RAID_FAULT_FOUND:-0} == 1 )) \' \
+    '    if false \'
+}
+
+# 现场 99% 跳过硬盘压测，这时候盘根本没被压过。
+mut_disk_temp_fake_burn() {
+  replace_line "$RT/lib/verify.sh" \
+    '  (( ${DISK_CONFIRMED:-0} == 1 )) || when="测试结束时"' \
+    '  :'
+}
+
+# r8169 的 ethtool 给的是固件**文件名**（带目录），整串印进「固件版本」
+# 那一格，看着像我们漏了一条路径出去。
+mut_nic_fw_path() {
+  replace_line "$RT/report/generate_report.py" \
+    '                ("固件版本", nic_firmware_display(grab(drv, "firmware-version"))),' \
+    '                ("固件版本", grab(drv, "firmware-version")),'
+}
+
+# 「失败压测项」是 stress-ng 内部子测试的失败计数，判的是我们不是机器。
+mut_metric_internal_leak() {
+  replace_line "$RT/report/generate_report.py" \
+    '    INTERNAL_ONLY_METRICS = {("cpu", "失败压测项")}' \
+    '    INTERNAL_ONLY_METRICS = set()'
+}
+
+# 把采样状态文件做成"每个进程一份"，等价于退回 1.8.2 用 shell 全局存 ——
+# 调用点全是命令替换/进程替换，状态出了子 shell 就没了。
+mut_sample_state_per_subshell() {
+  replace_line "$RT/lib/core.sh" \
+    "    printf '%s/%s' \"\$d\" \"\$1\"" \
+    "    printf '%s/%s.%s' \"\$d\" \"\$1\" \"\$BASHPID\""
+}
+
+# 只有数据中心卡才烧了真序列号；GeForce 上 nvidia-smi 给的是字面的 `0`。
+mut_gpu_serial_zero() {
+  replace_line "$RT/report/generate_report.py" \
+    '                if sn is not None and not sn.strip("0 "):' \
+    '                if False:'
+}
+
+mut_serial_na() {
+  replace_line "$RT/lib/core.sh" \
+    '      |"unknown"|"n/a"|"na"|"o.e.m."|"empty"|"not present"|"0123456789" \' \
+    '      |"unknown"|"o.e.m."|"empty"|"not present"|"0123456789" \'
 }
 
 # ================================================================

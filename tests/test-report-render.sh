@@ -89,6 +89,7 @@ EOF
 cat > "$RD/metrics.jsonl" <<'EOF'
 {"group":"mem","key":"装机容量MB","value":"65536"}
 {"group":"mem","key":"系统识别MB","value":"31763"}
+{"group":"cpu","key":"失败压测项","value":"0"}
 EOF
 
 cat > "$RD/sys_metrics.csv" <<'EOF'
@@ -176,6 +177,17 @@ EOF
 
 printf 'MemTotal:       32526256 kB\nMemAvailable:   30137364 kB\n' > "$RD/raw/meminfo.txt"
 
+# lscpu 的 L3 那格给的是 `55 MiB (2 instances)` —— 一份中文报告里挂个英文尾巴
+cat > "$RD/raw/lscpu.json" <<'EOF'
+{"lscpu":[
+ {"field":"Architecture:","data":"x86_64"},
+ {"field":"CPU(s):","data":"128"},
+ {"field":"Socket(s):","data":"2"},
+ {"field":"L3 cache:","data":"55 MiB (2 instances)"},
+ {"field":"Virtualization:","data":"VT-x"}
+]}
+EOF
+
 cat > "$RD/raw/ipmi-sensors.txt" <<'EOF'
 PSU1_Vin         | 218.000    | Volts      | ok    | 76.000    | 80.000
 PSU2_Vin         | na         | Volts      | na    | 76.000    | 80.000
@@ -237,6 +249,20 @@ cat > "$RD/raw/nic/ens9f1-driver.txt" <<'EOF'
 driver: ixgbe
 firmware-version: 0x00012b2c, 1.1197.0
 bus-info: 0000:27:00.1
+EOF
+# r8169 这类驱动 ethtool 给的不是版本号，是它加载的**固件文件名**（带目录）。
+# 整串印进「固件版本」那一格，看着像我们把一条路径漏出去了。
+cat > "$RD/raw/nic/enp129s0-driver.txt" <<'EOF'
+driver: r8169
+firmware-version: rtl_nic/rtl8168d-2.fw
+bus-info: 0000:81:00.0
+model: Realtek Semiconductor Co., Ltd. RTL8111/8168/8211/8411 PCI Express Gigabit Ethernet Controller
+EOF
+cat > "$RD/raw/nic/enp129s0-ethtool.txt" <<'EOF'
+Settings for enp129s0:
+	Speed: Unknown!
+	Duplex: Unknown! (255)
+	Link detected: no
 EOF
 cat > "$RD/raw/nic/ens9f1-ethtool.txt" <<'EOF'
 Settings for ens9f1:
@@ -536,6 +562,122 @@ has "$OUT" "交流输入" "新增列"
 has "$OUT" "未接入"   "PSU2 的 Vin 读不到值"
 
 echo
+echo "=== DMI 的状态字段要说人话 ==="
+# 一份中文报告里，「状态」那一格原样印着 `Present, OK` / `Populated, Enabled`，
+# 客户还得自己猜。逐段翻，翻不出来的段原样留着。
+has    "$OUT" "在位，正常"     "电源 Present, OK"
+has    "$OUT" "在位，严重异常" "电源 Present, Critical"
+has    "$OUT" "已安装，已启用" "CPU Populated, Enabled"
+has    "$OUT" "55 MiB（共 2 组）" "lscpu 的 (2 instances) 也是英文尾巴"
+has_no "$OUT" "instances"       "同上"
+
+echo
+echo "=== 电源：BIOS 没填的额定功率不许印成 65535 W（Supermicro X11DPG-QT）==="
+# 现场那台 Supermicro X11DPG-QT：两路电源的厂商/型号/序列号四个字段全是
+# dmidecode 的 `<BAD INDEX>`（BIOS 把字符串下标填到了字符串表外面），
+# 额定功率是 `65535 W`（0xFFFF，同样是"没填"）。1.8.2 的报告照抄了进去，
+# 客户看到「额定功率 65535 W」和四格 `<BAD INDEX>`，每台都要解释一遍。
+# **没抓到就显示没抓到** —— 这两样都该是表格里的破折号，电源本身照常列出来。
+RDBI="$TMP/run-badindex"
+mkdir -p "$RDBI/raw/smart-pre" "$RDBI/raw/smart-post"
+cp "$RD/meta.json" "$RDBI/meta.json"
+cp "$RD/results.jsonl" "$RDBI/results.jsonl" 2>/dev/null || true
+cat > "$RDBI/raw/dmidecode.txt" <<'EOF'
+Handle 0x0015, DMI type 39, 22 bytes
+System Power Supply
+	Power Unit Group: 1
+	Location: PSU1
+	Name: <BAD INDEX>
+	Manufacturer: <BAD INDEX>
+	Serial Number: <BAD INDEX>
+	Model Part Number: <BAD INDEX>
+	Max Power Capacity: 65535 W
+	Status: Present, OK
+
+Handle 0x0016, DMI type 39, 22 bytes
+System Power Supply
+	Power Unit Group: 2
+	Location: PSU2
+	Name: CRPS1300
+	Manufacturer: Great Wall
+	Serial Number: 3300033230124689
+	Max Power Capacity: 0 W
+	Status: Present, OK
+EOF
+echo '{ "blockdevices": [] }' > "$RDBI/raw/lsblk.json"
+OUTBI="$TMP/report-badindex.html"
+"$GEN" --run-dir "$RDBI" --out "$OUTBI" >/dev/null 2>&1 \
+  && ok "含 <BAD INDEX> 电源的 run-dir 能生成报告" \
+  || bad "含 <BAD INDEX> 电源的 run-dir 能生成报告"
+
+# 断言只能盯**电源那张表**：报告末尾的「三、原始日志」本来就该原样附上
+# dmidecode 的输出，那里出现 65535 / <BAD INDEX> 是对的（存证），
+# 表格里出现才是错的。整份 HTML 是一行，用 python 把那一节切出来。
+PSUSEC="$TMP/psu-section.txt"
+python3 - "$OUTBI" > "$PSUSEC" <<'PY'
+import io, re, sys
+s = io.open(sys.argv[1], encoding="utf-8").read()
+m = re.search(r"<h3>[0-9.]+ 电源</h3>.*?(?=<h2)", s, re.S)
+sys.stdout.write(m.group(0) if m else "")
+PY
+[[ -s "$PSUSEC" ]] && ok "切得出「电源」那一节（切不出来下面的断言等于没跑）" \
+                   || bad "切得出「电源」那一节（切不出来下面的断言等于没跑）"
+has_no "$PSUSEC" "65535"      "0xFFFF 是「这一格没填」，不是 65 千瓦的电源"
+has_no "$PSUSEC" "BAD INDEX"  "dmidecode 的读不出来标记不许进电源表"
+has_no "$PSUSEC" "0 W"        "有些 BIOS 对真电源也不填额定功率，0 W 同样是没填"
+has    "$PSUSEC" "PSU1"       "电源本身照常要列出来（身份读不到不等于没有这路电源）"
+has    "$PSUSEC" "PSU2"       "额定功率没填但身份是真的，绝不能当空槽位丢掉"
+has    "$PSUSEC" "Great Wall" "读得到的字段照常要有"
+has    "$PSUSEC" "未填写部分电源模块" "整行破折号要就地解释清楚，否则每台机器都要口头解释一遍"
+# 反过来：字段都读得到的机器不该平白多出这句提示
+has_no "$OUT"    "未填写部分电源模块" "字段齐全时不该出现这句"
+
+echo
+echo "=== 电源：没有 Vin 传感器时，交流输入退到 BMC 的离散量 ==="
+# Supermicro X11DPG-QT 的 BMC 只有 `PS1 Status` 这种离散量，
+# 1.8.2 的报告里「交流输入」那一列因此整列是破折号 ——
+# 而 raw/ipmi-sdr.txt 里其实一直写着答案，只是没人读。
+# 判读规则和 lib/collect.sh 的 psu_ac_state_sdr 必须一致。
+cat > "$RDBI/raw/ipmi-sdr.txt" <<'EOF'
+CPU1 Temp        | 3Ah | ok  |  3.1 | 45 degrees C
+PS1 Status       | C4h | ok  | 10.92 | Presence detected
+PS2 Status       | C5h | ok  | 10.91 | Presence detected, Power Supply AC lost
+EOF
+"$GEN" --run-dir "$RDBI" --out "$OUTBI" >/dev/null 2>&1 \
+  && ok "带离散量电源传感器的 run-dir 能生成报告" \
+  || bad "带离散量电源传感器的 run-dir 能生成报告"
+python3 - "$OUTBI" > "$PSUSEC" <<'PY'
+import io, re, sys
+s = io.open(sys.argv[1], encoding="utf-8").read()
+m = re.search(r"<h3>[0-9.]+ 电源</h3>.*?(?=<h2)", s, re.S)
+sys.stdout.write(m.group(0) if m else "")
+PY
+# 盯**格子**，别盯字面 —— 「状态」那一列渲染出来是「在位，正常」，
+# 光 grep "正常" 两列都命中，等于没断言。
+check_eq() { [[ "$2" == "$3" ]] && ok "$1" || bad "$1（期望 $2，实际 $3）"; }
+check_eq "PS1 只置了 Presence detected -> 交流输入那格是「正常」" \
+         "1" "$(grep -o '<td>正常</td>' "$PSUSEC" | wc -l)"
+check_eq "PS2 明写 AC lost -> 交流输入那格是「未接入」" \
+         "1" "$(grep -o '<td>未接入</td>' "$PSUSEC" | wc -l)"
+
+echo
+echo "=== 网卡：固件版本那一格不许长得像一条路径 ==="
+# r8169 的 ethtool 给的是它加载的固件**文件名**（`rtl_nic/rtl8168d-2.fw`）。
+# 去掉目录只留文件名 —— 信息一点没少（这一格本来就是"这块卡在跑哪个固件"），
+# 也不再像我们漏了一条路径出去。
+has    "$OUT" "rtl8168d-2.fw"        "固件文件名要留着"
+has_no "$OUT" "rtl_nic/"             "目录不该出现在客户报告里"
+has    "$OUT" "0x00012b2c, 1.1197.0" "多段版本号（I350/82599 那种）原样留着，别拿一个 / 去切"
+
+echo
+echo "=== 判的是我们、不是机器的指标，不进客户报告 ==="
+# 「失败压测项」是 stress-ng 内部子测试的失败计数。客户看到一个 0，
+# 既不知道分母是多少，也不知道它和上面那条 PASS 有什么区别 ——
+# 有区别时上面那条就不会是 PASS。工程数据和内部报告里一个字段都没少。
+has    "$OUT" "装机容量MB"  "正经指标照常在"
+has_no "$OUT" "失败压测项"  "内部计数不进客户报告"
+
+echo
 echo "=== 抬头提示 ==="
 has "$OUT" "项为告警"      "WARN 项要在抬头点出来"
 has "$OUT" "未能通过网络自动校时" "时钟不准的提示（run-dir 里没有 clock_synced 字段，按未校时处理）"
@@ -587,8 +729,34 @@ m["thresholds"] = {"cpu_temp_warn": 95, "cpu_temp_fail": 100,
                    "disk_temp_warn": 70, "disk_temp_fail": 80}
 json.dump(m, open(p, "w", encoding="utf-8"), ensure_ascii=False)
 PYEOF
+# 消费级 GeForce 卡没烧序列号，nvidia-smi 给的是字面的 `0`。
+# 印成「序列号 0」比空着更糟 —— 客户会拿这个 0 去对货。
+cat > "$RD3/raw/gpu-smi-full.txt" <<'EOF'
+Driver Version                            : 595.84
+
+GPU 00000000:C8:00.0
+    Product Name                          : NVIDIA GeForce RTX 4090
+    Serial Number                         : 0
+    VBIOS Version                         : 98.02.2E.80.39
+    FB Memory Usage
+        Total                             : 24564 MiB
+    PCIe Generation
+        Max                               : 4
+EOF
 OUT3="$TMP/report-gpu.html"
 if python3 "$GEN" --run-dir "$RD3" --out "$OUT3" >/dev/null 2>"$TMP/err3"; then
+  has "$OUT3" "NVIDIA GeForce RTX 4090" "显卡型号照常要有"
+  has "$OUT3" "98.02.2E.80.39"          "VBIOS 版本照常要有"
+  # 表格那一节切出来单独判：报告别处出现 0 是正常的
+  python3 - "$OUT3" > "$TMP/gpu-section.txt" <<'PY'
+import io, re, sys
+s = io.open(sys.argv[1], encoding="utf-8").read()
+m = re.search(r"<h3>[0-9.]+ GPU 显卡</h3>.*?(?=<h3|<h2)", s, re.S)
+sys.stdout.write(m.group(0) if m else "")
+PY
+  [[ -s "$TMP/gpu-section.txt" ]] && ok "切得出「GPU 显卡」那一节" \
+                                  || bad "切得出「GPU 显卡」那一节"
+  has_no "$TMP/gpu-section.txt" ">0<" "消费级卡的 Serial Number: 0 不许当序列号印出来"
   has "$OUT3" "CPU 封装功耗"        "有 cpu_power_w 列时要画 CPU 功耗图"
   has "$OUT3" "封装功耗峰值 352 W"  "CPU 功耗峰值"
   has "$OUT3" "GPU 温度 / 功耗曲线" "GPU 曲线小节"

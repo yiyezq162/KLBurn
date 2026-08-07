@@ -111,20 +111,28 @@ verify_disk_temp() {
     fi
   done
 
+  # 现场 99% 会跳过硬盘压测，这时候盘并没有被压过 —— 写"压测结束时温度"
+  # 会让客户以为我们烤过盘了。CPU/内存那一轮照样跑了十几分钟、机箱确实热过，
+  # 这个读数有意义，只是不能说成是硬盘压测的结果。
+  # DISK_CONFIRMED 是 factory-test.sh 里的全局（现场当场确认过破坏性写入才为 1），
+  # verify_all 和它在同一个 shell 里。
+  local when="压测结束时"
+  (( ${DISK_CONFIRMED:-0} == 1 )) || when="测试结束时"
+
   if (( seen == 0 )); then
     result_add "verify_disk_temp" "硬盘温度" "$ST_SKIP" \
       "所有盘都没有通过 SMART 上报温度（部分 SATA 盘和阵列卡后面的盘不提供）" ""
   elif (( ${#over[@]} > 0 )); then
     result_add "verify_disk_temp" "硬盘温度" "$ST_FAIL" \
-      "压测结束时 ${over[*]} 超过上限 ${DISK_TEMP_FAIL}°C，散热不足（NVMe 到这个温度通常已经在降速）" \
+      "${when} ${over[*]} 超过上限 ${DISK_TEMP_FAIL}°C，散热不足（NVMe 到这个温度通常已经在降速）" \
       "raw/smart-post/"
   elif (( ${#hot[@]} > 0 )); then
     result_add "verify_disk_temp" "硬盘温度" "$ST_WARN" \
-      "压测结束时 ${hot[*]} 偏高（告警线 ${DISK_TEMP_WARN}°C）；共 ${seen} 块盘上报了温度" \
+      "${when} ${hot[*]} 偏高（告警线 ${DISK_TEMP_WARN}°C）；共 ${seen} 块盘上报了温度" \
       "raw/smart-post/"
   else
     result_add "verify_disk_temp" "硬盘温度" "$ST_PASS" \
-      "${seen} 块盘压测结束时温度均低于 ${DISK_TEMP_WARN}°C" "raw/smart-post/"
+      "${seen} 块盘${when}温度均低于 ${DISK_TEMP_WARN}°C" "raw/smart-post/"
   fi
 }
 
@@ -372,9 +380,19 @@ verify_dmesg_boot() {
 
   if (( n > 0 )); then
     local sample; sample="$(dmesg_error_summary "$RAW_DIR/dmesg-errors-boot.txt" "$n")"
+    # 同一张坏阵列卡会在这里和「阵列卡」那一项各判一次 FAIL。两条都对，
+    # 但报告抬头写着"失败 2 项"，客户读成两处独立故障 —— 明明是一件事。
+    # 两个条件同时成立才点这一句：collect_raid 确认过卡有问题（不是我们缺工具），
+    # **而且**这里归并出来的类别里真有阵列卡固件那一类。少了后一条，
+    # 一台既有坏卡、又另外有内存 MCE 的机器会被说成"都是阵列卡的事"。
+    local same=""
+    if (( ${RAID_FAULT_FOUND:-0} == 1 )) \
+       && [[ "$sample" == *"存储控制器/阵列卡固件"* ]]; then
+      same="其中阵列卡固件故障那几条，和「阵列卡」那一项说的是同一件事，不是两处独立故障。"
+    fi
     result_add "verify_dmesg_boot" "开机内核日志复查" "$ST_FAIL" \
       "开机与硬件采集阶段内核日志出现硬件错误（这些发生在压测开始之前，\
-说明机器在上电初始化时就有硬件异常）。${sample}" "raw/dmesg-errors-boot.txt"
+说明机器在上电初始化时就有硬件异常）。${sample}${same:+。${same}}" "raw/dmesg-errors-boot.txt"
   else
     result_add "verify_dmesg_boot" "开机内核日志复查" "$ST_PASS" \
       "开机与硬件采集阶段无硬件错误日志" "raw/dmesg-pre.txt"

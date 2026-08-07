@@ -190,6 +190,38 @@ cpu_temp_max_c() {
   printf '%s' "$max"
 }
 
+# ---------------------------------------------------------------- 采样状态
+# "要两次采样求差"的那几个函数（RAPL 功耗、CPU 占用率、磁盘 I/O 速率）
+# 把"上一次的读数"存在这里。
+#
+# ⚠️ **绝不能存在 shell 全局变量里。**调用点全长这样：
+#       p="$(cpu_power_w)"                      # 命令替换
+#       while read ... < <(cpu_pkg_busy_pct)    # 进程替换
+#       while read ... < <(disk_io_rates)
+#    两种都在**子 shell**里跑，函数里对全局的赋值出了子 shell 就没了（§11-25）。
+#    调用方通常会先在父 shell 里调一次"打基准"，于是"上一次"就**永远停在那次
+#    基准上** —— 每个采样点算出来的都是"从压测开始到现在的平均值"，
+#    不是此刻的瞬时值。
+#
+#    这不是理论问题。1.7.8 现场那台 2x Xeon Gold 6530 的功耗曲线：前 14 分钟
+#    稳稳一条直线（平均值当然平），RAPL 计数器第一次回绕之后整条线塌到
+#    429 W 再每个采样点爬 4 瓦，爬到测试结束都没爬回去，中间还塌了四次。
+#    屏幕上的 CPU 占用率和硬盘速率是同一个病，只是满载时平均值和瞬时值差不多，
+#    看不出来。
+#
+#    落到文件里，跨子 shell 才留得住。/run 是 tmpfs，盘里跑的时候一定有；
+#    脱机跑测试时用 KLBURN_STATE_DIR 指到临时目录。
+sample_state_file() {
+  local d
+  for d in "${KLBURN_STATE_DIR:-/run/klburn}" "${TMPDIR:-/tmp}/klburn-state"; do
+    [[ -d "$d" ]] || mkdir -p "$d" 2>/dev/null || continue
+    [[ -w "$d" ]] || continue
+    printf '%s/%s' "$d" "$1"
+    return 0
+  done
+  return 1
+}
+
 # ---------------------------------------------------------------- CPU 功耗
 # 读 RAPL 能量计数器算封装功耗（瓦）。
 #
@@ -201,42 +233,72 @@ cpu_temp_max_c() {
 # （intel-rapl:0:0 之类），否则会重复计算。多路机器把每颗 CPU 加起来。
 # AMD 的 zen 系列在新内核上也走 intel-rapl 这套接口，名字如此而已。
 #
+# ⚠️ **同一个 package 域在 /sys/class/powercap 下能被两条路径同时匹配到**，
+#    照单全加就是整份报告的功耗曲线**翻一倍**：
+#      /sys/class/powercap/intel-rapl:0                 ← zone 自己的 class 软链
+#      /sys/class/powercap/intel-rapl/intel-rapl:0      ← 从 control type 目录进去
+#    powercap 框架把 control type（intel-rapl）和每个 zone（intel-rapl:N）
+#    都注册进 class 目录，而 zone 的 device 父节点又正是 control type，
+#    于是同一块硬件在两条路径下各出现一次。原意是"第一条取不到再退第二条"，
+#    写成一个 for 就成了相加。
+#
+#    这不是理论问题：1.7.8~1.8.2 现场那台 2x Xeon Gold 6530 报出 **1034 W**
+#    封装功耗，而它的 MSR_PKG_POWER_LIMIT(0x610) PL1 = 270 W/颗、两颗顶天
+#    540 W，BMC 的 Sys_Total_Power 整机才 570~627 W。1034 / 2 = 517 W
+#    才是真值。2x Jintide C5218R（PL1 125 W/颗）报 567 W 同理。
+#
+#    去重按 zone 名（intel-rapl:N 在一个 control type 里唯一），不用 realpath，
+#    省掉每次采样几个子进程。
+#
 # 计数器会回绕，超出 max_energy_range_uj 就从 0 重来；差值为负时按一次回绕补回来。
-_RAPL_PREV_UJ=""
-_RAPL_PREV_TS=""
-cpu_power_w() {
-  local total=0 found=0 d f v now
-  for d in /sys/class/powercap/intel-rapl:[0-9]* /sys/class/powercap/intel-rapl/intel-rapl:[0-9]*; do
+
+# 该求和的 package 域目录，一个 zone 只出现一次。
+# 抽成单独一个函数是为了能脱机测（tests/test-hw-checks.sh 用 KLBURN_POWERCAP
+# 指到一棵假的 sysfs 上，把"两条路径指同一个 zone"这件事复现出来）。
+rapl_pkg_zones() {
+  local root="${KLBURN_POWERCAP:-/sys/class/powercap}"
+  local d zone seen=" "
+  for d in "$root"/intel-rapl:[0-9]* "$root"/intel-rapl/intel-rapl:[0-9]*; do
+    zone="${d##*/}"
     # 只要 package 层：名字里带两个冒号的是子域，跳过
-    [[ "$(basename "$d")" == *:*:* ]] && continue
+    [[ "$zone" == *:*:* ]] && continue
+    # 同一个 zone 从两条路径各来一次，只认第一次
+    [[ "$seen" == *" $zone "* ]] && continue
+    [[ -r "$d/energy_uj" ]] || continue
+    seen+="$zone "
+    printf '%s\n' "$d"
+  done
+}
+
+cpu_power_w() {
+  local total=0 found=0 d f v now sf prev_uj="" prev_ts=""
+  while IFS= read -r d; do
+    [[ -n "$d" ]] || continue
     f="$d/energy_uj"
-    [[ -r "$f" ]] || continue
     v="$(<"$f")" 2>/dev/null || continue
     [[ "$v" =~ ^[0-9]+$ ]] || continue
     total=$(( total + v ))
     found=1
-  done
+  done < <(rapl_pkg_zones)
   (( found )) || { printf ''; return; }
 
   now="$(date +%s%N)"
-  if [[ -z "$_RAPL_PREV_UJ" || -z "$_RAPL_PREV_TS" ]]; then
-    _RAPL_PREV_UJ="$total"; _RAPL_PREV_TS="$now"
-    printf ''   # 第一次没有可比的基准
-    return
-  fi
+  sf="$(sample_state_file rapl.prev)" || { printf ''; return; }
+  [[ -r "$sf" ]] && read -r prev_uj prev_ts < "$sf"
+  printf '%s %s\n' "$total" "$now" > "$sf"
+  # 第一次没有可比的基准
+  [[ "$prev_uj" =~ ^[0-9]+$ && "$prev_ts" =~ ^[0-9]+$ ]] || { printf ''; return; }
 
-  local duj=$(( total - _RAPL_PREV_UJ ))
-  local dns=$(( now - _RAPL_PREV_TS ))
-  _RAPL_PREV_UJ="$total"; _RAPL_PREV_TS="$now"
+  local duj=$(( total - prev_uj ))
+  local dns=$(( now - prev_ts ))
 
   (( dns > 0 )) || { printf ''; return; }
   # 回绕：差值为负说明计数器翻过一轮，用第一个域的量程补一次，补不出来就放弃这个点
+  # （同一台机器上各 package 的量程是一样的，取第一个就够）
   if (( duj < 0 )); then
-    local maxf max=""
-    for maxf in /sys/class/powercap/intel-rapl:0/max_energy_range_uj \
-                /sys/class/powercap/intel-rapl/intel-rapl:0/max_energy_range_uj; do
-      [[ -r "$maxf" ]] && { max="$(<"$maxf")"; break; }
-    done
+    local max="" z
+    z="$(rapl_pkg_zones | head -1)"
+    [[ -n "$z" && -r "$z/max_energy_range_uj" ]] && max="$(<"$z/max_energy_range_uj")"
     [[ "$max" =~ ^[0-9]+$ ]] || { printf ''; return; }
     duj=$(( duj + max ))
     (( duj < 0 )) && { printf ''; return; }
@@ -351,7 +413,7 @@ cpu_pkg_map_init() {
 # 只读一次 /proc/stat（一个文件，很便宜），按封装把各逻辑核的时间片加起来。
 # 占用率是两次采样之间的**差值**，所以第一次调用给不出数字、什么都不输出 ——
 # 调用方要能接受空（读不到 ≠ 0%，更不是故障）。
-declare -A _PKG_PREV_TOT=() _PKG_PREV_IDLE=()
+# 上一次的读数存在文件里，理由见 sample_state_file。
 cpu_pkg_busy_pct() {
   cpu_pkg_map_init
   local -A tot=() idl=()
@@ -368,15 +430,29 @@ cpu_pkg_busy_pct() {
   done < /proc/stat
   (( have )) || return 0
 
+  local sf; sf="$(sample_state_file cpubusy.prev)" || return 0
+  local -A ptot=() pidl=()
+  local pt pi
+  if [[ -r "$sf" ]]; then
+    while read -r p pt pi; do
+      [[ "$p" =~ ^[0-9]+$ && "$pt" =~ ^[0-9]+$ && "$pi" =~ ^[0-9]+$ ]] || continue
+      ptot[$p]="$pt"; pidl[$p]="$pi"
+    done < "$sf"
+  fi
+
   local dt di
   for p in $(printf '%s\n' "${!tot[@]}" | sort -n); do
-    if [[ -n "${_PKG_PREV_TOT[$p]:-}" ]]; then
-      dt=$(( tot[$p] - _PKG_PREV_TOT[$p] ))
-      di=$(( idl[$p] - _PKG_PREV_IDLE[$p] ))
+    if [[ -n "${ptot[$p]:-}" ]]; then
+      dt=$(( tot[$p] - ptot[$p] ))
+      di=$(( idl[$p] - pidl[$p] ))
       (( dt > 0 )) && printf '%s %s\n' "$p" $(( (dt - di) * 100 / dt ))
     fi
-    _PKG_PREV_TOT[$p]="${tot[$p]}"
-    _PKG_PREV_IDLE[$p]="${idl[$p]}"
+  done
+
+  # 存新基准放在最后：上面那圈还要用旧值，写文件不能插在中间
+  : > "$sf"
+  for p in "${!tot[@]}"; do
+    printf '%s %s %s\n' "$p" "${tot[$p]}" "${idl[$p]}" >> "$sf"
   done
 }
 
@@ -446,10 +522,9 @@ disk_temp_c() {
 # 不输出任何行。字段（内核文档 iostats.rst）：
 #   $1 major $2 minor $3 name $4 读完成数 $6 读扇区 $8 写完成数 $10 写扇区
 # 扇区一律按 512 字节算（这是块层的固定单位，和盘的物理扇区大小无关）。
-declare -A _DSTAT_PREV=()
-_DSTAT_PREV_TS=""
+# 上一次的读数存在文件里，理由见 sample_state_file。
 disk_io_rates() {
-  local now dt line name rs ws rio wio prev
+  local now dt name rs ws rio wio prev sf prev_ts=""
   now="$(date +%s)"
   local -A cur=()
   while read -r _ _ name rio _ rs _ wio _ ws _; do
@@ -458,11 +533,22 @@ disk_io_rates() {
     cur[$name]="$rs $ws $rio $wio"
   done < /proc/diskstats
 
-  if [[ -n "$_DSTAT_PREV_TS" ]]; then
-    dt=$(( now - _DSTAT_PREV_TS ))
+  sf="$(sample_state_file diskstat.prev)" || return 0
+  # 状态文件第一行是时间戳，之后每行 "<盘名> <读扇区> <写扇区> <读次数> <写次数>"
+  local -A pv=()
+  if [[ -r "$sf" ]]; then
+    local first=1 k rest
+    while read -r k rest; do
+      if (( first )); then prev_ts="$k"; first=0; continue; fi
+      [[ -n "$k" ]] && pv[$k]="$rest"
+    done < "$sf"
+  fi
+
+  if [[ "$prev_ts" =~ ^[0-9]+$ ]]; then
+    dt=$(( now - prev_ts ))
     (( dt < 1 )) && dt=1
     for name in "${!cur[@]}"; do
-      prev="${_DSTAT_PREV[$name]:-}"
+      prev="${pv[$name]:-}"
       [[ -n "$prev" ]] || continue
       # shellcheck disable=SC2086
       set -- $prev
@@ -478,9 +564,9 @@ disk_io_rates() {
     done | sort
   fi
 
-  _DSTAT_PREV=()
-  for name in "${!cur[@]}"; do _DSTAT_PREV[$name]="${cur[$name]}"; done
-  _DSTAT_PREV_TS="$now"
+  { printf '%s\n' "$now"
+    for name in "${!cur[@]}"; do printf '%s %s\n' "$name" "${cur[$name]}"; done
+  } > "$sf"
 }
 
 # ---------------------------------------------------------------- 杂项
@@ -560,15 +646,34 @@ get_machine_tag() {
 }
 
 # 取整机序列号：优先系统序列号，其次主板，再不行用 MAC
+# BIOS 没填序列号时的各种写法。整机序列号命中就退到主板序列号，
+# 主板也命中就退到网卡 MAC。
+#
+# ⚠️ **这份名单要和 report/generate_report.py 的 BOGUS 一致。**两边不一致的
+# 后果是现成的：海光 H210-G30 那台 DMI 里写的是 `Serial Number: N/A`，
+# 这边不认、Python 那边认，于是报告抬头「整机序列号 NA」、报告目录也叫 NA，
+# 而它主板序列号 24003702CHK04234 是真的、就在同一份 DMI 里。
+_serial_is_bogus() {
+  local s; s="$(printf '%s' "${1:-}" | tr '[:upper:]' '[:lower:]')"
+  s="${s#"${s%%[![:space:]]*}"}"; s="${s%"${s##*[![:space:]]}"}"
+  case "$s" in
+    ""|"to be filled by o.e.m."|"not specified"|"default string"|"none" \
+      |"unknown"|"n/a"|"na"|"o.e.m."|"empty"|"not present"|"0123456789" \
+      |"system serial number"|"<bad index>"|"<out of spec>"|"-"|"--") return 0 ;;
+  esac
+  # "To be filled by O.E.M." 各家大小写和尾巴都不一样，前缀再兜一道
+  [[ "$s" == "to be filled"* ]]
+}
+
 get_serial() {
   local s=""
   if have dmidecode; then
     s="$(dmidecode -s system-serial-number 2>/dev/null | grep -v '^#' | head -1)"
-    if [[ -z "$s" || "$s" =~ ^(To[[:space:]]be[[:space:]]filled|Not[[:space:]]Specified|Default[[:space:]]string|System[[:space:]]Serial[[:space:]]Number|O\.E\.M\.|None|\ *)$ ]]; then
+    if _serial_is_bogus "$s"; then
       s="$(dmidecode -s baseboard-serial-number 2>/dev/null | grep -v '^#' | head -1)"
     fi
   fi
-  if [[ -z "$s" || "$s" =~ ^(To[[:space:]]be[[:space:]]filled|Not[[:space:]]Specified|Default[[:space:]]string|None|\ *)$ ]]; then
+  if _serial_is_bogus "$s"; then
     local mac
     mac="$(cat /sys/class/net/*/address 2>/dev/null | grep -v '00:00:00:00:00:00' | head -1 | tr -d ':')"
     s="UNKNOWN-${mac: -6}"

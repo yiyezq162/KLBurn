@@ -74,8 +74,16 @@ def E_rich(s):
 
 BOGUS = {
     "to be filled by o.e.m.", "not specified", "default string", "none",
-    "unknown", "n/a", "no dimm", "not present", "empty", "o.e.m.",
+    "unknown", "n/a", "na", "no dimm", "not present", "empty", "o.e.m.",
     "system manufacturer", "system product name", "0123456789",
+    # dmidecode 自己打出来的两个"这条读不出来"标记，不是厂商填的内容：
+    #   <BAD INDEX>   字符串下标指到了字符串表外面（BIOS 填错了索引）
+    #   <OUT OF SPEC> 枚举值不在 SMBIOS 规范里
+    # Supermicro X11DPG-QT 的两路电源，厂商/型号/序列号四个字段全是 <BAD INDEX>，
+    # 照抄进客户报告就是四格乱码。读不出来就写"读不出来"（表格里的 —）。
+    "<bad index>", "<out of spec>",
+    # smartctl 对读不到的字段给的就是一个横杠
+    "-", "--",
 }
 
 
@@ -86,6 +94,53 @@ def clean(v):
     s = str(v).strip()
     if not s or s.lower() in BOGUS:
         return None
+    return s
+
+
+# DMI 的状态字段是英文的（`Present, OK` / `Populated, Enabled`），照抄进一份
+# 中文报告里，客户还得自己猜。逗号分隔逐段翻，翻不出来的段原样留着 ——
+# 见过一个词就整格退回英文，比夹着一个英文词更难读。
+DMI_STATUS_CN = {
+    "present": "在位",
+    "not present": "未在位",
+    "populated": "已安装",
+    "unpopulated": "未安装",
+    "enabled": "已启用",
+    "disabled": "已禁用",
+    "idle": "空闲",
+    "ok": "正常",
+    "non-critical": "轻度异常",
+    "critical": "严重异常",
+    "non-recoverable": "不可恢复故障",
+    "failed": "故障",
+    "unknown": "未知",
+}
+
+
+def dmi_status_cn(v):
+    s = clean(v)
+    if not s:
+        return None
+    parts = [x.strip() for x in s.split(",") if x.strip()]
+    return "，".join(DMI_STATUS_CN.get(x.lower(), x) for x in parts) or None
+
+
+def nic_firmware_display(v):
+    """`ethtool -i` 的 firmware-version -> 能放进「固件版本」那一格的写法。
+
+    多数网卡给的是版本号（I350：`1.63, 0x800009fb, 1.791.0`），
+    但一部分驱动给的是它**加载的固件文件名**，带着目录：
+        r8169  ->  rtl_nic/rtl8168d-2.fw
+    整串印进「固件版本」那一格，看着像我们把一条路径漏出去了。
+    去掉目录只留文件名 —— 信息一点没少（这一格本来就是"这块卡在跑哪个固件"，
+    出厂核对固件是否加载正是要看它），也不再像路径。
+
+    只在"整串就是一个路径"时才动：含空格或逗号的多段版本号（I350 那种）
+    一律原样留着，别拿一个 `/` 就去切人家的版本串。
+    """
+    s = clean(v)
+    if s and re.match(r"^[^\s,]+/[^\s,]+$", s):
+        return s.rsplit("/", 1)[-1]
     return s
 
 
@@ -349,7 +404,7 @@ class Data(object):
                 ("线程数", clean(p.get("Thread Count"))),
                 ("最大频率", clean(p.get("Max Speed"))),
                 ("当前频率", clean(p.get("Current Speed"))),
-                ("状态", clean(status)),
+                ("状态", dmi_status_cn(status)),
             ]))
         return out
 
@@ -422,6 +477,41 @@ class Data(object):
                 return "未接入"      # na / no reading = 这个模块没在工作
         return None
 
+    def psu_ac_state_sdr(self, idx):
+        """第二个来源：BMC 的**离散量**电源状态传感器（`ipmi-sdr.txt`）。
+
+        不是所有 BMC 都有 `PSU1_Vin` 这种数值传感器。Supermicro X11DPG-QT
+        只有离散量，1.8.2 的报告里「交流输入」那一列因此整列是破折号 ——
+        而 sdr 里其实一直写着答案：
+
+            PSU1_Status | BFh | ok | 10.8  | Presence detected, Failure detected, Power Supply AC lost
+            PS1 Status  | C4h | ok | 10.92 | Presence detected
+            PSU3_Status | 57h | ns | 10.24 | No Reading
+
+        最后一栏是 IPMI Power Supply（传感器类型 08h）已置位的事件位。
+        判读规则和 lib/collect.sh 的 psu_ac_state_sdr **必须一致**，
+        那边的注释写了为什么是这个顺序（简单说：先看 "lost"，
+        别拿 out-of-range 当判据 —— offset 5 明写着 "but present"；
+        整串子串匹配，别按逗号切 —— offset 5 的名字自带逗号）。
+        """
+        pat = re.compile(r"^(psu|ps)_?\s*%s[\s_-]*status\b" % re.escape(str(idx)), re.I)
+        for line in read_text(self.rawpath("ipmi-sdr.txt")).splitlines():
+            cols = line.split("|")
+            if len(cols) < 2 or not pat.match(cols[0].strip()):
+                continue
+            st = cols[-1].strip().lower()
+            if "lost" in st:
+                return "未接入"
+            if "presence detected" in st:
+                return "正常"
+            return None                      # No Reading / Disabled = 读不到
+        return None
+
+    def psu_ac_state_any(self, idx):
+        """数值传感器优先（那是直接量出来的），读不到才退到离散量。"""
+        v = self.psu_ac_state(idx)
+        return v if v is not None else self.psu_ac_state_sdr(idx)
+
     # 空的电源位，BIOS 照样报 `Present, OK` —— 6530 那台的 PSU4 就是：
     # 厂商/型号/序列号全是 "To Be Filled By O.E.M."、额定功率 0 W，状态却写着在位。
     # 列进表里客户一数电源就发现对不上（判定那边 lib/collect.sh 的
@@ -435,6 +525,29 @@ class Data(object):
     #   3. 存在的身份字段**全是占位符**
     #      —— 同一台的 PSU3 厂商是占位符，但序列号和 2700W 都是真的
     ID_KEYS = ("Manufacturer", "Name", "Model Part Number", "Serial Number")
+
+    @staticmethod
+    def psu_capacity(v):
+        """DMI type 39 的 Max Power Capacity -> 能给客户看的额定功率，读不到就 None。
+
+        这一格是 SMBIOS 里的一个 16 位整数。规范定义 `0x8000` 表示"未知"，
+        dmidecode 遇到它会直接打 `Unknown`（走 clean() 就过滤掉了）。
+        **但填 `0xFFFF` 的 BIOS 不在少数** —— Supermicro X11DPG-QT 就是，
+        dmidecode 照实打成 `65535 W`，报告上于是写着「额定功率 65535 W」。
+        那不是电源有 65 千瓦，那是 BIOS 这一格没填。
+
+        判据不写死 65535，而是卡一个物理上说得通的区间：服务器电源额定
+        几十瓦到几千瓦，一台机器上不会有 0 W 也不会有 10 kW 的模块。
+        区间外的一律当"没读到"，宁可这一格空着，也不能让客户拿着一个
+        荒唐的数字回来问。
+        """
+        s = clean(v)
+        if not s:
+            return None
+        m = re.match(r"^\s*([0-9]+(?:\.[0-9]+)?)\s*W\s*$", s, re.I)
+        if not m:
+            return s                      # 不是"数字 + W"的写法，原样留着
+        return s if 0 < float(m.group(1)) < 10000 else None
 
     @classmethod
     def _psu_is_phantom(cls, p):
@@ -464,9 +577,9 @@ class Data(object):
                 ("厂商", clean(p.get("Manufacturer"))),
                 ("型号", clean(p.get("Model Part Number"))),
                 ("序列号", clean(p.get("Serial Number"))),
-                ("额定功率", clean(p.get("Max Power Capacity"))),
-                ("交流输入", self.psu_ac_state(m.group(0) if m else i)),
-                ("状态", clean(p.get("Status"))),
+                ("额定功率", self.psu_capacity(p.get("Max Power Capacity"))),
+                ("交流输入", self.psu_ac_state_any(m.group(0) if m else i)),
+                ("状态", dmi_status_cn(p.get("Status"))),
             ]))
         return out
 
@@ -672,7 +785,7 @@ class Data(object):
                 ("接口名", n),
                 ("型号", grab(drv, "model")),
                 ("驱动", grab(drv, "driver")),
-                ("固件版本", grab(drv, "firmware-version")),
+                ("固件版本", nic_firmware_display(grab(drv, "firmware-version"))),
                 ("总线地址", grab(drv, "bus-info")),
                 ("协商速率", grab(eth, "Speed")),
                 ("双工", grab(eth, "Duplex")),
@@ -897,10 +1010,13 @@ class Data(object):
                     ("逻辑盘", self.raid_vd_of(cnum)),
                 ]))
         if not cards:
-            # 没有厂商工具、或者工具认不了这张卡 —— 型号照样要有，走 PCI 那条路。
+            # 没有厂商工具、或者工具认不了这张卡（含卡本身是死的）—— 型号照样要有，
+            # 走 PCI 那条路。「控制器」那格留空：这时候根本没有控制器编号可言，
+            # 原先往里填的字面量 "PCI" 在客户眼里就是一格看不懂的英文，
+            # 下面那圈会把整列去掉。
             for _bdf, name in pci_models:
                 cards.append(OrderedDict([
-                    ("控制器", "PCI"),
+                    ("控制器", None),
                     ("型号", name),
                     ("控制器自报", None),
                     ("序列号", None),
@@ -908,10 +1024,10 @@ class Data(object):
                     ("逻辑盘", None),
                 ]))
 
-        # 「控制器自报」和「逻辑盘」是补充信息，一整列都空的时候整列去掉 ——
-        # 一列破折号只会让人以为漏采了。核心四列（控制器/型号/序列号/固件版本）
+        # 「控制器」「控制器自报」「逻辑盘」是补充信息，一整列都空的时候整列去掉 ——
+        # 一列破折号只会让人以为漏采了。核心三列（型号/序列号/固件版本）
         # 无论如何都留着：空着本身就是信息（"查过了，没有"）。
-        for col in ("控制器自报", "逻辑盘"):
+        for col in ("控制器", "控制器自报", "逻辑盘"):
             if cards and all(not c.get(col) for c in cards):
                 for c in cards:
                     c.pop(col, None)
@@ -939,10 +1055,17 @@ class Data(object):
                                   % (re.escape(section), re.escape(key)), b, re.M)
                     return m.group(1).strip() if m else None
 
+                # 消费级 GeForce 卡没有序列号，nvidia-smi 给的是一个字面的 `0`
+                # （只有数据中心卡才烧了真序列号）。印成「序列号 0」比空着更糟：
+                # 客户会拿这个 0 去对货。全零一律当没读到。
+                sn = grab("Serial Number")
+                if sn is not None and not sn.strip("0 "):
+                    sn = None
+
                 out.append(OrderedDict([
                     ("型号", grab("Product Name")),
                     ("显存", grab_under("FB Memory Usage", "Total")),
-                    ("序列号", grab("Serial Number")),
+                    ("序列号", sn),
                     ("BIOS版本", grab("VBIOS Version")),
                     ("驱动版本", drv),
                     ("PCIe最大代数", grab_under("PCIe Generation", "Max")),
@@ -1329,7 +1452,10 @@ def build_html(data):
             ("物理插槽", cs.get("Socket(s)")),
             ("NUMA 节点", cs.get("NUMA node(s)")),
             ("架构", cs.get("Architecture")),
-            ("L3 缓存", cs.get("L3 cache")),
+            # lscpu 给的是 `55 MiB (2 instances)` —— 一份中文报告里挂个
+            # 英文尾巴，客户还得猜 instances 是什么。数字（总量和组数）不动。
+            ("L3 缓存", re.sub(r"\s*\(\s*(\d+)\s+instances?\s*\)", r"（共 \1 组）",
+                               cs.get("L3 cache") or "") or None),
             ("虚拟化", cs.get("Virtualization")),
         ])))
 
@@ -1377,7 +1503,18 @@ def build_html(data):
         A('<p class="muted">未安装独立显卡</p>')
 
     A("<h3>1.8 电源</h3>")
-    A(table(data.psus(), "BIOS 未提供电源信息（部分机型不上报，可从 BMC 查看）"))
+    psus = data.psus()
+    A(table(psus, "BIOS 未提供电源信息（部分机型不上报，可从 BMC 查看）"))
+    # 有些主板（实测 Supermicro X11DPG-QT）DMI type 39 里除了位置和状态之外
+    # 一格都没填 —— 厂商/型号/序列号是 dmidecode 的 <BAD INDEX>，额定功率是
+    # 0xFFFF。我们把这些原样印出去过，客户拿到的是四格乱码和「65535 W」，
+    # 每台机器都得口头解释一遍。现在改成显示破折号，并且把"为什么是破折号"
+    # 直接写在表下面 —— 少一次解释，也少一次被当成漏采。
+    if any(not any(p.get(k) for k in ("厂商", "型号", "序列号", "额定功率"))
+           for p in psus):
+        A('<p class="sub">本机 BIOS 未填写部分电源模块的厂商 / 型号 / 序列号 / 额定功率，'
+          "表中显示为「—」。这几项由主板 BIOS 提供，读不到不代表电源有问题 —— "
+          "电源是否在位、是否进电，以第二节「电源」那一项的结论为准。</p>")
 
     # ================================================================
     A("<h2>二、压力测试结果</h2>")
@@ -1477,10 +1614,17 @@ def build_html(data):
         A(table(fio))
 
     # ---------------- 指标 ----------------
-    if data.metrics:
+    # 判的是我们、不是机器的指标，和 INTERNAL_ONLY_ROWS 同一把尺子：
+    # 「失败压测项」是 stress-ng 内部子测试的失败计数，客户看到一个 0
+    # 既不知道分母是多少，也不知道它和上面那条 PASS 有什么区别 ——
+    # 有区别时上面那条就不会是 PASS。工程数据和内部报告里一个字段都没少。
+    INTERNAL_ONLY_METRICS = {("cpu", "失败压测项")}
+    shown_metrics = [m for m in data.metrics
+                     if (m.get("group"), m.get("key")) not in INTERNAL_ONLY_METRICS]
+    if shown_metrics:
         A(SUB("其他实测指标"))
         groups = OrderedDict()
-        for m in data.metrics:
+        for m in shown_metrics:
             groups.setdefault(m.get("group"), []).append(m)
         rows = []
         for g, items in groups.items():

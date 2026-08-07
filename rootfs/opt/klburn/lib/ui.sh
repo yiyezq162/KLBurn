@@ -985,7 +985,7 @@ cfg_platform_body() {
     [[ "$st" == *"Present"* ]] || continue
     total=$(( total + 1 ))
     n="$(printf '%s' "$loc" | grep -oE '[0-9]+' | head -1)"; [[ -n "$n" ]] || n="$total"
-    ac="$(psu_ac_state "$n" "$raw/ipmi-sensors.txt")"
+    ac="$(psu_ac_state_any "$n" "$raw/ipmi-sensors.txt" "$raw/ipmi-sdr.txt")"
     [[ "$ac" == "present" ]] && live=$(( live + 1 ))
   done
   if (( total > 0 )); then

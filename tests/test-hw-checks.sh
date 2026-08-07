@@ -242,6 +242,52 @@ check "「PS1 Input Voltage」这种命名也要认得出有电" \
 check "「PS2 Input Voltage」读不到值 -> 没电" \
       "absent"  "$(psu_ac_state 2 "$TMP/ipmi-alt.txt")"
 
+# ---- 第二个来源：BMC 的离散量电源状态（ipmi-sdr.txt）----
+# 不是所有 BMC 都有 PSU1_Vin 这种数值传感器。Supermicro X11DPG-QT 只有离散量，
+# 1.8.2 的报告里「交流输入」那一列因此整列是破折号 —— 而 sdr 里一直写着答案。
+# 样本全部取自现场：6530 那台（PSU1 掉了交流）、Supermicro（PS1 Status 这种命名）。
+cat > "$TMP/ipmi-sdr.txt" <<'EOF'
+CPU1 Temp        | 3Ah | ok  |  3.1 | 45 degrees C
+PSU1_Status      | BFh | ok  | 10.8 | Presence detected, Failure detected, Power Supply AC lost
+PSU2_Status      | C7h | ok  | 10.16 | Presence detected
+PSU3_Status      | 57h | ns  | 10.24 | No Reading
+PSU5_Status      | 58h | ok  | 10.40 | Presence detected, Power Supply input out-of-range, but present
+PSU6_Status      | 59h | ok  | 10.48 | Presence detected, Power Supply input lost or out-of-range
+PS7 Status       | C4h | ok  | 10.92 | Presence detected
+EOF
+check "明写 AC lost -> 没有交流输入" \
+      "absent"  "$(psu_ac_state_sdr 1 "$TMP/ipmi-sdr.txt")"
+check "只置了 Presence detected -> 有交流输入" \
+      "present" "$(psu_ac_state_sdr 2 "$TMP/ipmi-sdr.txt")"
+check "No Reading -> unknown（读不到 ≠ 没电）" \
+      "unknown" "$(psu_ac_state_sdr 3 "$TMP/ipmi-sdr.txt")"
+# ⚠️ offset 5 明写着 "but present"：电进来了，只是不在标称范围内。
+#    拿 out-of-range 当"没进电"的判据就读反了。
+check "input out-of-range **but present** -> 仍算有电（别拿 out-of-range 当判据）" \
+      "present" "$(psu_ac_state_sdr 5 "$TMP/ipmi-sdr.txt")"
+check "input lost or out-of-range -> 没有交流输入（带 lost 的才是）" \
+      "absent"  "$(psu_ac_state_sdr 6 "$TMP/ipmi-sdr.txt")"
+check "「PS7 Status」这种命名也要认得出" \
+      "present" "$(psu_ac_state_sdr 7 "$TMP/ipmi-sdr.txt")"
+check "没有对应编号 -> unknown" \
+      "unknown" "$(psu_ac_state_sdr 9 "$TMP/ipmi-sdr.txt")"
+check "整个 sdr 文件都没有 -> unknown" \
+      "unknown" "$(psu_ac_state_sdr 1 "$TMP/does-not-exist.txt")"
+# 编号必须整词匹配：idx=1 不许命中 PSU11_Status
+cat > "$TMP/ipmi-sdr-11.txt" <<'EOF'
+PSU11_Status     | C7h | ok  | 10.16 | Presence detected, Power Supply AC lost
+EOF
+check "idx=1 不许命中 PSU11_Status" \
+      "unknown" "$(psu_ac_state_sdr 1 "$TMP/ipmi-sdr-11.txt")"
+
+# 合并：数值传感器优先，读不到才退到离散量
+check "有 Vin 时以 Vin 为准（哪怕离散量说得更乐观）" \
+      "absent" "$(psu_ac_state_any 2 "$TMP/ipmi-sensors.txt" "$TMP/ipmi-sdr.txt")"
+check "没有 Vin 的编号退到离散量" \
+      "present" "$(psu_ac_state_any 7 "$TMP/ipmi-sensors.txt" "$TMP/ipmi-sdr.txt")"
+check "两个来源都没有 -> unknown" \
+      "unknown" "$(psu_ac_state_any 9 "$TMP/ipmi-sensors.txt" "$TMP/ipmi-sdr.txt")"
+
 # ================================================================
 echo
 echo "=== 电源整体判定（check_psu）==="
@@ -251,11 +297,12 @@ echo "=== 电源整体判定（check_psu）==="
 # "模块坏了"报的都是 Present, Critical。
 
 psu_case() {
-  # psu_case <dmi内容> <传感器内容>  -> 把结论放进 LAST_STATUS
+  # psu_case <dmi内容> <数值传感器内容> [离散量sdr内容] -> 把结论放进 LAST_STATUS
   RAW_DIR="$TMP/psu-case"; RUN_DIR="$TMP/psu-case"
   rm -rf "$RAW_DIR"; mkdir -p "$RAW_DIR"
   printf '%s\n' "$1" > "$RAW_DIR/dmidecode-psu.txt"
   [[ -n "$2" ]] && printf '%s\n' "$2" > "$RAW_DIR/ipmi-sensors.txt"
+  [[ -n "${3:-}" ]] && printf '%s\n' "$3" > "$RAW_DIR/ipmi-sdr.txt"
   LAST_STATUS=""
   check_psu
 }
@@ -364,7 +411,202 @@ RAW_DIR="$TMP/psu-nofile"; RUN_DIR="$TMP/psu-nofile"; mkdir -p "$RAW_DIR"
 LAST_STATUS=""; check_psu
 check "BIOS 完全不上报 DMI type 39 -> SKIP" "SKIP" "$LAST_STATUS"
 
+# ---- 两个来源都读不到时，PASS 文案不许声称"交流输入正常" ----
+# 1.8.2 的报告自相矛盾：判定文案写「交流输入与模块状态均正常」，
+# 而同一份报告电源表的「交流输入」那一列整列是破折号。
+# 判定照旧 PASS（读不到传感器是我们的能力缺失，不是这台机器的故障），
+# 但话只能说到"BIOS 报告状态正常"为止。
+psu_case "$DMI_OK_OK" "$SENS_UNRELATED"
+check "两路都 Present, OK 但两个来源都读不到 -> 仍判 PASS" "PASS" "$LAST_STATUS"
+check "读不到交流输入时，不许写「交流输入…正常」" "0" \
+      "$(printf '%s' "$LAST_DETAIL" | grep -c '交流输入与模块状态均正常')"
+check "而要明说没能逐路核对进电" "1" \
+      "$(printf '%s' "$LAST_DETAIL" | grep -c '未能逐路核对')"
+check "在位数照常要给出来" "1" \
+      "$(printf '%s' "$LAST_DETAIL" | grep -c '共 2 个电源模块在位')"
+
+# ---- 没有 Vin、但 BMC 有离散量时，要能用上（Supermicro X11DPG-QT）----
+SDR_BOTH_OK='PS1 Status | C4h | ok | 10.92 | Presence detected
+PS2 Status | C5h | ok | 10.91 | Presence detected'
+SDR_PS2_ACLOST='PS1 Status | C4h | ok | 10.92 | Presence detected
+PS2 Status | C5h | ok | 10.91 | Presence detected, Power Supply AC lost'
+
+psu_case "$DMI_OK_OK" "$SENS_UNRELATED" "$SDR_BOTH_OK"
+check "没有 Vin 但离散量说两路都在位无告警 -> PASS" "PASS" "$LAST_STATUS"
+check "这时候可以（也应该）说交流输入正常" "1" \
+      "$(printf '%s' "$LAST_DETAIL" | grep -c '交流输入与模块状态均正常')"
+
+# ★ 这条是这次新增的**检出能力**：1.8.2 在这台机器上什么都看不出来
+psu_case "$DMI_OK_OK" "$SENS_UNRELATED" "$SDR_PS2_ACLOST"
+check "离散量明写 PSU2 掉了交流 -> WARN（无冗余）" "WARN" "$LAST_STATUS"
+check "要点出是哪一路" "1" \
+      "$(printf '%s' "$LAST_DETAIL" | grep -c 'PSU2')"
+
+# ⚠️ 判 FAIL 的门槛不许因为多了个来源就降下来。
+#    离散量只是 BMC 的一句陈述，不是量出来的电压；拿它当 FAIL 的证据
+#    等于把标准放低一档，而这条判定的方向是"宁可漏，不可误杀"（§2-2）。
+psu_case "$DMI_OK_CRIT" "$SENS_UNRELATED" "$SDR_BOTH_OK"
+check "DMI 报 Critical + 只有离散量说有电 -> 仍是 WARN，不许升成 FAIL" \
+      "WARN" "$LAST_STATUS"
+psu_case "$DMI_OK_CRIT" "$SENS_BOTH_HOT" "$SDR_BOTH_OK"
+check "数值传感器确认有电 + DMI 报 Critical -> 这才判 FAIL" \
+      "FAIL" "$LAST_STATUS"
+
 RAW_DIR="$TMP"; RUN_DIR="$TMP"
+
+# ================================================================
+echo
+echo "=== dmidecode 自己打的「读不出来」标记不许当成内容（<BAD INDEX>）==="
+# Supermicro X11DPG-QT 的两路电源：厂商/型号/序列号/Name 四个字段全是
+# `<BAD INDEX>`（BIOS 把字符串下标填到了字符串表外面），额定功率是 65535 W
+# （0xFFFF，也是"没填"）。这是**真电源**，BMC 的 PS1/PS2 Status 都是
+# Presence detected —— 绝不能因为身份字段全是垃圾就把它当空槽位丢掉。
+cat > "$TMP/dmidecode-psu-badindex.txt" <<'EOF'
+Handle 0x0015, DMI type 39, 22 bytes
+System Power Supply
+	Location: PSU1
+	Name: <BAD INDEX>
+	Manufacturer: <BAD INDEX>
+	Serial Number: <BAD INDEX>
+	Model Part Number: <BAD INDEX>
+	Max Power Capacity: 65535 W
+	Status: Present, OK
+
+Handle 0x0016, DMI type 39, 22 bytes
+System Power Supply
+	Location: PSU2
+	Name: <BAD INDEX>
+	Manufacturer: <BAD INDEX>
+	Serial Number: <BAD INDEX>
+	Model Part Number: <BAD INDEX>
+	Max Power Capacity: 65535 W
+	Status: Present, OK
+EOF
+check "<BAD INDEX> + 65535W 的两路电源仍是真电源，一路都不许丢" \
+      "PSU1|Present, OK|1
+PSU2|Present, OK|1" "$(dmi_psu_list "$TMP/dmidecode-psu-badindex.txt")"
+
+# 反过来：身份全是 <BAD INDEX> **而且**额定功率显式为 0，那才是空槽位。
+cat > "$TMP/dmidecode-psu-badindex0.txt" <<'EOF'
+Handle 0x0015, DMI type 39, 22 bytes
+System Power Supply
+	Location: PSU4
+	Name: <BAD INDEX>
+	Manufacturer: <BAD INDEX>
+	Serial Number: <BAD INDEX>
+	Max Power Capacity: 0 W
+	Status: Present, OK
+EOF
+check "<BAD INDEX> 身份 + 额定 0W -> 判为空槽位" "0" \
+      "$(dmi_psu_list "$TMP/dmidecode-psu-badindex0.txt" | awk -F'|' '{print $3}')"
+
+# ================================================================
+echo
+echo "=== 整机序列号的占位符名单（_serial_is_bogus）==="
+# 海光 H210-G30 那台 DMI 写的是 `Serial Number: N/A`。shell 这边原来不认，
+# Python 那边的 BOGUS 认，于是报告抬头「整机序列号 NA」、报告目录也叫 NA，
+# 而同一份 DMI 里主板序列号 24003702CHK04234 是真的。两份名单必须一致。
+for v in "N/A" "NA" "n/a" "To be filled by O.E.M." "To Be Filled By O.E.M." \
+         "Not Specified" "Default string" "None" "Unknown" "<BAD INDEX>" \
+         "0123456789" "System Serial Number" "-" "" "   "; do
+  _serial_is_bogus "$v" \
+    && ok "占位符要认出来：[$v]" \
+    || bad "占位符要认出来：[$v]" "bogus" "当成了真序列号"
+done
+for v in "24003702CHK04234" "21204-00012" "100NA460736" "9800202107245263"; do
+  _serial_is_bogus "$v" \
+    && bad "真序列号不许被当成占位符：[$v]" "真序列号" "bogus" \
+    || ok "真序列号不许被当成占位符：[$v]"
+done
+
+# ================================================================
+echo
+echo "=== RAPL 功耗域去重（rapl_pkg_zones）==="
+# ⚠️ 同一个 package 域在 /sys/class/powercap 下能被两条路径同时匹配到：
+#      /sys/class/powercap/intel-rapl:0              ← zone 自己的 class 软链
+#      /sys/class/powercap/intel-rapl/intel-rapl:0   ← 从 control type 目录进去
+#   1.8.2 之前两条都加进了总和，于是报告里那条 CPU 封装功耗曲线**整整翻一倍**：
+#   2x Xeon Gold 6530（PL1 270W/颗）报出 1034 W，2x Jintide C5218R
+#   （PL1 125W/颗）报出 567 W。这里把那棵 sysfs 照原样搭出来，钉住去重。
+PC="$TMP/powercap"
+mkdir -p "$PC/devices/intel-rapl"
+for z in intel-rapl:0 intel-rapl:1; do
+  mkdir -p "$PC/devices/intel-rapl/$z"
+  echo 1000000                > "$PC/devices/intel-rapl/$z/energy_uj"
+  echo 262143328850           > "$PC/devices/intel-rapl/$z/max_energy_range_uj"
+  # 子域（core/uncore/dram），不该被算进来
+  mkdir -p "$PC/devices/intel-rapl/$z/$z:0"
+  echo 500000 > "$PC/devices/intel-rapl/$z/$z:0/energy_uj"
+  ln -s "devices/intel-rapl/$z"      "$PC/$z"
+  ln -s "devices/intel-rapl/$z/$z:0" "$PC/$z:0"
+done
+ln -s "devices/intel-rapl" "$PC/intel-rapl"
+
+check "两路 CPU 只该数出两个 package 域（同一个 zone 两条路径只算一次）" \
+      "2" "$(KLBURN_POWERCAP="$PC" rapl_pkg_zones | wc -l)"
+check "数出来的 zone 名去重后就是 0 和 1" \
+      "intel-rapl:0
+intel-rapl:1" "$(KLBURN_POWERCAP="$PC" rapl_pkg_zones | sed 's#.*/##' | sort)"
+check "core/uncore 子域不许进来" "0" \
+      "$(KLBURN_POWERCAP="$PC" rapl_pkg_zones | grep -c ':.*:')"
+check "powercap 目录不存在时安静地什么都不给" "" \
+      "$(KLBURN_POWERCAP="$TMP/no-such-powercap" rapl_pkg_zones)"
+
+# 只有 control type 那条路径可用（class 软链没建出来）时也得数得出来
+PC2="$TMP/powercap-only-parent"
+mkdir -p "$PC2/intel-rapl/intel-rapl:0"
+echo 1000000 > "$PC2/intel-rapl/intel-rapl:0/energy_uj"
+check "只有 control type 目录那条路径时照样能数到" "1" \
+      "$(KLBURN_POWERCAP="$PC2" rapl_pkg_zones | wc -l)"
+
+# ================================================================
+echo
+echo "=== 两次采样求差的那几个函数：上一次的读数必须跨得过子 shell ==="
+# ⚠️ 调用点全是命令替换 / 进程替换：
+#     p="$(cpu_power_w)"  /  while read ... < <(cpu_pkg_busy_pct)
+#   两种都在**子 shell**里跑，函数里对 shell 全局的赋值出了子 shell 就没了
+#   （§11-25）。1.8.2 之前这三个函数就是把"上一次"存在全局里的，于是"上一次"
+#   永远停在父 shell 那次基准上 —— 每个点算出来的是"从压测开始到现在的平均值"。
+#   1.7.8 那台 6530 的功耗曲线因此前 14 分钟一条直线、计数器一回绕就塌到
+#   429 W 再每点爬 4 瓦，爬到测完都没回去。
+#
+# 这里搭一棵能改能量值的假 powercap，**全程用命令替换调**（就是现场那种调法），
+# 三次采样两段区间，两段的功耗差 10 倍 —— 算平均值的话第二段会被第一段拖高。
+export KLBURN_POWERCAP="$TMP/powercap-rate" KLBURN_STATE_DIR="$TMP/state"
+PC3="$KLBURN_POWERCAP"
+mkdir -p "$PC3/devices/intel-rapl/intel-rapl:0"
+ln -s "devices/intel-rapl/intel-rapl:0" "$PC3/intel-rapl:0"
+ln -s "devices/intel-rapl"              "$PC3/intel-rapl"
+EUJ="$PC3/devices/intel-rapl/intel-rapl:0/energy_uj"
+echo 262143328850 > "$PC3/devices/intel-rapl/intel-rapl:0/max_energy_range_uj"
+
+echo 0 > "$EUJ"
+check "第一次调用只记基准，不给数字" "" "$(cpu_power_w)"
+sleep 1; echo 100000000 > "$EUJ"      # 1 秒里烧了 100 J -> 100 W
+w1="$(cpu_power_w)"
+sleep 1; echo 110000000 > "$EUJ"      # 再 1 秒只烧了 10 J -> 10 W
+w2="$(cpu_power_w)"
+
+[[ "$w1" =~ ^[0-9]+$ ]] && (( w1 >= 80 && w1 <= 120 )) \
+  && ok "第一段 100 W 左右（实际 $w1）" \
+  || bad "第一段 100 W 左右" "80~120" "$w1"
+# ★ 这条才是关键：算平均值的话这里会是 55 W 上下，而不是 10 W
+[[ "$w2" =~ ^[0-9]+$ ]] && (( w2 >= 5 && w2 <= 30 )) \
+  && ok "第二段是**这一段**的瞬时值，不是从基准算起的平均值（实际 $w2）" \
+  || bad "第二段是这一段的瞬时值，不是平均值" "5~30（平均值会是 55 上下）" "$w2"
+
+unset KLBURN_POWERCAP KLBURN_STATE_DIR
+
+# 结构性守卫：这三个函数一律走 sample_state_file，谁都不许再把上一次的读数
+# 放回 shell 全局里 —— 放回去了上面那条断言未必抓得到（父 shell 打过基准时
+# 平均值和瞬时值在满载下很接近），但曲线一定是错的。
+for fn in cpu_power_w cpu_pkg_busy_pct disk_io_rates; do
+  body="$(declare -f "$fn")"
+  case "$body" in
+    *sample_state_file*) ok "$fn 的上一次读数存在文件里（跨得过子 shell）" ;;
+    *) bad "$fn 的上一次读数存在文件里（跨得过子 shell）" "用 sample_state_file" "没用" ;;
+  esac
+done
 
 # ================================================================
 echo
@@ -1117,6 +1359,60 @@ check "开机日志只有正常噪声 -> PASS" "PASS" "$LAST_STATUS"
 rm -f "$RAW_DIR/dmesg-pre.txt"
 LAST_STATUS=""; verify_dmesg_boot
 check "没采到开机日志 -> SKIP（读不到数据不能当故障）" "SKIP" "$LAST_STATUS"
+
+# ---- 一张坏阵列卡不该被读成两处独立故障 ----
+# 同一张卡会在「阵列卡」和「开机内核日志复查」各判一次 FAIL，两条都对，
+# 但报告抬头写着"失败 2 项"。collect_raid 确认过卡有问题时，这里点一句。
+cp "$DMESG_BAD" "$RAW_DIR/dmesg-pre.txt"
+RAID_FAULT_FOUND=1
+LAST_STATUS=""; LAST_DETAIL=""; verify_dmesg_boot
+check "阵列卡已判故障时，这里要点出「是同一件事」" "1" \
+      "$(printf '%s' "$LAST_DETAIL" | grep -c '同一件事')"
+check "判定本身不受影响，照旧 FAIL" "FAIL" "$LAST_STATUS"
+
+# 反面一：collect_raid 没判故障（比如内核里压根没这张卡的驱动，§2-2 判 SKIP）
+# 时不许点这一句 —— 那会把"我们缺能力"说成"卡坏了"。
+RAID_FAULT_FOUND=0
+LAST_STATUS=""; LAST_DETAIL=""; verify_dmesg_boot
+check "阵列卡那项没判故障时，不许点「同一件事」" "0" \
+      "$(printf '%s' "$LAST_DETAIL" | grep -c '同一件事')"
+
+# 反面二：日志里的错误根本不是阵列卡那一类时也不许点 ——
+# 一台既有坏卡、又另外有内存 MCE 的机器会被说成"都是阵列卡的事"。
+printf '[Wed Nov 26 02:16:27 2025] mce: [Hardware Error]: Machine check events logged\n' \
+  > "$RAW_DIR/dmesg-pre.txt"
+RAID_FAULT_FOUND=1
+LAST_STATUS=""; LAST_DETAIL=""; verify_dmesg_boot
+check "日志里没有阵列卡那一类错误时，不许点「同一件事」" "0" \
+      "$(printf '%s' "$LAST_DETAIL" | grep -c '同一件事')"
+RAID_FAULT_FOUND=0
+
+# ================================================================
+echo
+echo "=== 硬盘温度：没跑硬盘压测时不许说成「压测结束时」 ==="
+# 现场 99% 会跳过硬盘压测（客户不让往盘里写破坏性数据）。这时候盘并没有被压过，
+# 写"压测结束时温度"会让客户以为我们烤过盘。CPU/内存那一轮照样跑了十几分钟、
+# 机箱确实热过，读数有意义，只是不能说成是硬盘压测的结果。
+RAW_DIR="$TMP/dtemp"; RUN_DIR="$TMP/dtemp"
+rm -rf "$RAW_DIR"; mkdir -p "$RAW_DIR/smart-pre" "$RAW_DIR/smart-post"
+SMART_TARGETS=("sda")
+printf '{"temperature_c":31,"smart_passed":true}\n' > "$RAW_DIR/smart-pre/sda.norm.json"
+printf '{"temperature_c":33,"smart_passed":true}\n' > "$RAW_DIR/smart-post/sda.norm.json"
+
+DISK_CONFIRMED=0
+LAST_STATUS=""; LAST_DETAIL=""; verify_disk_temp
+check "跳过了硬盘压测 -> 说「测试结束时」" "1" \
+      "$(printf '%s' "$LAST_DETAIL" | grep -c '测试结束时')"
+check "跳过了硬盘压测 -> 不许说「压测结束时」" "0" \
+      "$(printf '%s' "$LAST_DETAIL" | grep -c '压测结束时')"
+check "判定不受影响" "PASS" "$LAST_STATUS"
+
+DISK_CONFIRMED=1
+LAST_STATUS=""; LAST_DETAIL=""; verify_disk_temp
+check "真跑了硬盘压测 -> 照旧说「压测结束时」" "1" \
+      "$(printf '%s' "$LAST_DETAIL" | grep -c '压测结束时')"
+DISK_CONFIRMED=0
+SMART_TARGETS=()
 
 # ================================================================
 echo

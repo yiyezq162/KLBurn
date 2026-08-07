@@ -427,6 +427,11 @@ raid_bmc_note() {
 # build/chroot-setup.sh 的 VENDOR_RAID_TOOLS 各加一行、再补一个 case 分支即可。
 RAID_TOOL_ORDER=(perccli64 ssacli sas3ircu)
 
+# collect_raid 判出"卡在总线上但驱动没能接管"（= 卡有问题）时置 1。
+# verify_dmesg_boot 用它把"开机日志里那串阵列卡固件故障"和「阵列卡」那一项
+# 挂上钩，省得客户把同一件事读成两处独立故障。
+RAID_FAULT_FOUND=0
+
 # raid_tool_run <工具名> -> 0 = 这张卡它认得（原始输出已落 raw/raid/）
 #
 # 判据只问一件事："它到底看没看到控制器"。看不到有两种可能——没装卡、
@@ -581,6 +586,12 @@ collect_raid() {
       ub_model="$(printf '%s' "$unbound" | head -1 | cut -f2)"
       # 开机日志里通常有对应的固件故障链，有就指过去，那份更能说明问题
       [[ -s "$RAW_DIR/dmesg-errors-boot.txt" ]] && ub_ref="raw/dmesg-errors-boot.txt"
+      # 同一张坏卡通常在开机内核日志里也留了一串固件故障，「开机内核日志复查」
+      # 会各自判一次 FAIL。两条都对，但客户看到的是"失败 2 项"——像两处独立故障。
+      # 立个标志，让 verify_dmesg_boot 在文案里点一句"是同一件事"。
+      # 两个函数都在 collect_all 里、同一个 shell 跑（不是子 shell，§11-25），
+      # 而且 collect_raid 排在 verify_dmesg_boot 前面（test-hw-checks 钉着调用顺序）。
+      RAID_FAULT_FOUND=1
       result_add "collect_raid" "阵列卡" "$ST_FAIL" \
         "检测到阵列卡：${ub_model:-${raid_model:-见原始记录}}。\
 该卡在系统中可见，但**驱动未能接管它**（本机已带有该型号的驱动），因此这张卡当前不可用，\
@@ -798,9 +809,14 @@ dmi_psu_list() {
   awk 'BEGIN{RS="";FS="\n"}
     function junk(s) {
       s = tolower(s); gsub(/^[ \t]+|[ \t]+$/, "", s)
+      # <bad index> / <out of spec> 是 dmidecode 自己打的"这条读不出来"标记
+      # （BIOS 把字符串下标填到了字符串表外面）。Supermicro X11DPG-QT 的两路
+      # 电源就是四个身份字段全是 <BAD INDEX> —— 那是没填，不是填了个型号。
+      # 这份名单要和 report/generate_report.py 的 BOGUS 保持一致。
       return (s == "" || s == "to be filled by o.e.m." || s == "not specified" \
               || s == "default string" || s == "unknown" || s == "n/a" \
-              || s == "none" || s == "not present" || s == "o.e.m.")
+              || s == "na" || s == "none" || s == "not present" || s == "o.e.m." \
+              || s == "<bad index>" || s == "<out of spec>" || s == "-")
     }
     /System Power Supply/ {
       loc=""; st=""; cap=""; capseen=0; idseen=0; idreal=0
@@ -846,6 +862,61 @@ psu_ac_state() {
   fi
 }
 
+# 同一件事的第二个来源：BMC 的**离散量**电源状态传感器 -> present | absent | unknown
+#
+# 不是所有 BMC 都提供 `PSU1_Vin` 这种数值传感器。Supermicro X11DPG-QT 就只有
+# 离散量，于是 1.8.2 的报告里「交流输入」那一列整列是破折号 —— 而
+# `ipmi-sdr.txt` 里其实一直写着答案，只是没人读：
+#
+#   PSU1_Status | BFh | ok | 10.8  | Presence detected, Failure detected, Power Supply AC lost
+#   PSU2_Status | C7h | ok | 10.16 | Presence detected
+#   PS1 Status  | C4h | ok | 10.92 | Presence detected
+#   PSU3_Status | 57h | ns | 10.24 | No Reading
+#
+# 最后一栏是 IPMI 规范里 Power Supply（传感器类型 08h）已置位的事件位：
+#   offset 0 Presence detected
+#   offset 1 Power Supply Failure detected
+#   offset 3 Power Supply input lost (AC/DC)
+#   offset 4 Power Supply input lost or out-of-range
+#   offset 5 Power Supply input out-of-range, but present
+# 一路好电源只置 offset 0；掉了交流会连带置 3/4。
+#
+# ⚠️ 三件事必须按这个顺序判，顺序换了就会读反：
+#   1. 先看有没有 "lost" —— offset 3/4 的文本里都有它，而 offset 5
+#      （"out-of-range, **but present**"）里没有。**别拿 out-of-range 当判据**，
+#      offset 5 的意思是"电进来了，只是不在标称范围内"，判成"没进电"是错的。
+#   2. 整串做子串匹配，**不要按逗号切** —— offset 5 的名字本身就含逗号
+#      （`Power Supply input out-of-range, but present`），切完两边都不成句。
+#   3. 剩下的只有置了 Presence detected 才算 present；`No Reading` /
+#      `Disabled` / 空的一律 unknown（读不到 ≠ 没电，§2-2）。
+psu_ac_state_sdr() {
+  local idx="$1" f="${2:-$RAW_DIR/ipmi-sdr.txt}"
+  [[ -f "$f" ]] || { printf 'unknown'; return; }
+
+  local line st
+  # 常见命名：PSU1_Status / PS1 Status / PSU 1 Status
+  # 编号后面必须紧跟分隔符或 "Status"，否则 idx=1 会命中 PSU11_Status
+  line="$(grep -iE "^[[:space:]]*(PSU|PS)_?[[:space:]]*${idx}[[:space:]_-]*Status[[:space:]]*\|" \
+          "$f" 2>/dev/null | head -1)"
+  [[ -n "$line" ]] || { printf 'unknown'; return; }
+
+  # 最后一栏是状态串
+  st="$(awk -F'|' '{s=$NF; gsub(/^[[:space:]]+|[[:space:]]+$/,"",s); print tolower(s)}' <<<"$line")"
+  if   [[ "$st" == *lost* ]];               then printf 'absent'
+  elif [[ "$st" == *"presence detected"* ]]; then printf 'present'
+  else                                            printf 'unknown'
+  fi
+}
+
+# 两个来源合并 -> present | absent | unknown
+# 数值传感器优先（那是直接量出来的），读不到才退到离散量。
+psu_ac_state_any() {
+  local idx="$1" fs="${2:-$RAW_DIR/ipmi-sensors.txt}" fd="${3:-$RAW_DIR/ipmi-sdr.txt}" a
+  a="$(psu_ac_state "$idx" "$fs")"
+  [[ "$a" == "unknown" ]] || { printf '%s' "$a"; return; }
+  psu_ac_state_sdr "$idx" "$fd"
+}
+
 # 电源在位与供电检查。
 #
 # 只接了一半电源线在测试台上是常态，所以"没进电"判 WARN 而不是 FAIL；
@@ -888,7 +959,7 @@ check_psu() {
     sel_psu="$(count_lines "$RAW_DIR/ipmi-sel-psu.txt")"
   fi
 
-  local total=0 present=0 idx=0
+  local total=0 present=0 idx=0 ac_read=0
   local noac=() broken=() suspect=()
   for line in "${psus[@]}"; do
     idx=$((idx+1))
@@ -914,8 +985,14 @@ check_psu() {
     [[ "$st" == *"Present"* && "$st" != *"Not Present"* ]] || continue
     present=$((present+1))
 
-    local ac; ac="$(psu_ac_state "$n")"
-    dbg "psu $loc status='$st' ac=$ac"
+    # 两个来源：vin 是数值传感器（直接量出来的），sdr 是 BMC 的离散量事件位。
+    # 合并结果拿来判"这一路进没进电"，但**判 FAIL 只认 vin**（见下面）。
+    local vin ac
+    vin="$(psu_ac_state "$n")"
+    ac="$vin"
+    [[ "$ac" == "unknown" ]] && ac="$(psu_ac_state_sdr "$n")"
+    dbg "psu $loc status='$st' vin=$vin merged=$ac"
+    [[ "$ac" == "unknown" ]] || ac_read=1
 
     if [[ "$ac" == "absent" ]]; then
       noac+=("$loc")
@@ -926,7 +1003,14 @@ check_psu() {
       # 测试台上只接一半电源线是常态，而没有 BMC 的机器上 DMI 对"没插线"和
       # "模块坏了"报的都是 Present, Critical，光看 DMI 分不出来。
       # 这种情况下判 FAIL 会把一台好机器拦在出货前，属于误杀。
-      if [[ "$ac" == "present" ]]; then
+      #
+      # ⚠️ 这里卡的是 **vin**，不是合并后的 ac —— 离散量只是 BMC 的一句陈述
+      #    （"在位、没报输入丢失"），不是量出来的电压。拿它当 FAIL 的门槛，
+      #    等于把 FAIL 的证据标准放低了一档；这条判定的方向是"宁可漏，不可误杀"
+      #    （§2-2），门槛只能维持在 1.8.2 那个高度。
+      #    离散量的用处在上面那一支：它能把 absent **查出来**，那是新增的检出能力，
+      #    往 WARN 的方向走，安全。
+      if [[ "$vin" == "present" ]]; then
         broken+=("${loc}（${st}）")
       else
         suspect+=("${loc}（${st}）")
@@ -951,6 +1035,21 @@ check_psu() {
     result_add "check_psu" "电源" "$ST_WARN" \
       "共 ${present} 个电源模块在位，其中 ${noac[*]} 未检测到交流输入（未接电源线，或该路市电/线缆异常），\
 当前不具备电源冗余${sel_txt}" "$ref"
+  elif (( ac_read == 0 )); then
+    # ⚠️ **一路交流输入都没读到的时候，不许写"交流输入正常"。**
+    # 原来这里和"逐路都读到了"共用一句 PASS 文案，报告于是自相矛盾：
+    # 判定文案写着「交流输入与模块状态均正常」，而同一份报告的电源表里
+    # 「交流输入」那一列**整列是破折号**。客户一问就露馅。
+    #
+    # 1.8.3 之后这一支已经很少走到了 —— 数值传感器读不到时还会退到 BMC 的
+    # 离散量（psu_ac_state_sdr）。走到这里说明**两个来源都没有**：
+    # 没有 BMC，或者 BMC 既没有 Vin 也没有 PSU Status 传感器。
+    #
+    # 判定照旧 PASS —— 读不到传感器是我们的能力缺失，不是这台机器的故障
+    # （§2-2）。只是话要说准：说得出口的只有"BIOS 报告模块都在位、状态正常"。
+    result_add "check_psu" "电源" "$ST_PASS" \
+      "共 ${present} 个电源模块在位，BIOS 报告的模块状态均正常；\
+本机 BMC 未提供各路交流输入传感器，未能逐路核对是否都进了电${sel_txt}" "$ref"
   else
     result_add "check_psu" "电源" "$ST_PASS" \
       "共 ${present} 个电源模块在位，交流输入与模块状态均正常${sel_txt}" "$ref"
@@ -1427,6 +1526,13 @@ collect_deep() {
   capture -t 20 "deep/msr-power.txt" rdmsr -a 0x611
   capture -t 20 "deep/msr-tjmax.txt" rdmsr -a 0x1a2
   capture -t 20 "deep/msr-pkg-power-limit.txt" rdmsr 0x610
+
+  # ---- RAPL 功耗域清单 ----
+  # 报告里那条封装功耗曲线读的就是这些目录。1.8.2 之前同一个 package 域被
+  # 两条路径各算了一遍，功耗整整翻倍（见 lib/core.sh 的 rapl_pkg_zones），
+  # 事后完全没法从 run-dir 里复核 —— 因为盘里根本没留过这棵树长什么样。
+  # 留一份，下次再有人怀疑功耗数字就有得对。
+  capture -t 10 "deep/powercap-tree.txt" ls -l /sys/class/powercap/
 
   # ---- 迈络思网卡的固件版本 / PSID ----
   # ethtool -i 在 mlx5 上给的固件版本串信息量很少，mstflint 才有 PSID 和 PXE 版本。

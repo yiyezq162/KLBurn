@@ -348,6 +348,15 @@ for entry in "${VENDOR_RAID_TOOLS[@]}"; do
     if [[ -n "$needed" ]]; then
       # 变量名别叫 missing —— 上面 need_cmds() 里 missing 是个数组局部变量，
       # 同名会让 shellcheck 报 SC2178（用作数组的变量又被赋成字符串）。
+      # ⚠️ `ldconfig -p` 只跑**一次**，结果存下来再逐个比。
+      #    原来是在循环里每个库跑一次（7 次），而 ldconfig 更新缓存是
+      #    "写临时文件再 rename"，正好撞上那一瞬间就会读到空的一份 ——
+      #    表现是随机一个库被判成"缺"、构建停下，而那个库明明就在盘里。
+      #    实测撞到过一次（librt.so.1，同一份 rootfs 前两次构建都是好的）。
+      #    读空了要当场说清楚是"没读到缓存"，不能顺势报成"库都缺了"。
+      ldcache="$(ldconfig -p 2>/dev/null | awk 'NR>1{print $1}')"
+      [[ -n "$ldcache" ]] \
+        || fail "chroot 里读不到 ldconfig 缓存，没法自检 $vname 的依赖库"
       miss_libs=""
       while IFS= read -r lib; do
         [[ -n "$lib" ]] || continue
@@ -355,8 +364,7 @@ for entry in "${VENDOR_RAID_TOOLS[@]}"; do
         #       \tlibc.so.6 (libc6,x86-64) => /lib/x86_64-linux-gnu/libc.so.6
         #    第一版写的 `grep -qF " $lib "` 一个都匹配不上，于是**每个库都被判成缺**，
         #    构建当场停在这儿。取第一个字段再整词比，别再拿子串去猜。
-        ldconfig -p 2>/dev/null | awk '{print $1}' | grep -qxF "$lib" \
-          || miss_libs="$miss_libs $lib"
+        grep -qxF "$lib" <<< "$ldcache" || miss_libs="$miss_libs $lib"
       done <<< "$needed"
       if [[ -n "$miss_libs" ]]; then
         fail "$vname 是动态链接的，但盘里缺这些库：$miss_libs
