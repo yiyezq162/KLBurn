@@ -442,6 +442,7 @@ raid_tool_run() {
       capture -t 90 "raid/${t}-show.txt"   "$bin" /call show all
       capture -t 90 "raid/${t}-pdlist.txt" "$bin" /call/eall/sall show all
       capture -t 90 "raid/${t}-vd.txt"     "$bin" /call/vall show all
+      capture -t 90 "raid/${t}-enclosure.txt" "$bin" /call/eall show all
       grep -qiE 'Controller = [0-9]|Product Name' "$RAW_DIR/raid/${t}-show.txt" 2>/dev/null
       ;;
     arcconf)
@@ -467,6 +468,54 @@ raid_tool_run() {
   esac
 }
 
+# raid_unbound_devices <lspci-vv 文件> -> 每行 "<BDF>\t<型号>"
+#
+# 挑出**驱动本该管得了、却没管上**的阵列卡 / HBA。
+#
+# 1.8.1 现场那台 Supermicro（Montage Jintide C5218R）逼出来的：
+# 一张 MegaRAID SAS-3 3108 固件挂在 FAULT state，驱动连试两次都没能接管，
+# 整张卡不可用、后面的盘一块都看不到 —— 而「阵列卡」那一项报的是
+#   SKIP  ...未读取固件版本与逻辑盘状态（当前测试环境的管理工具不支持该型号）
+# 把**一张坏卡**说成了**我们的工具不行**，还附赠一句"此项不影响整机结论"。
+#
+# 这是 §2-2 那条红线的反面，而且更危险：「能力缺失 ≠ 硬件故障」要防的是
+# 误伤好机器，**反过来把硬件故障粉饰成能力缺失，是把坏机器放出厂**。
+#
+# 判据要两条同时成立，缺一不可：
+#   有 "Kernel modules: xxx"     内核里确实带了这张卡的驱动
+#   没有 "Kernel driver in use"  但它没能接管这张卡
+#
+# 为什么必须两条都要：
+#   - 两条都没有 = 内核里压根没有这张卡的驱动。那是**我们**的能力缺失，
+#     判故障就是把好卡说成坏卡，正是 §2-2 要挡的那种误判。
+#   - 有 driver in use = 驱动接管了，只是管理工具读不到详情 -> 那才是工具的事，
+#     照旧 SKIP。
+#
+# 抽成纯函数以便脱机回归，见 tests/test-hw-checks.sh
+raid_unbound_devices() {
+  local f="${1:-}"
+  [[ -f "$f" ]] || return 0
+  awk '
+    function flush() {
+      if (bdf != "" && israid && mods && !inuse) printf "%s\t%s\n", bdf, name
+    }
+    # 设备块开头形如 "86:00.0 Serial Attached SCSI controller [0107]: Broadcom ..."
+    # 域号可有可无（0000:86:00.0），两种都要认。
+    /^([0-9a-fA-F]{4}:)?[0-9a-fA-F]{2}:[0-9a-fA-F]{2}\.[0-9a-fA-F] / {
+      flush()
+      bdf = $1; israid = 0; mods = 0; inuse = 0
+      israid = ($0 ~ /RAID bus controller|Serial Attached SCSI controller/)
+      name = $0
+      sub(/^[^ ]+ [^:]*: /, "", name)              # 去掉 BDF 和类别
+      sub(/ \[[0-9a-fA-F]{4}:[0-9a-fA-F]{4}\].*$/, "", name)   # 去掉厂商:设备 ID 及其后
+      next
+    }
+    /Kernel driver in use:/ { inuse = 1 }
+    /Kernel modules:/       { mods  = 1 }
+    END { flush() }
+  ' "$f" 2>/dev/null
+}
+
 collect_raid() {
   info "Collecting RAID controller info ..."
 
@@ -488,6 +537,9 @@ collect_raid() {
     capture -t 90 "storcli-pdlist.txt"   "$KLB_TOOLS/storcli64" /call/eall/sall show all
     capture -t 90 "storcli-vd.txt"       "$KLB_TOOLS/storcli64" /call/vall show all
     capture -t 90 "storcli-events.txt"   "$KLB_TOOLS/storcli64" /call show events type=latest=50
+    # 背板（机框）：这条给的是**每个背板有几个盘位**（Number of Slots）。
+    # 只进内部报告，用来回档"这台机器当初是 12 盘位还是 4 盘位×3"。
+    capture -t 90 "storcli-enclosure.txt" "$KLB_TOOLS/storcli64" /call/eall show all
     if grep -qiE 'Controller = [0-9]|Product Name' "$RAW_DIR/storcli-show.txt" 2>/dev/null; then
       hit=1; ref="raw/storcli-show.txt"
     fi
@@ -518,6 +570,31 @@ collect_raid() {
     # 型号是从 PCI 反查的，一样准确，客户关心的"这台机器装了什么卡"照常有。
     local raid_model
     raid_model="$(printf '%s' "$raid_pci" | head -1 | sed -E 's/^[0-9a-f:.]+ [^:]+: //; s/ \[[0-9a-f]{4}:[0-9a-f]{4}\].*$//')"
+
+    # 读不到详情有两种完全不同的原因，判定和文案都不能混：
+    #   驱动没能接管这张卡 -> 卡本身有问题，判 FAIL
+    #   驱动接管了、只是没有对得上的管理工具 -> 我们的能力缺失，判 SKIP
+    local unbound; unbound="$(raid_unbound_devices "$RAW_DIR/lspci-vv.txt")"
+    if [[ -n "$unbound" ]]; then
+      local ub_n ub_model ub_ref="raw/lspci-vv.txt"
+      ub_n="$(printf '%s\n' "$unbound" | grep -c .)"
+      ub_model="$(printf '%s' "$unbound" | head -1 | cut -f2)"
+      # 开机日志里通常有对应的固件故障链，有就指过去，那份更能说明问题
+      [[ -s "$RAW_DIR/dmesg-errors-boot.txt" ]] && ub_ref="raw/dmesg-errors-boot.txt"
+      result_add "collect_raid" "阵列卡" "$ST_FAIL" \
+        "检测到阵列卡：${ub_model:-${raid_model:-见原始记录}}。\
+该卡在系统中可见，但**驱动未能接管它**（本机已带有该型号的驱动），因此这张卡当前不可用，\
+挂在它后面的硬盘在操作系统里也看不到。常见原因是阵列卡固件异常或卡本身故障，\
+建议检修或更换后复测。${ub_n:+（共 ${ub_n} 张卡处于此状态）}" \
+        "$ub_ref"
+      return
+    fi
+
+    # 卡在机器里、驱动也接管了，只是盘里没有对得上的管理工具。
+    # 文案是给客户看的，不能出现"重新出盘""构建目录"这类只有开发者看得懂的话。
+    # 这一项**本来就只采集不压测**，读不到固件版本不代表机器有问题，
+    # 所以判 SKIP 而不是 WARN —— WARN 会在报告抬头单独列一块，
+    # 客户看到"告警"却发现只是少个管理工具，反而显得机器有毛病。
     result_add "collect_raid" "阵列卡" "$ST_SKIP" \
       "已识别阵列卡型号：${raid_model:-见原始记录}。\
 本次仅采集型号信息，未读取固件版本与逻辑盘状态（当前测试环境的管理工具不支持该型号）。\
@@ -614,6 +691,84 @@ collect_ipmi() {
   selcount="$(count_lines "$RAW_DIR/ipmi-sel-pre.txt")"
   result_add "collect_ipmi" "IPMI/BMC" "$ST_PASS" \
     "BMC 在线，已采集传感器读数；测前 SEL 共 ${selcount} 条" "raw/ipmi-sensors.txt"
+}
+
+# ---------------------------------------------------------------- 清 BMC 事件日志
+#
+# 现场诉求：机器拷完机之后，BMC 里往往还压着一堆装机阶段留下的报错
+# （拔插硬盘、电源没插好、反复上下电……）。那些事件跟这台机器出厂后的状态
+# 没关系，留着只会让客户开机一看 SEL 全是红的。
+#
+# ⚠️ 名字必须老老实实叫「事件日志(SEL)」，不能叫「所有日志」：
+#    IPMI 标准里能清的只有 SEL 这一个。不少厂商 BMC 另有独立的审计日志 /
+#    操作日志 / 诊断快照，那些要走各家私有接口或 Redfish，ipmitool 够不着。
+#    现场要是以为"点一下全清干净了"，反而会漏掉真正该清的地方。
+#
+# 只动日志，不动任何设置：`ipmitool sel clear` 就是清事件记录这一件事，
+# 网络配置、用户、传感器阈值、启动项一概不碰。
+#
+# **故意不放进自动流程**，只挂在收尾菜单上手动触发：
+# 清日志是不可逆的，而 SEL 恰恰是我们判定 verify_sel 的依据 ——
+# 自动清就等于把自己的证据先销毁掉。
+bmc_clear_sel() {
+  if ! have ipmitool; then
+    printf '  %sipmitool not available - cannot talk to the BMC.%s\n' "$C_YEL" "$C_RST"
+    return 1
+  fi
+
+  # 先确认 BMC 真的在，别让操作员对着一台没有 BMC 的机器等超时
+  if ! timeout 60 ipmitool mc info >/dev/null 2>&1; then
+    printf '  %sNo BMC detected on this machine (no IPMI interface).%s\n' "$C_YEL" "$C_RST"
+    return 1
+  fi
+
+  local before after
+  before="$(timeout 60 ipmitool sel list 2>/dev/null | grep -c .)"
+  [[ "$before" =~ ^[0-9]+$ ]] || before=0
+
+  printf '\n'
+  printf '  %s+----------------------------------------------------------+%s\n' "$C_YEL$C_BLD" "$C_RST"
+  printf '  %s|  CLEAR BMC EVENT LOG (SEL)                               |%s\n' "$C_YEL$C_BLD" "$C_RST"
+  printf '  %s+----------------------------------------------------------+%s\n' "$C_YEL$C_BLD" "$C_RST"
+  printf '  Entries currently in the SEL : %s%s%s\n' "$C_BLD" "$before" "$C_RST"
+  printf '  This erases the BMC EVENT LOG ONLY.\n'
+  printf '  BMC settings (network, users, thresholds) are %sNOT%s touched.\n' "$C_BLD" "$C_RST"
+  printf '  %sThis cannot be undone.%s\n' "$C_RED$C_BLD" "$C_RST"
+  printf '  %sNote: vendor-specific audit/operation logs are not covered by IPMI.%s\n\n' "$C_GRY" "$C_RST"
+
+  # 和硬盘破坏性写用同一道门槛：必须原样打出 yes。
+  # 打错 / 直接回车 / 超时，一律当成不清。
+  local answer=""
+  if ! read_line_countdown answer 60 "  Type yes to clear the SEL >"; then
+    printf '  %sNo input - SEL left untouched.%s\n' "$C_GRY" "$C_RST"
+    return 1
+  fi
+  local norm="${answer//[[:space:]]/}"
+  if [[ "${norm,,}" != "yes" ]]; then
+    printf '  %sNot confirmed - SEL left untouched.%s\n' "$C_GRY" "$C_RST"
+    return 1
+  fi
+
+  printf '  Clearing ...\n'
+  if ! timeout 120 ipmitool sel clear >/dev/null 2>&1; then
+    printf '  %sSEL clear command failed (BMC refused or timed out).%s\n' "$C_RED" "$C_RST"
+    return 1
+  fi
+
+  # BMC 清 SEL 是异步的，清完立刻读往往还是旧数字。等一下再复核。
+  sleep 3
+  after="$(timeout 60 ipmitool sel list 2>/dev/null | grep -c .)"
+  [[ "$after" =~ ^[0-9]+$ ]] || after=0
+
+  if (( after == 0 )); then
+    printf '  %sSEL cleared: %s entries -> 0.%s\n' "$C_GRN$C_BLD" "$before" "$C_RST"
+    return 0
+  fi
+  # 清了但没清空：有些 BMC 会立刻补一条"SEL 被清空"的记录，那是正常的。
+  printf '  %sSEL now has %s entries (was %s).%s\n' "$C_YEL" "$after" "$before" "$C_RST"
+  printf '  %sSome BMCs immediately log a "Log Area Reset" entry - that is normal.%s\n' \
+    "$C_GRY" "$C_RST"
+  return 0
 }
 
 # ---------------------------------------------------------------- 电源
@@ -1283,10 +1438,17 @@ collect_deep() {
 
   # ---- 机框 / 背板（SES）----
   # 盘位、风扇、温度、电源在背板上的状态。存储机上这份最值钱。
+  #
+  # 两页都要，缺一不可：
+  #   -p es (enclosure status)        每个元件当下的状态
+  #   -p cf (configuration)           背板**有几个盘位**、厂商型号
+  # 「几盘位」这个数只在 cf 页里（"number of possible elements"），
+  # es 页给不出来。内部报告的背板一节就是靠 cf 页出的。
   local ses
   while read -r ses; do
     [[ -n "$ses" ]] || continue
-    capture -t 30 "deep/sg_ses-$(basename "$ses").txt" sg_ses -p es "$ses"
+    capture -t 30 "deep/sg_ses-$(basename "$ses").txt"    sg_ses -p es "$ses"
+    capture -t 30 "deep/sg_ses-cf-$(basename "$ses").txt" sg_ses -p cf "$ses"
   done < <(lsscsi -g 2>/dev/null | awk '/enclosu/{print $NF}' | head -8)
 
   # ---- NVMe 厂商扩展 SMART 页 ----

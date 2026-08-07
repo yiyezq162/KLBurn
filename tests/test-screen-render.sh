@@ -193,6 +193,58 @@ assert_width "GPU 分区（全空读数）" "$out" 80
 
 # ================================================================
 echo
+echo "=== 仪表盘：显卡掉线时不许再显示掉线前的缓存 ==="
+#
+# 1.8.0 现场实测：卡掉下总线之后，仪表盘**一直显示掉线那一刻的温度/功耗/
+# 利用率**，屏幕上看起来卡还在满载跑，现场完全看不出出了事。
+#
+# 根因：gpu_status_rows 原先把 `last=$1`（最新采样时刻）写在 NF>=8 的花括号里，
+# 而掉线后的行是 "14:07:55,No devices were found"（NF=2）—— 连时间戳都不看，
+# last 就永远停在最后一次成功采样上。
+GCSV="$TMP/gpu_metrics.csv"
+
+mk_gpu_csv() {   # mk_gpu_csv <好的轮数> <掉线的轮数>
+  local good="$1" lost="$2" i
+  echo "time,index,name,temp_c,power_w,clock_sm_mhz,util_pct,mem_used_mb" > "$GCSV"
+  for (( i = 0; i < good; i++ )); do
+    printf '10:%02d:00,0,NVIDIA GeForce RTX 5090,71,485,2542,100,28935\n' "$i" >> "$GCSV"
+  done
+  for (( i = 0; i < lost; i++ )); do
+    printf '11:%02d:00,No devices were found\n' "$i" >> "$GCSV"
+  done
+}
+
+mk_gpu_csv 5 0
+check "卡正常时读得到最新那轮" "1" "$(gpu_status_rows "$GCSV" | grep -c . || true)"
+check "卡正常时掉线轮数为 0" "0" "$(gpu_lost_rounds "$GCSV")"
+
+mk_gpu_csv 5 4
+check "卡掉线后一行都不返回（绝不能再吐掉线前的缓存）" "0" \
+      "$(gpu_status_rows "$GCSV" | grep -c . || true)"
+check "掉线轮数数得对" "4" "$(gpu_lost_rounds "$GCSV")"
+check "而且返回的不能是掉线前那条 485W 的旧读数" "0" \
+      "$(gpu_status_rows "$GCSV" | grep -c '485' || true)"
+
+# 抖动一两轮不算掉卡 —— 压测期间 nvidia-smi 偶尔读不到很正常，
+# 一闪一个红字反而会让现场以为是误报。
+mk_gpu_csv 5 1
+check "只丢 1 轮：算抖动，还没到报警线" "1" "$(gpu_lost_rounds "$GCSV")"
+mk_gpu_csv 5 2
+check "丢 2 轮：仍未到报警线（GPU_LOST_ROUNDS=3）" "2" "$(gpu_lost_rounds "$GCSV")"
+
+# 空文件 / 只有表头 / 文件不存在，一律不能算成掉卡
+echo "time,index,name,temp_c,power_w,clock_sm_mhz,util_pct,mem_used_mb" > "$GCSV"
+check "只有表头时不算掉卡" "0" "$(gpu_lost_rounds "$GCSV")"
+check "文件不存在时不算掉卡（无显卡的机器不该报警）" "0" "$(gpu_lost_rounds "$TMP/nope.csv")"
+
+# 掉线后又恢复：不算掉卡
+mk_gpu_csv 5 4
+printf '12:00:00,0,NVIDIA GeForce RTX 5090,70,480,2542,100,28935\n' >> "$GCSV"
+check "掉线后又恢复读到 -> 掉线轮数归零" "0" "$(gpu_lost_rounds "$GCSV")"
+check "恢复之后又能正常返回那一行" "1" "$(gpu_status_rows "$GCSV" | grep -c . || true)"
+
+# ================================================================
+echo
 echo "=== 仪表盘：硬盘分区与进度条 ==="
 
 DISKS="nvme0n1|1820|1650|412000|43
@@ -567,6 +619,76 @@ check "generate_report.py 不许往屏幕上打中文" "0" \
       "$(grep -o 'print(\"[^\"]*\"' "$RPT/generate_report.py" | LC_ALL=C grep -c '[^ -~]' || true)"
 check "generate_internal.py 不许往屏幕上打中文" "0" \
       "$(grep -o 'print(\"[^\"]*\"' "$RPT/generate_internal.py" | LC_ALL=C grep -c '[^ -~]' || true)"
+
+# ================================================================
+echo
+echo "=== 掉卡那一帧：整屏画出来是什么样 ==="
+#
+# 上面那组测的是数据源（gpu_status_rows / gpu_lost_rounds），这一组测的是
+# **真的整屏画一帧**出来对不对。分开测是有原因的：QEMU 里没有 NVIDIA 卡，
+# e2e 截图永远拍不到这一帧，所以只能在这里验。
+#
+# 而且这一帧改动了 body 的行数计算（多了"分隔线 + 一行红字"），
+# §11-11「每帧先数行数再画」——数错了就是整屏滚动、越刷越歪。
+GD="$TMP/dashgpu"; mkdir -p "$GD"
+RUN_DIR="$GD"
+mk_dash_csv() {   # mk_dash_csv <好的轮数> <掉线的轮数>
+  local good="$1" lost="$2" i
+  echo "time,index,name,temp_c,power_w,clock_sm_mhz,util_pct,mem_used_mb" > "$GD/gpu_metrics.csv"
+  for (( i = 0; i < good; i++ )); do
+    printf '10:%02d:00,0,NVIDIA GeForce RTX 5090,71,485,2542,100,28935\n' "$i" >> "$GD/gpu_metrics.csv"
+  done
+  for (( i = 0; i < lost; i++ )); do
+    printf '11:%02d:00,No devices were found\n' "$i" >> "$GD/gpu_metrics.csv"
+  done
+}
+
+mk_dash_csv 5 0
+FRAME_OK="$(dash_burn 80 QUICK 'BURN-IN  CPU + MEMORY + GPU' 60 600 | strip_ansi)"
+check "卡正常时这一帧里有那张卡的读数" "1" \
+      "$(printf '%s\n' "$FRAME_OK" | grep -c '485 W' || true)"
+check "卡正常时不许出现掉线红字" "0" \
+      "$(printf '%s\n' "$FRAME_OK" | grep -c 'NO RESPONSE' || true)"
+
+mk_dash_csv 5 4
+FRAME_LOST="$(dash_burn 80 QUICK 'BURN-IN  CPU + MEMORY + GPU' 60 600 | strip_ansi)"
+check "卡掉线后这一帧必须明说卡没了" "1" \
+      "$(printf '%s\n' "$FRAME_LOST" | grep -c 'NO RESPONSE' || true)"
+check "而且绝不能再出现掉线前那条 485W 的旧读数" "0" \
+      "$(printf '%s\n' "$FRAME_LOST" | grep -c '485 W' || true)"
+check "掉线那行要告诉现场去看报告" "1" \
+      "$(printf '%s\n' "$FRAME_LOST" | grep -c 'see report' || true)"
+assert_ascii "掉卡帧" "$FRAME_LOST"
+
+# 框线那部分必须还是齐的（大字标题本来就窄，不参与列宽断言）
+box_only() { printf '%s\n' "$1" | grep -E '^[|+]' ; }
+assert_width "掉卡帧的框线部分" "$(box_only "$FRAME_LOST")" 80
+assert_width "正常帧的框线部分" "$(box_only "$FRAME_OK")" 80
+
+# 行数：一张卡时，正常帧是「分隔 + 表头 + 1 行数据」= 3 行，
+# 掉卡帧是「分隔 + 1 行红字」= 2 行，所以正好少 1 行。
+# 这两个数必须和 dash_burn 里 body 的算法对得上（§11-11 每帧先数行数再画）——
+# 对不上就是整屏滚动、越刷越歪。
+check "掉卡帧比正常帧正好少 1 行（数据行换成红字行）" \
+      "$(( $(nlines "$FRAME_OK") - 1 ))" "$(nlines "$FRAME_LOST")"
+check "两帧都装得下（超出 ROWS 就会滚屏）" "yes" \
+      "$( (( $(nlines "$FRAME_OK") <= ROWS && $(nlines "$FRAME_LOST") <= ROWS )) \
+          && echo yes || echo no )"
+
+# 抖动一两轮时**不许**报掉卡，也不许把面板弄没 —— 那两轮仍然显示上一次读数
+mk_dash_csv 5 1
+FRAME_BLIP="$(dash_burn 80 QUICK 'BURN-IN  CPU + MEMORY + GPU' 60 600 | strip_ansi)"
+check "只丢 1 轮时不报掉卡（避免一闪一个红字）" "0" \
+      "$(printf '%s\n' "$FRAME_BLIP" | grep -c 'NO RESPONSE' || true)"
+assert_width "抖动帧的框线部分" "$(box_only "$FRAME_BLIP")" 80
+
+# 压根没有显卡的机器：既不该有 GPU 那块，也绝不该报掉卡
+rm -f "$GD/gpu_metrics.csv"
+FRAME_NOGPU="$(dash_burn 80 QUICK 'BURN-IN  CPU + MEMORY' 60 600 | strip_ansi)"
+check "无显卡的机器不许冒出掉卡红字" "0" \
+      "$(printf '%s\n' "$FRAME_NOGPU" | grep -c 'NO RESPONSE' || true)"
+assert_width "无显卡帧的框线部分" "$(box_only "$FRAME_NOGPU")" 80
+RUN_DIR="$TMP"
 
 # ---- 收尾那张逐项结果要上色（二十几行状态，黑白的话得逐行找 FAIL）----
 check "逐项结果列表按状态上色" "yes" \

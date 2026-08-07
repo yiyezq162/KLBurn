@@ -472,6 +472,61 @@ else
 fi
 
 # 默认输出路径必须落在 raw/ 里，且带 INTERNAL_ 前缀 —— 这是防误发的关键
+echo
+echo "=== 硬盘背板：只进内部报告，拿不到就说拿不到 ==="
+#
+# 现场诉求是"日后好回档：这台当初是 12 盘位还是 4 盘位×3"。
+# 明确只放内部报告 —— 这个数拿不准时给客户看会被当成缺件
+#（客户买的是 8 盘位机箱，报告写 4 盘位，解释不清）。
+BP="$TMP/run-backplane"
+mkdir -p "$BP/raw/deep"
+cp "$RD/meta.json" "$BP/meta.json"
+cp "$RD/results.jsonl" "$BP/results.jsonl" 2>/dev/null || true
+# storcli /cX/eall show all 的真实版式
+cat > "$BP/raw/storcli-enclosure.txt" <<'EOF'
+CLI Version = 007.2705.0000.0000 August 24, 2023
+Controller = 0
+Status = Success
+
+Enclosure /c0/e252 :
+==================
+
+Information :
+===========
+Device ID = 252
+Number of Slots = 12
+Number of Power Supplies = 2
+Number of PDs = 8
+Enclosure Type = SES
+Vendor Identification = LSI
+Product Identification = SAS3x40
+EOF
+OUTBP="$TMP/internal-backplane.html"
+if python3 "$GEN" --run-dir "$BP" --out "$OUTBP" >/dev/null 2>"$TMP/errbp"; then
+  has "$OUTBP" "硬盘背板"     "内部报告要有背板一节"
+  has "$OUTBP" "12 盘位 x1"   "汇总成一句话，回档时一眼看到"
+  has "$OUTBP" "SAS3x40"      "背板型号"
+  # 客户报告那份**绝不能**出现背板
+  OUTCUST="$TMP/cust-backplane.html"
+  python3 "$(dirname "$GEN")/generate_report.py" --run-dir "$BP" --out "$OUTCUST" >/dev/null 2>&1
+  has_no "$OUTCUST" "硬盘背板"   "交付报告里不许出现背板一节"
+  has_no "$OUTCUST" "12 盘位"    "也不许出现盘位数"
+else
+  bad "带背板的内部报告没能生成：$(cat "$TMP/errbp")"
+fi
+
+# 拿不到背板信息时要老老实实说"未检测到"，不许猜一个数出来
+BPN="$TMP/run-nobackplane"
+mkdir -p "$BPN/raw/deep"
+cp "$RD/meta.json" "$BPN/meta.json"
+OUTBPN="$TMP/internal-nobackplane.html"
+if python3 "$GEN" --run-dir "$BPN" --out "$OUTBPN" >/dev/null 2>&1; then
+  has "$OUTBPN" "未检测到背板信息" "直连背板本来就不上报，这不是故障"
+  has_no "$OUTBPN" "盘位 x"        "拿不到就不许编一个盘位数出来"
+else
+  bad "无背板场景的内部报告没能生成"
+fi
+
 DEF="$TMP/defaultout"; mkdir -p "$DEF"
 cp "$RD/meta.json" "$DEF/meta.json"
 python3 "$GEN" --run-dir "$DEF" >/dev/null 2>&1

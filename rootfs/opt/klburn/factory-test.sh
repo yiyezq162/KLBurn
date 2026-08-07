@@ -352,6 +352,31 @@ else
   warn "Internal engineering report failed (customer report is unaffected)."
 fi
 
+# ---------------------------------------------------------------- 报告转 PDF
+# 客户拿 PDF 转发/归档比 HTML 方便。两份各出一份，和各自的 .html 同目录。
+#
+# **纯附加，失败绝不能影响已经生成好的 HTML**：HTML 才是判定结论的载体，
+# PDF 只是同一份内容换个封装。所以每一条都单独 warn、不中断、不改 OVERALL。
+render_pdf() {
+  local src="$1" dst="$2" what="$3"
+  [[ -f "$src" ]] || return 1
+  if ! have weasyprint; then
+    dbg "weasyprint not present - skipping PDF for $what"
+    return 1
+  fi
+  # 一份 120 页的报告实测 9 秒；给到 300 秒是留给慢 CPU 的余量。
+  # 转换只读本地文件，不联网（报告本身没有任何外链资源）。
+  if timeout 300 weasyprint "$src" "$dst" >/dev/null 2>&1 && [[ -s "$dst" ]]; then
+    ok "$what PDF: $dst"
+    return 0
+  fi
+  warn "$what PDF conversion failed - the HTML report is unaffected."
+  rm -f "$dst" 2>/dev/null || true
+  return 1
+}
+render_pdf "$REPORT_HTML"   "${REPORT_HTML%.html}.pdf"   "Report"   || true
+render_pdf "$INTERNAL_HTML" "${INTERNAL_HTML%.html}.pdf" "Internal" || true
+
 sync
 
 # ---------------------------------------------------------------- 总结
@@ -397,6 +422,7 @@ hr
 printf '  Serial      : %s\n' "$SERIAL"
 printf '  Profile     : %s (%s)\n' "$DURATION_PROFILE" "$(fmt_dur "$TEST_ELAPSED")"
 printf '  Report      : %s\n' "$REPORT_HTML"
+[[ -s "${REPORT_HTML%.html}.pdf" ]] && printf '  Report (PDF): %s\n' "${REPORT_HTML%.html}.pdf"
 printf '  Raw data    : %s/\n' "$RUN_DIR"
 # 屏幕上明确区分这两份，免得现场把内部那份一起发出去
 printf '  %sInternal    : raw/INTERNAL_%s.html  (engineering copy - do NOT send out)%s\n' \
@@ -426,6 +452,9 @@ unmount_data_partition
 hr
 printf '  %s[r]%s reboot    %s[p]%s power off    %s[s]%s shell (debug)    %s[t]%s run test again\n' \
   "$C_BLD" "$C_RST" "$C_BLD" "$C_RST" "$C_BLD" "$C_RST" "$C_BLD" "$C_RST"
+# 清 BMC 事件日志。放在报告已经落盘之后，而且只手动触发 ——
+# SEL 是 verify_sel 的判定依据，自动清等于先把证据销毁。
+printf '  %s[c]%s clear BMC event log (SEL only - settings untouched)\n' "$C_BLD" "$C_RST"
 hr
 while :; do
   printf '  Choice > '
@@ -436,6 +465,7 @@ while :; do
     p|P) systemctl poweroff; exit 0 ;;
     s|S) printf '  Dropping to shell. Type "exit" to return.\n'; /bin/bash -i ;;
     t|T) exec "$0" ;;
+    c|C) bmc_clear_sel || true ;;
     *)   printf '  Unknown option.\n' ;;
   esac
 done

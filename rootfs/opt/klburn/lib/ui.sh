@@ -397,7 +397,18 @@ console_quiet_off() {
 gpu_status_rows() {
   local csv="${1:-${RUN_DIR:-}/gpu_metrics.csv}"
   [[ -s "$csv" ]] || return 0
-  awk -F, 'NR>1 && NF>=8 { last=$1; rows[++n]=$0 }
+  # ⚠️ `last=$1` 必须在 **NF>=8 之外**取。
+  #
+  # 1.8.0 现场实测：卡掉线之后 nvidia-smi 每次只吐一句
+  # "14:07:55,No devices were found"（NF=2），原先那版把 last 写在 NF>=8 的
+  # 花括号里，于是这些行连时间戳都不看一眼 —— last 永远停在**掉线前最后一次
+  # 成功采样**的时刻，仪表盘就一直显示那一刻的温度/功耗/利用率，
+  # 屏幕上看起来卡还在满载跑。**现场看到的是一份缓存，而且没有任何提示。**
+  #
+  # 改成每一行都更新 last：卡掉了之后最新时刻没有任何有效行，这里就返回空，
+  # 由调用方去画"卡掉了"，而不是继续画旧数。
+  awk -F, 'NR>1 { last=$1 }
+           NR>1 && NF>=8 { rows[++n]=$0 }
            END {
              for (i = 1; i <= n; i++) {
                split(rows[i], c, ",")
@@ -406,6 +417,34 @@ gpu_status_rows() {
              }
            }' "$csv" 2>/dev/null
 }
+
+# gpu_lost_rounds [csv] -> 末尾连续有多少轮采样一张卡都没读到
+#
+# 一轮 = 一个采样时刻（同一个时间戳可能有多行，多卡机器每卡一行）。
+# 返回 0 表示最新那轮是好的。
+#
+# 为什么要"连续 N 轮"而不是"最新一轮不好就报"：压测期间 nvidia-smi 偶尔
+# 一次读不到不代表卡掉了，一闪一个红字反而会让现场以为是误报。
+# 连续 3 轮（采样间隔 5s，约 15 秒）没有任何读数，那就不是抖动了。
+gpu_lost_rounds() {
+  local csv="${1:-${RUN_DIR:-}/gpu_metrics.csv}" n
+  [[ -s "$csv" ]] || { printf '0'; return; }
+  n="$(awk -F, '
+        NR>1 {
+          t = $1
+          if (t != prev) { order[++m] = t; prev = t }
+          if (NF >= 8) ok[t] = 1
+        }
+        END {
+          c = 0
+          for (i = m; i >= 1; i--) { if (order[i] in ok) break; c++ }
+          printf "%d", c
+        }' "$csv" 2>/dev/null)"
+  [[ "$n" =~ ^[0-9]+$ ]] || n=0
+  printf '%s' "$n"
+}
+# 连续多少轮没读数就在屏幕上报"卡掉了"
+: "${GPU_LOST_ROUNDS:=3}"
 
 # 显存总量（MB），逐卡一行 "序号 总量"。开仪表盘时问一次就够了 —— 它不会变。
 GPU_MEM_TOTAL=""
@@ -582,10 +621,19 @@ dash_burn() {
   # 先数一遍除标题条以外要占几行，装不下就让标题条退成一行（见 brand_rows）。
   # 顶框+抬头+抬头下框 3，CPU 表头 1，分隔 1，MEMORY/NETWORK 2，
   # 底下 框+进度两行+框 4。
+  # 卡掉线时 gpu_data 是空的 —— 但**不能就这么让 GPU 那块整个消失**：
+  # 屏幕上少一块，现场只会以为"这台没显卡"，而不是"卡掉了"。
+  # 空数据 + 连续多轮读不到 = 明确画一行红字说卡没了。
+  local gpu_lost; gpu_lost="$(gpu_lost_rounds)"
+  local gpu_gone=0
+  [[ -z "$gpu_data" ]] && (( gpu_lost >= GPU_LOST_ROUNDS )) && gpu_gone=1
+
   local body=$(( 3 + 1 + $(_nlines "$cpu_data") + 1 + 2 + 4 ))
   if [[ -n "$gpu_data" ]]; then
     local ng; ng="$(_nlines "$gpu_data")"
     body=$(( body + 2 + (ng < DASH_GPU_MAX ? ng : DASH_GPU_MAX + 1) ))
+  elif (( gpu_gone == 1 )); then
+    body=$(( body + 2 ))          # 分隔线 + 那一行红字
   fi
   brand_fit "$body"
 
@@ -613,6 +661,11 @@ dash_burn() {
   if [[ -n "$gpu_data" ]]; then
     box_sep "$w"
     dash_gpu_rows "$w" "${gpu_data%$'\n'}"
+  elif (( gpu_gone == 1 )); then
+    box_sep "$w"
+    # 纯 ASCII：这块屏是 Linux 文本控制台，中文会变成一排方块。
+    box_row "$w" \
+      "  GPU      *** NO RESPONSE - card lost from the bus (see report) ***" bad
   fi
   box_rule "$w"
   dash_progress "$w" "$elapsed" "$total"

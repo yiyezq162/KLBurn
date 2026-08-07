@@ -423,6 +423,27 @@ LAST_STATUS=""
 verify_dmesg 2>/dev/null >/dev/null
 check "压测期间真出现 Machine Check -> FAIL" "FAIL" "$LAST_STATUS"
 
+# ---------------------------------------------------------------- 文案要走摘要
+# 上面几条只验状态。这一条验的是 verify_dmesg **真的用上了摘要函数** ——
+# 只测 dmesg_error_summary 本身是不够的：1.8.0 那次就是判定对了、
+# 而现场看到的文案还是「3018 条 + 一大串内核断言」。
+printf 'boot\n' > "$RAW_DIR/dmesg-pre.txt"
+{
+  printf 'boot\n'
+  for _ in $(seq 1 50); do
+    printf '[Thu Aug  6 14:08:00 2026] NVRM: GPU0 nvAssertOkFailedNoLog: Assertion failed: GPU lost from the bus [NV_ERR_GPU_IS_LOST] (0x0000000F) returned from _intrServiceStallCommonCheckBegin(pGpu, pIntr, &pOldContext) @ intr.c:1653\n'
+  done
+} > "$RAW_DIR/dmesg-post.txt"
+LAST_STATUS=""; LAST_DETAIL=""
+verify_dmesg 2>/dev/null >/dev/null
+check "同一条错误刷 50 遍 -> 仍然 FAIL" "FAIL" "$LAST_STATUS"
+check "文案要说这是同一个问题，不是 50 个" "1" \
+      "$(printf '%s' "$LAST_DETAIL" | grep -c '都指向同一个问题' || true)"
+check "文案要翻译成人话" "1" \
+      "$(printf '%s' "$LAST_DETAIL" | grep -c '从 PCIe 总线上掉线' || true)"
+check "文案里不许出现内核断言函数名（客户看不懂）" "0" \
+      "$(printf '%s' "$LAST_DETAIL" | grep -cE 'nvAssertOkFailedNoLog|intr\.c:|pOldContext' || true)"
+
 RAW_DIR="$TMP"; RUN_DIR="$TMP"
 
 # ================================================================
@@ -994,6 +1015,91 @@ printf '[Wed Nov 26 02:16:23 2025] Uhhuh. NMI received for unknown reason 3d on 
 dmesg_scan_hw_errors "$TMP/one.txt" "$TMP/one-hit.txt"
 check "真的 NMI 故障必须命中" "1" "$(count_lines "$TMP/one-hit.txt")"
 
+# ---- 设备中途掉下总线：必须命中，但不能牵连"驱动版本不支持这张卡" ----
+#
+# 1.7.8 现场那台 RTX 5090 开测 20 秒掉线，内核刷了 3019 行 "GPU lost from the
+# bus"，而当时这个模式里一个 NVIDIA 关键字都没有 —— 1.1MB 的 NVRM 报错命中数
+# 是 0，"内核日志复查"判 PASS，整机判 PASS 出厂。
+#
+# 又一次成对钉死。这一组的负样本尤其要紧：那几句是**我们带的驱动版本旧了**，
+# 判 FAIL 就是把好卡说成坏卡，踩的是"能力缺失 ≠ 硬件故障"那条红线。
+while IFS= read -r loss_line; do
+  printf '[Wed Nov 26 03:18:53 2025] %s\n' "$loss_line" > "$TMP/loss.txt"
+  dmesg_scan_hw_errors "$TMP/loss.txt" "$TMP/loss-hit.txt"
+  check "设备掉下总线必须命中: ${loss_line:0:56}" \
+        "1" "$(count_lines "$TMP/loss-hit.txt")"
+done <<'EOF'
+NVRM: GPU0 nvAssertOkFailedNoLog: Assertion failed: GPU lost from the bus [NV_ERR_GPU_IS_LOST] (0x0000000F) returned from _intrServiceStallCommonCheckBegin(pGpu, pIntr, &pOldContext) @ intr.c:1653
+NVRM: GPU0 nvCheckOkFailedNoLog: Check failed: GPU lost from the bus [NV_ERR_GPU_IS_LOST] (0x0000000F)
+pcieport 0000:97:01.0: device [10de:2b85] has fallen off the bus
+EOF
+
+while IFS= read -r mism_line; do
+  printf '[Wed Nov 26 02:16:37 2025] %s\n' "$mism_line" > "$TMP/mism.txt"
+  dmesg_scan_hw_errors "$TMP/mism.txt" "$TMP/mism-hit.txt"
+  check "驱动版本不匹配绝不许命中（我们的驱动旧了，不是客户的卡坏了）: ${mism_line:0:46}" \
+        "0" "$(count_lines "$TMP/mism-hit.txt")"
+done <<'EOF'
+NVRM: The NVIDIA GPU 0000:01:00.0 (PCI ID: 10de:2b85) installed in this system
+NVRM: is not supported by the NVIDIA 550.54.14 driver release.
+NVRM: is not supported by open nvidia.ko.
+NVRM: No NVIDIA GPU found.
+NVRM: The NVIDIA probe routine was not called for 1 device(s).
+NVRM: minimum required driver version is 550.00
+NVRM: loading NVIDIA UNIX Open Kernel Module for x86_64  595.84  Release Build
+EOF
+
+# ================================================================
+echo
+echo "=== 内核错误摘要：说人话，别把内核断言原文甩给客户 ==="
+#
+# 1.8.0 现场那台坏卡的报告上写的是：
+#   「压测期间内核日志出现 3018 条硬件错误。示例：[...] NVRM: GPU0
+#     nvAssertOkFailedNoLog: Assertion failed: GPU lost from the bus ...」
+# 两个毛病：「3018 条」读起来像 3018 个不同的毛病（其实是同一件事刷了 3018 遍），
+# 而且直接把内核断言贴给客户看。
+
+# 同一条错误重复几千遍 -> 必须说"这是一个问题"，而不是"3018 个"
+: > "$TMP/dig-same.txt"
+for _ in $(seq 1 200); do
+  printf '[Thu Aug  6 14:08:00 2026] NVRM: GPU0 nvAssertOkFailedNoLog: Assertion failed: GPU lost from the bus [NV_ERR_GPU_IS_LOST] (0x0000000F) returned from _intrServiceStallCommonCheckBegin(pGpu, pIntr, &pOldContext) @ intr.c:1653\n' >> "$TMP/dig-same.txt"
+done
+dig="$(dmesg_error_summary "$TMP/dig-same.txt" 200)"
+check "同一条刷屏 -> 归成 1 类" "1" \
+      "$(printf '%s' "$dig" | grep -c '都指向同一个问题' || true)"
+check "而且要翻译成人话（显卡掉总线）" "1" \
+      "$(printf '%s' "$dig" | grep -c '从 PCIe 总线上掉线' || true)"
+check "客户报告里不许出现内核断言函数名" "0" \
+      "$(printf '%s' "$dig" | grep -cE 'nvAssertOkFailedNoLog|intr\.c:|pOldContext' || true)"
+check "总条数还是要说清楚（不能把 200 条说没了）" "1" \
+      "$(printf '%s' "$dig" | grep -c '200 条' || true)"
+
+# 多类错误 -> 逐类报数
+cat > "$TMP/dig-multi.txt" <<'EOF'
+[Wed Nov 26 02:16:27 2025] pcieport 0000:97:01.0: DPC: containment event, status:0x1f03, ERR_NONFATAL received from 0000:98:00.0
+[Wed Nov 26 02:16:28 2025] megaraid_sas 0000:98:00.0: FW in FAULT state Fault code:0xfff0000 subcode:0xff00
+[Wed Nov 26 02:16:29 2025] megaraid_sas 0000:98:00.0: FW in FAULT state Fault code:0xfff0001 subcode:0xff00
+[Wed Nov 26 02:16:30 2025] EDAC MC0: 1 CE memory read error on CPU_SrcID#0_MC#0_Chan#0_DIMM#0
+EOF
+dig2="$(dmesg_error_summary "$TMP/dig-multi.txt" 4)"
+check "多类错误 -> 说清楚涉及几类" "1" \
+      "$(printf '%s' "$dig2" | grep -c '涉及 3 类问题' || true)"
+check "存储控制器那类要认出来" "1" \
+      "$(printf '%s' "$dig2" | grep -c '存储控制器/阵列卡固件进入故障状态' || true)"
+check "内存 ECC 那类要认出来" "1" \
+      "$(printf '%s' "$dig2" | grep -c '内存 ECC 错误' || true)"
+
+# ⚠️ 认不出来的错误**绝不能被吞掉** —— 那等于报告上少了一条硬件错误。
+printf '[Wed Nov 26 02:16:27 2025] some_driver 0000:11:22.0: totally novel catastrophe code=7\n' \
+  > "$TMP/dig-unknown.txt"
+dig3="$(dmesg_error_summary "$TMP/dig-unknown.txt" 1)"
+check "认不出的错误要走「其他」并附上原文，不能凭空消失" "1" \
+      "$(printf '%s' "$dig3" | grep -c '其他内核硬件错误' || true)"
+check "而且原文要带出来，好让我们查" "1" \
+      "$(printf '%s' "$dig3" | grep -c 'totally novel catastrophe' || true)"
+
+check "空文件不崩" "1" "$(dmesg_error_summary "$TMP/nope-none.txt" 0 | grep -c '共 0 条' || true)"
+
 # ================================================================
 echo
 echo "=== 开机内核日志复查（这一项就是为了堵住 delta 减掉开机错误那个洞）==="
@@ -1335,6 +1441,93 @@ LAST_STATUS=""; LAST_DETAIL=""; collect_raid
 check "BMC 上传感器有读数 -> SKIP，且不落那份留档" "SKIP" "$LAST_STATUS"
 check "不该凭空落留档" "0" \
       "$([[ -e "$RAW_DIR/raid-bmc-note.txt" ]] && echo 1 || echo 0)"
+
+RAW_DIR="$TMP"; RUN_DIR="$TMP"
+
+# ================================================================
+echo
+echo "=== 阵列卡：驱动没能接管 vs 我们没有管理工具 ==="
+#
+# 1.8.1 现场那台 Supermicro X11DPG-QT（Montage Jintide C5218R）逼出来的。
+# 新装的一张 MegaRAID SAS-3 3108 固件挂在 FAULT state，驱动连试两次都没接管，
+# 整张卡不可用 —— 而「阵列卡」那一项报的是
+#   SKIP ...（当前测试环境的管理工具不支持该型号）...此项不影响整机结论
+# 把**一张坏卡**说成了**我们的工具不行**。
+#
+# 这是 §2-2 的反面：「能力缺失 ≠ 硬件故障」防的是误伤好机器，
+# 而**把硬件故障粉饰成能力缺失，是把坏机器放出厂**，更糟。
+#
+# 判据：内核里有这张卡的驱动（Kernel modules）却没接管（无 Kernel driver in use）。
+# 两条都要，成对断言钉在下面。
+
+# ---- 纯函数：正反样本 ----
+cat > "$TMP/lspci-unbound.txt" <<'EOF'
+86:00.0 Serial Attached SCSI controller [0107]: Broadcom / LSI MegaRAID SAS-3 3108 [Invader] [1000:005d] (rev 02)
+	Subsystem: Super Micro Computer Inc MegaRAID SAS-3 3108 [Invader] [15d9:0a09]
+	Region 0: I/O ports at d000 [size=256]
+	Kernel modules: megaraid_sas
+EOF
+check "有驱动却没接管 -> 命中（这就是那张坏卡）" "1" \
+      "$(raid_unbound_devices "$TMP/lspci-unbound.txt" | grep -c . || true)"
+check "命中行里要带得出型号（报告文案要用）" "1" \
+      "$(raid_unbound_devices "$TMP/lspci-unbound.txt" | grep -c 'MegaRAID SAS-3 3108' || true)"
+
+cat > "$TMP/lspci-bound.txt" <<'EOF'
+63:00.0 RAID bus controller [0104]: Broadcom / LSI MegaRAID SAS-3 3316 [Intruder] [1000:00ce] (rev 01)
+	Kernel driver in use: megaraid_sas
+	Kernel modules: megaraid_sas
+EOF
+check "驱动接管了的好卡 -> 不许命中" "0" \
+      "$(raid_unbound_devices "$TMP/lspci-bound.txt" | grep -c . || true)"
+
+# §2-2 红线：内核里压根没这张卡的驱动 = **我们**的能力缺失，绝不能判成卡坏了
+cat > "$TMP/lspci-nodriver.txt" <<'EOF'
+17:00.0 RAID bus controller [0104]: Exotic Vendor MegaThing 9000 [abcd:1234] (rev 01)
+	Region 0: Memory at e0e00000 (64-bit, non-prefetchable) [size=64K]
+EOF
+check "内核里没有这张卡的驱动 -> 不许命中（那是我们缺能力，不是卡坏了）" "0" \
+      "$(raid_unbound_devices "$TMP/lspci-nodriver.txt" | grep -c . || true)"
+
+# 射程不许外溢到别的设备类
+cat > "$TMP/lspci-other.txt" <<'EOF'
+81:00.0 Ethernet controller [0200]: Realtek RTL8111 [10ec:8168] (rev 15)
+	Kernel modules: r8169
+98:00.0 VGA compatible controller [0300]: NVIDIA Corporation GB202 [10de:2b85] (rev a1)
+	Kernel modules: nvidiafb, nouveau
+EOF
+check "网卡/显卡没绑驱动也不许命中（只管阵列卡和 HBA）" "0" \
+      "$(raid_unbound_devices "$TMP/lspci-other.txt" | grep -c . || true)"
+
+# ---- 走完整的 collect_raid，验最终判定和文案 ----
+RAW_DIR="$TMP/raid-dead"; RUN_DIR="$TMP/raid-dead"
+rm -rf "$RAW_DIR"; mkdir -p "$RAW_DIR"
+grep -m1 '^86:00.0' "$TMP/lspci-unbound.txt" > "$RAW_DIR/lspci.txt"
+cp "$TMP/lspci-unbound.txt" "$RAW_DIR/lspci-vv.txt"
+: > "$RAW_DIR/ipmi-sdr.txt"
+KLB_TOOLS="$TMP/tools-none"; mkdir -p "$KLB_TOOLS"
+LAST_STATUS=""; LAST_DETAIL=""; collect_raid
+check "驱动没接管这张卡 -> FAIL（不能再说成「工具不支持」）" "FAIL" "$LAST_STATUS"
+check "文案里要点明驱动没能接管" "1" \
+      "$(printf '%s' "$LAST_DETAIL" | grep -c '驱动未能接管' || true)"
+check "而且绝不能再出现「管理工具不支持该型号」这种甩锅说法" "0" \
+      "$(printf '%s' "$LAST_DETAIL" | grep -c '管理工具不支持' || true)"
+check "也绝不能再写「此项不影响整机结论」" "0" \
+      "$(printf '%s' "$LAST_DETAIL" | grep -c '不影响整机结论' || true)"
+check "要告诉客户后面的盘也看不到（这才是他真正关心的后果）" "1" \
+      "$(printf '%s' "$LAST_DETAIL" | grep -c '硬盘在操作系统里也看不到' || true)"
+
+# 反面：驱动接管了、只是没有对得上的管理工具 -> 还是 SKIP，文案照旧
+RAW_DIR="$TMP/raid-toolgap"; RUN_DIR="$TMP/raid-toolgap"
+rm -rf "$RAW_DIR"; mkdir -p "$RAW_DIR"
+grep -m1 '^63:00.0' "$TMP/lspci-bound.txt" > "$RAW_DIR/lspci.txt"
+cp "$TMP/lspci-bound.txt" "$RAW_DIR/lspci-vv.txt"
+: > "$RAW_DIR/ipmi-sdr.txt"
+LAST_STATUS=""; LAST_DETAIL=""; collect_raid
+check "驱动接管了、只是缺管理工具 -> 仍然 SKIP（能力缺失不判故障）" "SKIP" "$LAST_STATUS"
+check "这种情况才该说「管理工具不支持该型号」" "1" \
+      "$(printf '%s' "$LAST_DETAIL" | grep -c '管理工具不支持' || true)"
+check "而且要写明不影响整机结论" "1" \
+      "$(printf '%s' "$LAST_DETAIL" | grep -c '不影响整机结论' || true)"
 
 RAW_DIR="$TMP"; RUN_DIR="$TMP"
 

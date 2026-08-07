@@ -213,6 +213,48 @@ for drv in ast mgag200; do
   ok "$drv：板载显示模块在（不对账其声明的固件，Ubuntu 不发那几个）"
 done
 
+# ---- 平台驱动：CPU 温度 / 内存 ECC / BMC ----
+#
+# 这几个不需要任何固件，但**缺一个就有一整块报告字段变成空白**，而且是
+# 静默的：没有报错，只是报告上"峰值温度"或"ECC 计数"那一格没有数。
+#
+# 1.8.0 加这一组的由头是现场问"海光 C86 要不要额外加芯片组驱动"。
+# 拿三台海光的真机数据核对下来：**不需要**，k10temp / amd64_edac /
+# edac_mce_amd 都在内核里、都正常绑上了（7380 读到 8 个温度域，
+# 逐 DIMM 的 ECC 计数也出得来）。lspci 里那些"没有驱动"的
+# Data Fabric / PCIe Dummy Host Bridge，在任何 AMD/海光平台上都没有驱动，
+# 不是缺驱动。
+#
+# 结论既然是"已经齐了"，就得有东西钉住它 —— 否则哪天换内核或改了
+# LAYER_EXCLUDE_PATTERNS 把 installer.generic 层剪掉，这些模块一起没了，
+# 表现只是"海光机器的报告里没有温度"，没人会往驱动上想。
+#
+# 海光 C86 各代（7380 / C86-3G OPN3350 实测都是 family 24 model 2）
+# 走的是和 AMD 完全同一套：k10temp + amd64_edac。没有单独的"海光芯片组驱动"。
+PLATFORM_MODULES=(
+  "k10temp|AMD/海光 CPU 温度（缺了海光机器报告里没有峰值温度）"
+  "amd64_edac|AMD/海光 内存 ECC 计数（缺了 verify_ecc 只能判 SKIP）"
+  "edac_mce_amd|AMD/海光 MCE 解码"
+  "coretemp|Intel CPU 温度"
+  "ipmi_si|BMC 接口（缺了整块 IPMI 采集和 SEL 判定都没了）"
+  "ipmi_devintf|BMC 字符设备"
+)
+for entry in "${PLATFORM_MODULES[@]}"; do
+  m="${entry%%|*}"; why="${entry#*|}"
+  if find "$KDIR" \( -name "$m.ko" -o -name "$m.ko.*" \) 2>/dev/null | grep -q .; then
+    ok "平台驱动 $m 在（$why）"
+  else
+    bad "平台驱动 $m 不在内核里 —— $why"
+  fi
+done
+# Intel 的 EDAC 按平台分了好几个模块，有一个就行（不同代 CPU 用不同的那个）
+if find "$KDIR" \( -name "i10nm_edac.ko*" -o -name "skx_edac.ko*" -o -name "sb_edac.ko*" \) \
+     2>/dev/null | grep -q .; then
+  ok "Intel EDAC 驱动至少有一个在（i10nm / skx / sb）"
+else
+  bad "Intel EDAC 驱动一个都不在 —— Intel 机器的内存 ECC 计数会全空"
+fi
+
 # 需要固件的驱动数不能是 0 —— 那说明 modinfo 没真跑起来（比如 .ko.zst 读不了），
 # 于是每个驱动都"需要 0 个、缺 0 个"，一路全绿。这正是本项目最恨的那种绿。
 if (( total_need > 0 )); then

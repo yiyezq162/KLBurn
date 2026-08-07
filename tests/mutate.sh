@@ -78,6 +78,19 @@ MUTATIONS=(
 "csv-unread${S}sys_metrics 多采一列却没人读（采了没人看等于没采）${S}test-internal-report${S}$RT/report/generate_internal.py${S}mut_csv_unread"
 "rawindex-gap${S}加了新采集却忘了在 raw 索引里写说明（没人知道那份文件是什么）${S}test-internal-report${S}$RT/report/generate_internal.py${S}mut_rawindex_gap"
 "emph-literal${S}判定文案里的 **重点** 原样印给客户（客户看到两串字面星号）${S}test-report-render${S}$RT/report/generate_report.py${S}mut_emph_literal"
+"gpu-loss-blind${S}退回 1.7.8：内核日志模式里没有掉卡关键字（掉下总线的显卡照样判 PASS 出厂）${S}test-hw-checks${S}$RT/lib/verify.sh${S}mut_gpu_loss_blind"
+"gpu-sample-blind${S}采样统计把读不到卡的行也算成有效（掉卡后的空行凑满有效率，掉卡判据整条失效）${S}test-log-parsing${S}$RT/lib/gpu.sh${S}mut_gpu_sample_blind"
+"gpu-progress-zero${S}认不出进度格式时当成停滞（§2-2：读不懂日志反过来判客户的卡停转了）${S}test-concurrent-burn${S}$RT/lib/gpu.sh${S}mut_gpu_progress_zero"
+"jbod-dup-disk${S}退回 1.7.8：直通盘不按序列号去重（同一块盘在客户报告里列两行，客户以为有两块）${S}test-report-render${S}$RT/report/generate_report.py${S}mut_jbod_dup_disk"
+"serial-merge-blank${S}序列号为空时也拿来撞（两块都读不到序列号的盘被并成一块，少报一块盘）${S}test-report-render${S}$RT/report/generate_report.py${S}mut_serial_merge_blank"
+"backplane-to-customer${S}背板盘位数进客户报告（拿不准的数字给客户看，会被当成缺件）${S}test-internal-report${S}$RT/report/generate_report.py${S}mut_backplane_to_customer"
+"raid-dead-as-toolgap${S}退回 1.8.1：驱动没接管的坏卡说成「管理工具不支持」（把硬件故障粉饰成能力缺失，坏卡出厂）${S}test-hw-checks${S}$RT/lib/collect.sh${S}mut_raid_dead_as_toolgap"
+"raid-nodriver-as-fault${S}内核里没这张卡的驱动也判故障（§2-2 反向：我们缺能力却说客户的卡坏了）${S}test-hw-checks${S}$RT/lib/collect.sh${S}mut_raid_nodriver_as_fault"
+"gpu-stale-panel${S}退回 1.8.0：仪表盘继续显示掉卡前的缓存读数（现场看着卡还在满载跑）${S}test-screen-render${S}$RT/lib/ui.sh${S}mut_gpu_stale_panel"
+"dmesg-raw-dump${S}内核错误摘要退回「条数 + 内核断言原文」（读起来像 3018 个毛病，且没人看得懂）${S}test-hw-checks${S}$RT/lib/verify.sh${S}mut_dmesg_raw_dump"
+"pdf-expand-logs${S}打印样式不再折叠原始日志（一份报告转出来 179 页，171 页是日志）${S}test-report-render${S}$RT/report/generate_report.py${S}mut_pdf_expand_logs"
+"pdf-pre-overflow${S}打印样式不再让长行换行（长行冲出页面，右边整片被切掉）${S}test-report-render${S}$RT/report/generate_report.py${S}mut_pdf_pre_overflow"
+"pdf-flex-row${S}判定行在 PDF 里退回 flex（徽章/名称/详情叠印成一团）${S}test-report-render${S}$RT/report/generate_report.py${S}mut_pdf_flex_row"
 )
 
 # ================================================================
@@ -392,10 +405,131 @@ mut_emph_literal() {
     "        A('<span class=\"rd\">%s</span>' % E(r.get(\"detail\")))"
 }
 
+# ---------------------------------------------------------------- 1.8.2：坏卡 vs 缺工具
+#
+# 1.8.1 现场那台 Supermicro：新装的 MegaRAID SAS-3 3108 固件挂在 FAULT state，
+# 驱动连试两次都没接管，整张卡不可用 —— 而报告写的是
+#   SKIP ...（当前测试环境的管理工具不支持该型号）...此项不影响整机结论
+# 把一张坏卡说成了我们的工具不行。
+
+# 方向一：坏卡被粉饰成能力缺失。这是把**坏机器放出厂**。
+mut_raid_dead_as_toolgap() {
+  replace_line "$RT/lib/collect.sh" \
+    '    if [[ -n "$unbound" ]]; then' \
+    '    if false; then # 变异：退回 1.8.1，坏卡一律说成工具不支持'
+}
+
+# 方向二：反过来矫枉过正 —— 去掉「内核里得有这张卡的驱动」这个前提，
+# 于是任何没绑驱动的阵列卡都判故障。而内核里压根没有驱动是**我们**缺能力，
+# 判 FAIL 就是把好卡说成坏卡（§2-2 那条红线本身）。
+mut_raid_nodriver_as_fault() {
+  replace_line "$RT/lib/collect.sh" \
+    'if (bdf != "" && israid && mods && !inuse) printf "%s\t%s\n", bdf, name' \
+    '      if (bdf != "" && israid && !inuse) printf "%s\t%s\n", bdf, name # 变异：不问有没有驱动'
+}
+
 mut_net_servers() {
   replace_line "$RT/lib/network.sh" \
     "declare -p NET_TIME_SERVERS >/dev/null 2>&1 || \\" \
     "NET_TIME_SERVERS=(ntp.aliyun.com cn.pool.ntp.org time.cloudflare.com) # 变异：裸赋值"
+}
+
+# ---------------------------------------------------------------- 1.8.0 的三个洞
+#
+# 都对应 1.7.8 的真机记录：一张 RTX 5090 开测 20 秒掉下 PCIe 总线，
+# 整轮判 PASS、零告警出厂。掉卡这件事有三条独立证据，当年一条都没人读。
+
+# 证据一：内核日志。1.7.8 的模式里一个 NVIDIA 关键字都没有，
+# 1.1MB 的 NVRM 报错喂进去命中数是 0，"内核日志复查"照样 PASS。
+mut_gpu_loss_blind() {
+  replace_line "$RT/lib/verify.sh" \
+    "pat+='|GPU lost from the bus|NV_ERR_GPU_IS_LOST|has fallen off the bus'" \
+    "  pat+='' # 变异：退回 1.7.8，掉卡关键字全没了"
+}
+
+# 证据二：采样。把"读到了才算数"改成"有行就算数"，掉卡后那几百行
+# "No devices were found" 会被算成有效采样，有效率一路 100%。
+mut_gpu_sample_blind() {
+  replace_line "$RT/lib/gpu.sh" \
+    'if ($2 ~ /^[0-9]+$/ && $4 ~ /^-?[0-9]+$/) v++' \
+    "             v++ # 变异：只要有行就算有效采样"
+}
+
+# 证据三的反面红线：读不出进度格式（steps==0）时必须**不判**。
+# 写成 steps <= 1 就把"我看不懂这份日志"也算成了"卡停转了"——
+# 正是 §2-2「能力缺失 ≠ 硬件故障」要挡的那种误判：换个 gpu_burn 版本，
+# 所有采样略有丢失的机器就从 WARN 升级成 FAIL。
+mut_gpu_progress_zero() {
+  replace_line "$RT/lib/gpu.sh" \
+    '(( secs >= 60 && steps == 1 )) && stalled=1' \
+    '  (( secs >= 60 && steps <= 1 )) && stalled=1 # 变异：读不出来也当成停转'
+}
+
+# JBOD/直通：同一块盘既有 /dev 节点又能被阵列卡读到，不去重就列两行。
+mut_jbod_dup_disk() {
+  delete_line "$RT/report/generate_report.py" \
+    'os_serial_row[sn]["接口"] = "阵列卡直通"'
+}
+
+# 去重最容易写坏的方式：拿空序列号去撞空序列号，两块盘并成一块。
+# 少报一块盘比多报一块严重得多 —— 客户按报告点货会直接少收一块。
+mut_serial_merge_blank() {
+  replace_line "$RT/report/generate_report.py" \
+    "    return key if len(key) >= 4 else None" \
+    "    return key # 变异：空序列号也拿来撞"
+}
+
+# 背板盘位数只进内部报告。这个数拿不准时给客户看会被当成缺件
+# （客户买的是 8 盘位机箱，报告写 4 盘位，解释不清）。
+mut_backplane_to_customer() {
+  replace_line "$RT/report/generate_report.py" \
+    '    def backplanes(self):' \
+    '    def backplanes_disabled_by_mutation(self):'
+}
+
+# ---------------------------------------------------------------- 1.8.0 第二轮
+#
+# 都来自那台坏卡跑完之后的复盘：判定是对的（FAIL 判出来了），
+# 但**现场和客户看到的东西**还不对。
+
+# 仪表盘把 last=$1 写回 NF>=8 里面 —— 掉卡后的行（NF=2）连时间戳都不看，
+# last 永远停在最后一次成功采样上，屏幕就一直显示那一刻的温度/功耗，
+# 现场看着卡还在满载跑。这是"缓存冒充实时"，比不显示更糟。
+mut_gpu_stale_panel() {
+  replace_line "$RT/lib/ui.sh" \
+    "  awk -F, 'NR>1 { last=\$1 }" \
+    "  awk -F, 'NR>1 && NF>=8 { last=\$1 }"
+}
+
+# 内核错误摘要退回"条数 + head -3 原文"：3018 条同一句话读起来像 3018 个
+# 不同的毛病，而且把内核断言（nvAssertOkFailedNoLog ... @ intr.c:1653）
+# 原样甩给客户。
+mut_dmesg_raw_dump() {
+  replace_line "$RT/lib/verify.sh" \
+    'local sample; sample="$(dmesg_error_summary "$RAW_DIR/dmesg-errors.txt" "$n")"' \
+    '    local sample; sample="共 ${n} 条。示例：$(head -3 "$RAW_DIR/dmesg-errors.txt" | tr "\\n" " " | cut -c1-300)"'
+}
+
+# ---- 下面三条守的是"只有真转成 PDF 才看得见"的那一类 ----
+# 它们在 HTML 上全都正常，断言抓不到，所以 test-report-render 里那几条
+# 既查源码里的规则在不在，也真转一次数页数。
+
+mut_pdf_expand_logs() {
+  replace_line "$RT/report/generate_report.py" \
+    '  details:not([open]) > *:not(summary){display:none !important}' \
+    '  details:not([open]) > *:not(summary){display:block}'
+}
+
+mut_pdf_pre_overflow() {
+  replace_line "$RT/report/generate_report.py" \
+    '  pre{white-space:pre-wrap;word-break:break-all;overflow:visible;max-height:none}' \
+    '  pre{overflow-x:auto}'
+}
+
+mut_pdf_flex_row() {
+  replace_line "$RT/report/generate_report.py" \
+    '  .result-row{display:block}' \
+    '  .result-row{display:flex}'
 }
 
 # ================================================================

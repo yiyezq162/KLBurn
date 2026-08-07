@@ -44,6 +44,62 @@ gpu_parse_burn_log() {
   printf '%s %s' "$faulty" "$err_sum"
 }
 
+# ---------------------------------------------------------------- 掉卡判据
+#
+# 1.7.8 现场实测：一张 RTX 5090 在开测第 20 秒掉下 PCIe 总线，整轮依旧判 PASS、
+# 零告警。事后翻采集数据，四条证据里有三条就摆在那儿，没有任何一条判定去读：
+#
+#   证据                        好机器        掉卡那台
+#   采样里读得到卡的行           125/125       3/718
+#   gpu_burn 进度 proc'd         81 -> 29241   109 -> 109（纹丝不动）
+#   内核日志 "GPU lost from bus" 0 行          3019 行
+#   gpu_burn 自己的结论          GPU 0: OK     GPU 0: OK   <- 唯一没区分度的
+#
+# 偏偏当时只读了最后那条。**gpu_burn 的结论只能用来判"算错了"，判不了
+# "卡还在不在"** —— 卡掉线之后它会一直重复打印掉线前最后一次成功的缓存统计行
+# （错误数当然还是 0），跑完照样打 "GPU 0: OK"、退出码 0。
+#
+# 两个判据都做成纯函数，好拿真实日志脱机回归，见 tests/test-log-parsing.sh。
+
+# gpu_sample_stats <csv> -> "<总采样行数> <有效采样行数>"
+#
+# 有效 = 这一行真的读到了一块卡（卡号和温度都是数字）。
+#
+# ⚠️ 故意用"正面判定"，不去匹配错误文案。读不到设备时的原话各版本不一样
+# （No devices were found / GPU is lost / NVIDIA-SMI has failed ...），
+# 挨个匹配迟早漏一种，而"这一行是不是一条正常读数"是确定的。
+gpu_sample_stats() {
+  local csv="${1:-}"
+  [[ -f "$csv" ]] || { printf '0 0'; return; }
+  awk -F, 'NR>1 && $0 ~ /[^[:space:]]/ {
+             t++
+             if ($2 ~ /^[0-9]+$/ && $4 ~ /^-?[0-9]+$/) v++
+           }
+           END { printf "%d %d", t+0, v+0 }' "$csv" 2>/dev/null
+}
+
+# gpu_burn_progress_steps <日志> -> 进度计数出现过多少个不同取值
+#
+# "proc'd: N" 是累计完成的计算批次，正常跑一小时会从两位数涨到几万；
+# 卡掉线之后这个数字永远停在掉线前那一刻。
+#
+# 返回 0 = 日志里根本没有进度行（gpu_burn 换了版本 / 日志被截断）。
+# **那种情况一律不判** —— 读不出来是我们这边的能力问题，不是机器的故障。
+#
+# ⚠️ gpu_burn 的进度是用 \r 原地刷新的，整个日志可能只有"一行"，
+#    所以必须先把 \r 换成换行再数。
+gpu_burn_progress_steps() {
+  local log="${1:-}" n
+  [[ -f "$log" ]] || { printf '0'; return; }
+  # 不能写成 `... | grep -c . || printf 0`：grep -c 在计数为 0 时既打印 "0"
+  # 又返回 1，|| 分支再补一个 0，结果是 "00"（core.sh 里 count_lines 那条注释）。
+  n="$(tr '\r' '\n' < "$log" 2>/dev/null \
+       | grep -oE "proc'd:[[:space:]]*[0-9]+" \
+       | grep -oE '[0-9]+' | sort -un | grep -c .)"
+  [[ "$n" =~ ^[0-9]+$ ]] || n=0
+  printf '%s' "$n"
+}
+
 # ---------------------------------------------------------------- 驱动/显卡不匹配
 # 驱动装了、模块也加载了，但这张卡它不认 —— NVRM 会在内核日志里明说。
 # 官方驱动源码里的固定字符串，几代驱动都没变过：
@@ -261,7 +317,10 @@ gpu_stress() {
   local csv="$RUN_DIR/gpu_metrics.csv"
   local idx tmax pmax
   local overheat=0 hot=0
-  for idx in $(awk -F, 'NR>1{print $2}' "$csv" | sort -un); do
+  # ⚠️ 卡号一定要先过滤成纯数字再排序。卡掉线之后这一列里是
+  # "No devices were found" 这样的整句错误文案，而 `sort -un` 会把它当成 0 ——
+  # 于是它和真正的 0 号卡撞在一起被去重，留下哪一个纯看运气。
+  for idx in $(awk -F, 'NR>1 && $2 ~ /^[0-9]+$/ {print $2}' "$csv" | sort -un); do
     tmax="$(awk -F, -v i="$idx" 'NR>1 && $2==i && $4!="" {if($4+0>m) m=$4+0} END{printf "%d", m}' "$csv")"
     pmax="$(awk -F, -v i="$idx" 'NR>1 && $2==i && $5!="" {if($5+0>m) m=$5+0} END{printf "%d", m}' "$csv")"
     metric_add "gpu${idx}" "峰值温度" "${tmax}"
@@ -277,7 +336,50 @@ gpu_stress() {
   metric_add "gpu" "FAULTY卡数" "$faulty"
 
   local detail="${GPU_USABLE} 张显卡满载 $(fmt_dur "$secs")"
-  if (( faulty > 0 || err_sum > 0 )); then
+
+  # ---------------- 掉卡：排在所有判据最前面 ----------------
+  # 卡都不在了，gpu_burn 报的"0 个错误"、采样算出来的"峰值温度 36°C /
+  # 峰值功耗 67W"全都只是掉线前那两三个空载读数，一个都不能拿来下结论。
+  local samp_total samp_valid samp_lost lost_pct=0
+  read -r samp_total samp_valid < <(gpu_sample_stats "$csv")
+  samp_lost=$(( samp_total - samp_valid ))
+  (( samp_total > 0 )) && lost_pct=$(( samp_lost * 100 / samp_total ))
+  metric_add "gpu" "有效采样" "${samp_valid}/${samp_total}"
+
+  # 压测跑够 1 分钟、日志里确实有进度行、而进度自始至终只有一个取值
+  # = 卡在中途停止计算了。跑得太短、或读不出进度，一律不判。
+  local steps stalled=0
+  steps="$(gpu_burn_progress_steps "$burnlog")"
+  (( secs >= 60 && steps == 1 )) && stalled=1
+
+  # 再直接问一次驱动：这会儿还认得到几张卡
+  #
+  # 必须带 timeout：卡卡死在总线上的时候 nvidia-smi 是会一直挂着不返回的，
+  # 而这里已经是压测收尾阶段，挂住就等于整轮测试出不了报告。
+  local usable_now
+  usable_now="$(timeout 60 nvidia-smi --query-gpu=index --format=csv,noheader 2>/dev/null | grep -c .)"
+  [[ "$usable_now" =~ ^[0-9]+$ ]] || usable_now="$GPU_USABLE"
+
+  # 采样太少（短测/冒烟）时不拿比例说事，否则几行采样就能凑出 100%
+  local enough=0; (( samp_total >= 12 )) && enough=1
+  local gone=0
+  (( enough == 1 && lost_pct >= 50 ))  && gone=1   # 过半采样读不到卡
+  (( usable_now < GPU_USABLE ))        && gone=1   # 测完比开测时少认了卡
+  (( stalled == 1 && lost_pct >= 10 )) && gone=1   # 进度停滞且伴随采样丢失
+
+  if (( gone == 1 )); then
+    result_add "stress_gpu" "GPU 压力测试" "$ST_FAIL" \
+      "显卡在压力测试过程中从系统中掉线：全程 ${samp_total} 次读数里有 ${samp_lost} 次\
+已经读不到显卡（测试结束时系统只认到 ${usable_now} 张，开始测试时是 ${GPU_USABLE} 张）。\
+掉线之后显卡不再参与运算，因此本项记录的温度与功耗峰值只反映掉线前的空载状态，\
+不能代表满载表现。这属于显卡本身、供电或插槽异常，需检修后复测；$detail" \
+      "raw/stress/gpu-burn.log"
+  elif (( enough == 1 && lost_pct >= 10 )); then
+    result_add "stress_gpu" "GPU 压力测试" "$ST_WARN" \
+      "显卡在压力测试期间有 ${samp_lost}/${samp_total} 次读数取不到数据（约 ${lost_pct}%），\
+读数期间未发现计算错误。显卡可能存在间歇性掉线或复位，建议出货前复查供电与插槽；$detail" \
+      "raw/stress/gpu-burn.log"
+  elif (( faulty > 0 || err_sum > 0 )); then
     result_add "stress_gpu" "GPU 压力测试" "$ST_FAIL" \
       "gpu_burn 报告 ${faulty} 张卡 FAULTY、累计 ${err_sum} 处计算校验错误（显卡故障）；$detail" \
       "raw/stress/gpu-burn.log"

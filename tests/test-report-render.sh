@@ -302,10 +302,109 @@ if python3 "$GEN" --run-dir "$RDPD" --out "$OUTPD" >/dev/null 2>"$TMP/errpd"; th
   has "$OUTPD" "41°C"           "物理盘的测后温度"
   has "$OUTPD" "机械盘"          "rotation_rate 7200 要判成机械盘"
   has "$OUTPD" "通过阵列卡逐块读取" "要有一句说明这几行是怎么来的"
+  has "$OUTPD" "阵列卡逻辑盘"    "逻辑盘那行不能写成机械盘/固态盘"
   has_no "$OUTPD" "通电时间"     "物理盘同样不列寿命类字段"
   has_no "$OUTPD" "megaraid"     "透传参数是内部实现，不该出现在交付报告里"
 else
   bad "带阵列卡的报告没能生成：$(cat "$TMP/errpd")"
+fi
+
+echo
+echo "=== JBOD/直通：同一块盘不许在清单里出现两次 ==="
+#
+# 1.7.8 现场实测：阵列卡切到 JBOD 模式，一块 FORESEE 128GB SSD
+# （序列号 K48060R002933）在报告里出现了两行 —— 一行是 /dev/sda，
+# 另一行是"阵列卡 PD0"，其实是同一块盘。客户看到的是"这台机器有两块盘"。
+#
+# 直通模式下物理盘**既有 /dev 节点、又能被阵列卡逐块读到**，两条采集路径
+# 都会拿到它。判据只能是序列号：RAID 模式下操作系统看到的是逻辑盘
+# （序列号是阵列卡自己编的），和后端物理盘本来就该是两行 —— 上面那组钉的就是它。
+RDJB="$TMP/run-jbod"
+mkdir -p "$RDJB/raw/smart-pre" "$RDJB/raw/smart-post"
+cp "$RD/meta.json" "$RDJB/meta.json"
+cp "$RD/results.jsonl" "$RDJB/results.jsonl" 2>/dev/null || true
+cat > "$RDJB/raw/lsblk.json" <<'EOF'
+{"blockdevices":[
+ {"name":"sda","path":"/dev/sda","size":128035676160,"type":"disk","rota":false,
+  "tran":null,"model":"FORESEE 128GB SSD","serial":"K48060R002933",
+  "rm":false,"hotplug":false}
+]}
+EOF
+# 直通盘：/dev 节点和阵列卡透传读到的是同一块，序列号一模一样
+cat > "$RDJB/raw/smart-pre/sda.norm.json" <<'EOF'
+{"model":"FORESEE 128GB SSD","serial":"K48060R002933","firmware":"V4.6",
+ "capacity_bytes":128035676160,"rotation_rate":0,"temperature_c":42,
+ "smart_passed":true,"realloc_sectors":0,"pending_sectors":0,
+ "uncorrectable":0,"crc_errors":0}
+EOF
+cp "$RDJB/raw/smart-pre/sda.norm.json" "$RDJB/raw/smart-post/sda.norm.json"
+# 阵列卡那条路读到的同一块盘，序列号带补齐空格（真实样本就是这样）
+sed 's/"K48060R002933"/"K48060R002933   "/' "$RDJB/raw/smart-pre/sda.norm.json" \
+  > "$RDJB/raw/smart-pre/sda-pd0.norm.json"
+cp "$RDJB/raw/smart-pre/sda-pd0.norm.json" "$RDJB/raw/smart-post/sda-pd0.norm.json"
+OUTJB="$TMP/report-jbod.html"
+if python3 "$GEN" --run-dir "$RDJB" --out "$OUTJB" >/dev/null 2>"$TMP/errjb"; then
+  check "同一块盘只出现一行（序列号出现次数）" "1" \
+        "$(grep -o 'K48060R002933' "$OUTJB" | grep -c . || true)"
+  has_no "$OUTJB" "阵列卡 PD0"   "直通盘不再重复列成阵列卡后端盘"
+  has "$OUTJB" "阵列卡直通"      "但要说清楚这块盘是挂在阵列卡后面的"
+  has "$OUTJB" "/dev/sda"        "盘本身还在清单里"
+  has "$OUTJB" "42°C"            "温度照常显示"
+else
+  bad "JBOD 报告没能生成：$(cat "$TMP/errjb")"
+fi
+
+# 反面：序列号读不出来时**绝不能**把两块盘并成一块。
+# 空序列号撞空序列号是最容易写出来的 bug，一旦发生就是"少报一块盘"。
+RDNS="$TMP/run-noserial"
+mkdir -p "$RDNS/raw/smart-pre" "$RDNS/raw/smart-post"
+cp "$RD/meta.json" "$RDNS/meta.json"
+cp "$RD/results.jsonl" "$RDNS/results.jsonl" 2>/dev/null || true
+cat > "$RDNS/raw/lsblk.json" <<'EOF'
+{"blockdevices":[
+ {"name":"sda","path":"/dev/sda","size":128035676160,"type":"disk","rota":false,
+  "tran":"sas","model":"SOME VD","serial":null,"rm":false,"hotplug":false}
+]}
+EOF
+printf '{"model":"SOME VD","serial":null,"smart_passed":null}\n' \
+  > "$RDNS/raw/smart-pre/sda.norm.json"
+cp "$RDNS/raw/smart-pre/sda.norm.json" "$RDNS/raw/smart-post/sda.norm.json"
+printf '{"model":"REAL DISK","serial":null,"firmware":"A1","capacity_bytes":128035676160,"rotation_rate":0,"temperature_c":39,"smart_passed":true}\n' \
+  > "$RDNS/raw/smart-pre/sda-pd0.norm.json"
+cp "$RDNS/raw/smart-pre/sda-pd0.norm.json" "$RDNS/raw/smart-post/sda-pd0.norm.json"
+OUTNS="$TMP/report-noserial.html"
+if python3 "$GEN" --run-dir "$RDNS" --out "$OUTNS" >/dev/null 2>"$TMP/errns"; then
+  has "$OUTNS" "阵列卡 PD0" "两边都没有序列号时不许合并（合并 = 少报一块盘）"
+  has "$OUTNS" "REAL DISK"  "后端那块盘必须还在"
+else
+  bad "无序列号场景报告没能生成：$(cat "$TMP/errns")"
+fi
+
+# 同一件事的另一种形态：序列号不是空的，而是被截成一两个字符。
+# 见过阵列卡把逻辑盘的序列号报成 "0" —— 拿它当唯一标识，
+# 后面那块真盘会被"认成"同一块盘而整行消失。
+RDSS="$TMP/run-shortserial"
+mkdir -p "$RDSS/raw/smart-pre" "$RDSS/raw/smart-post"
+cp "$RD/meta.json" "$RDSS/meta.json"
+cp "$RD/results.jsonl" "$RDSS/results.jsonl" 2>/dev/null || true
+cat > "$RDSS/raw/lsblk.json" <<'EOF'
+{"blockdevices":[
+ {"name":"sda","path":"/dev/sda","size":128035676160,"type":"disk","rota":false,
+  "tran":"sas","model":"SOME VD","serial":"0","rm":false,"hotplug":false}
+]}
+EOF
+printf '{"model":"SOME VD","serial":"0","smart_passed":null}\n' \
+  > "$RDSS/raw/smart-pre/sda.norm.json"
+cp "$RDSS/raw/smart-pre/sda.norm.json" "$RDSS/raw/smart-post/sda.norm.json"
+printf '{"model":"SEAGATE ST8000","serial":"0","firmware":"A1","capacity_bytes":8001563222016,"rotation_rate":7200,"temperature_c":39,"smart_passed":true}\n' \
+  > "$RDSS/raw/smart-pre/sda-pd0.norm.json"
+cp "$RDSS/raw/smart-pre/sda-pd0.norm.json" "$RDSS/raw/smart-post/sda-pd0.norm.json"
+OUTSS="$TMP/report-shortserial.html"
+if python3 "$GEN" --run-dir "$RDSS" --out "$OUTSS" >/dev/null 2>"$TMP/errss"; then
+  has "$OUTSS" "阵列卡 PD0"    "序列号被截成 '0' 时不许当唯一标识去合并"
+  has "$OUTSS" "SEAGATE ST8000" "后端那块真盘必须还在清单里"
+else
+  bad "短序列号场景报告没能生成：$(cat "$TMP/errss")"
 fi
 
 echo
@@ -647,6 +746,59 @@ has "$OUT" "<b>不可纠正</b>" "**重点** 要渲染成粗体，而不是原�
 #    页面看着正常，其实一个数据点都没画。
 check "sys_metrics.csv 有数据时必须真画出 polyline（不能只剩空图框）" \
       "yes" "$( (( $(cnt "$OUT" '<polyline') > 0 )) && echo yes || echo no )"
+
+# ================================================================
+echo
+echo "=== 转 PDF：三条只有转出来才露馅的规则 ==="
+#
+# 1.8.0 那份真实报告转出来是 **179 页**，其中只有 8 页是报告本身，
+# 剩下 171 页是被强行展开的原始日志；而且判定行叠印、长行冲出页面。
+# 这三样在 HTML 上全都是正常的，**断言抓不到，只有真去转一次才看得见**。
+
+# 先在源码层面钉住三条规则在（weasyprint 不在时这三条也照跑）
+CSSSRC="$(python3 - "$GEN" <<'EOF'
+import io, re, sys
+src = io.open(sys.argv[1], encoding='utf-8').read()
+m = re.search(r'@media print\{.*?\n\}', src, re.S)
+print(m.group(0) if m else '')
+EOF
+)"
+check "打印样式里要把折叠块保持折叠（否则原始日志全展开）" "1" \
+      "$(printf '%s' "$CSSSRC" | grep -c 'details:not(\[open\]) > \*:not(summary){display:none' || true)"
+check "打印样式里 pre 要换行（否则长行冲出页面、右边被切掉）" "1" \
+      "$(printf '%s' "$CSSSRC" | grep -c 'white-space:pre-wrap' || true)"
+check "打印样式里判定行不能用 flex（否则徽章/名称/详情叠印）" "1" \
+      "$(printf '%s' "$CSSSRC" | grep -c '\.result-row{display:block}' || true)"
+
+# 再真转一次。没装 weasyprint 就跳过——盘里有，开发机上不一定有，
+# 而"这台机器没装工具"绝不能当成代码有问题（§2-2 的同款道理）。
+if command -v weasyprint >/dev/null 2>&1 && command -v pdfinfo >/dev/null 2>&1; then
+  # 造一份带巨型折叠日志的报告：40000 行、每行都很长，
+  # 正是现场那份 179 页的成因（GPU 压测日志 + 内核日志各几万行）。
+  BIG="$TMP/run-bigpdf"
+  mkdir -p "$BIG/raw/stress"
+  cp "$RD/meta.json" "$BIG/meta.json"
+  cp "$RD/results.jsonl" "$BIG/results.jsonl" 2>/dev/null || true
+  cp "$RD/raw/lsblk.json" "$BIG/raw/lsblk.json" 2>/dev/null || true
+  for i in $(seq 1 4000); do
+    printf '[Thu Aug  6 14:08:00 2026] NVRM: GPU0 nvAssertOkFailedNoLog: Assertion failed: GPU lost from the bus [NV_ERR_GPU_IS_LOST] (0x0000000F) returned from _intrServiceStallCommonCheckBegin(pGpu, pIntr, &pOldContext) @ intr.c:%d\n' "$i"
+  done > "$BIG/raw/dmesg-errors.txt"
+  cp "$BIG/raw/dmesg-errors.txt" "$BIG/raw/dmesg-delta.txt"
+  OUTBIG="$TMP/report-big.html"
+  if python3 "$GEN" --run-dir "$BIG" --out "$OUTBIG" >/dev/null 2>&1 \
+     && weasyprint "$OUTBIG" "$TMP/big.pdf" >/dev/null 2>&1; then
+    PGS="$(pdfinfo "$TMP/big.pdf" 2>/dev/null | awk '/^Pages/{print $2}')"
+    [[ "$PGS" =~ ^[0-9]+$ ]] || PGS=0
+    # 4000 行日志全展开的话光这一块就是几十页。收起来之后整份应该 20 页以内。
+    check "4000 行折叠日志不许把 PDF 撑开（<=20 页，实测约 10 页）" "yes" \
+          "$( (( PGS > 0 && PGS <= 20 )) && echo yes || echo no )"
+    printf '     实际页数：%s\n' "$PGS"
+  else
+    bad "带巨型日志的报告没能转成 PDF"
+  fi
+else
+  printf '  \033[33m--\033[0m   跳过真转 PDF 那两条（本机没装 weasyprint/pdfinfo）\n'
+fi
 
 # ================================================================
 echo

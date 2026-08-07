@@ -39,7 +39,7 @@ apt-get update -qq || fail "apt update 失败（检查 WSL 网络 / 镜像地址
 
 # ---------------------------------------------------------------- 装包
 PKGS=( "${PKGS_COLLECT[@]}" "${PKGS_DIAG[@]}" "${PKGS_NET[@]}" "${PKGS_STRESS[@]}"
-       "${PKGS_MISC[@]}" "${PKGS_PLATFORM[@]}" )
+       "${PKGS_MISC[@]}" "${PKGS_REPORT[@]}" "${PKGS_PLATFORM[@]}" )
 if [[ "${INCLUDE_NVIDIA:-0}" == "1" ]]; then
   PKGS+=( "${PKGS_NVIDIA_BUILD[@]}" )
 fi

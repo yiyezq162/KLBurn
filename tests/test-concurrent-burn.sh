@@ -208,5 +208,86 @@ check "压根没有可用显卡时不重复记结论（gpu_detect 已经记过�
 
 # ================================================================
 echo
+echo "=== 显卡中途掉线：整条判定链 ==="
+#
+# 1.7.8 现场那台 RTX 5090 开测 20 秒掉下 PCIe 总线，跑满一小时，
+# stress_gpu 判的是 PASS「无计算错误，温度正常」，整机 PASS 出厂。
+# 这里跑的是**最终判定**，不是零件 —— 零件级的在 test-log-parsing 里。
+# shellcheck source=/dev/null
+source "$LIB/stress.sh"          # oom_killed
+
+STRESS_LOG_DIR="$TMP/stresslog"; mkdir -p "$STRESS_LOG_DIR"
+KLB_TOOLS="$TMP/tools-gpu"; mkdir -p "$KLB_TOOLS"
+printf '#!/bin/sh\nexit 0\n' > "$KLB_TOOLS/gpu_burn"; chmod +x "$KLB_TOOLS/gpu_burn"
+
+# 采样器换成空实现：这里要验的是判定，不是采样。
+# 不换的话它会用真 nvidia-smi 把我们铺好的 csv 覆盖掉。
+gpu_monitor_start() { :; }
+gpu_monitor_stop()  { :; }
+
+# 假 nvidia-smi，吐几张卡由 FAKE_CARDS 决定（判定里要问"测完还认得到几张"）
+mkdir -p "$TMP/fakebin"
+cat > "$TMP/fakebin/nvidia-smi" <<'EOS'
+#!/bin/sh
+i=0
+while [ "$i" -lt "${FAKE_CARDS:-1}" ]; do echo "$i"; i=$((i+1)); done
+EOS
+chmod +x "$TMP/fakebin/nvidia-smi"
+PATH="$TMP/fakebin:$PATH"
+
+# seed_gpu <有效采样数> <丢失采样数> <进度取值序列...>
+seed_gpu() {
+  local good="$1" lost="$2"; shift 2
+  local csv="$RUN_DIR/gpu_metrics.csv" i
+  echo "time,index,name,temp_c,power_w,clock_sm_mhz,util_pct,mem_used_mb" > "$csv"
+  for ((i=0; i<good; i++)); do
+    echo "02:18:0$((i%10)),0,NVIDIA GeForce RTX 5090,71,412.15,2542,99,28935" >> "$csv"
+  done
+  for ((i=0; i<lost; i++)); do
+    echo "02:19:0$((i%10)),No devices were found" >> "$csv"
+  done
+  local log="$STRESS_LOG_DIR/gpu-burn.log" n
+  : > "$log"
+  for n in "$@"; do
+    printf "50.0%%  proc'd: %s (28477 Gflop/s)   errors: 0   temps: 71 C \r" "$n" >> "$log"
+  done
+  printf '\nTested 1 GPUs:\n\tGPU 0: OK\n' >> "$log"
+}
+
+GPU_USABLE=1
+
+# ---- 掉卡：三条证据同时成立 ----
+seed_gpu 3 715 109
+FAKE_CARDS=0 LAST_STATUS=""; export FAKE_CARDS
+gpu_stress 3600 >/dev/null
+check "卡掉线（99% 采样读不到 + 进度停滞 + 测完认不到卡）-> FAIL" "FAIL" "$LAST_STATUS"
+
+# ---- 健康：一模一样的编排，结论必须是 PASS ----
+seed_gpu 125 0 81 940 5231 18877 29241
+FAKE_CARDS=1; export FAKE_CARDS
+LAST_STATUS=""
+gpu_stress 3600 >/dev/null
+check "好机器（采样齐、进度一直涨、卡还在）-> PASS" "PASS" "$LAST_STATUS"
+
+# ---- 红线：认不出 gpu_burn 的日志格式时，不许升级成 FAIL ----
+#
+# 换了个 gpu_burn 版本、日志里根本没有 proc'd 行 —— 那是**我们这边**读不懂，
+# 不是客户的卡停转了。这时哪怕采样有些丢失，最多也只能到 WARN。
+# 判成 FAIL 就是把好机器拦在出货前（§2-2）。
+printf 'some other gpu tool\nno progress lines at all\n' > "$STRESS_LOG_DIR/gpu-burn.log"
+{
+  echo "time,index,name,temp_c,power_w,clock_sm_mhz,util_pct,mem_used_mb"
+  for ((i=0; i<70; i++)); do
+    echo "02:18:0$((i%10)),0,NVIDIA GeForce RTX 5090,71,412.15,2542,99,28935"
+  done
+  for ((i=0; i<30; i++)); do echo "02:19:0$((i%10)),No devices were found"; done
+} > "$RUN_DIR/gpu_metrics.csv"
+FAKE_CARDS=1; export FAKE_CARDS
+LAST_STATUS=""
+gpu_stress 3600 >/dev/null
+check "读不出进度格式 + 30% 采样丢失 -> WARN，不许判 FAIL" "WARN" "$LAST_STATUS"
+
+# ================================================================
+echo
 printf '通过 %d 项，失败 %d 项\n' "$PASS" "$FAIL"
 exit $(( FAIL > 0 ? 1 : 0 ))

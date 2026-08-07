@@ -11,7 +11,7 @@
 # ⚠️ 改完脚本要「先 bump 再构建」。0.3.0 就栽过一次：ISO 构建完之后又改了
 # core.sh/collect.sh 却没动版本号，于是现场那根盘自称 0.3.0、跑的却是修复前的
 # 代码（lshw 卡满 90s、屏幕上冒 Killed），对着仓库怎么看都对不上。
-KLBURN_VERSION="1.7.8"
+KLBURN_VERSION="1.8.2"
 
 # ================================================================
 # 品牌抬头
@@ -275,6 +275,27 @@ PKGS_STRESS=(
 # 报告落盘 / 杂项
 PKGS_MISC=(
   exfatprogs dosfstools ntfs-3g xz-utils zstd pciutils
+)
+# ---------- 报告转 PDF（1.8.0 新增）----------
+# 客户拿 HTML 转发不方便（一个 456KB 的单文件，微信/邮件里点开还得挑浏览器），
+# PDF 归档和转发都省事。两份报告各出一份 PDF，和 .html 放同一个目录。
+#
+# 为什么是 weasyprint 而不是别的：
+#   wkhtmltopdf   底层是老 QtWebKit，**不认 CSS 变量**，而报告里 var(--xxx)
+#                 用了 19 处，整份配色会塌掉
+#   chromium      24.04 上是 snap 包，塞进 live 系统不现实
+#   weasyprint    官方源里就有（61.1），纯 Python + cairo/pango，无头无依赖服务
+#
+# 实测：456KB 的报告 -> 122 页 A4，9 秒，表格/曲线图/中文都正常。
+# 已知它会忽略 display:grid（键值块退化成逐行，可读性不受影响）。
+#
+# 字体必须显式带一个中文字体，否则 PDF 里所有中文是空白框 ——
+# live 系统本身不带任何 CJK 字体（HTML 报告是在客户自己的 Windows 上看的，
+# 用的是客户机器上的字体，所以以前不需要）。
+# 选微米黑（5MB）而不是 Noto CJK（89MB）：两个都试过，出来的页面肉眼没差别，
+# 微米黑那版 PDF 反而更小（317KB vs 728KB）。
+PKGS_REPORT=(
+  weasyprint fonts-wqy-microhei
 )
 # CPU 微码 / 平台守护进程
 #

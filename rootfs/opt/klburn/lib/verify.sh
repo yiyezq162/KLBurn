@@ -166,7 +166,141 @@ dmesg_hw_error_pattern() {
   pat+='in FAULT state|killing adapter|reset adapter never cleared|'
   pat+='Reset failed|device recovery failed|'
   pat+='resetting .*adapter|Failed from [a-z_]+ [0-9]'
+  # ---- 1.8.0 新增：设备**中途从总线上消失** ----
+  # 1.7.8 现场那台 RTX 5090 开测 20 秒就掉下 PCIe 总线，内核刷了 3019 行
+  # "GPU lost from the bus"，而当时这个模式里一个 NVIDIA 关键字都没有 ——
+  # 1.1MB 的 NVRM 报错喂进来命中数是 0，于是"内核日志复查 PASS"。
+  #
+  # ⚠️ 只收**明确说设备没了**的三条原话，一条都不能再宽：
+  #   - 它们和"驱动版本不支持这张卡"（NVRM: ... is not supported by /
+  #     No NVIDIA GPU found / probe routine was not called）完全不重叠。
+  #     那几句是**我们带的驱动旧了**，判 FAIL 就是把好卡说成坏卡，
+  #     是这个项目的第二条红线。tests/test-hw-checks.sh 里有成对断言钉着。
+  #   - 不收裸 "Xid"（正常日志里也会出现这三个字母的其他含义），
+  #     不收 RmInitAdapter（开机阶段驱动没起来也会打，含义不唯一）。
+  # 在你那 7 份真机样本上对过：坏的那台命中 3019 行，其余 6 台全 0。
+  pat+='|GPU lost from the bus|NV_ERR_GPU_IS_LOST|has fallen off the bus'
   printf '%s' "$pat"
+}
+
+# ---------------------------------------------------------------- 错误摘要
+#
+# 1.8.0 现场那台坏卡的报告上写的是：
+#   「压测期间内核日志出现 3018 条硬件错误。示例：[Thu Aug 6 14:08:00 2026]
+#     NVRM: GPU0 nvAssertOkFailedNoLog: Assertion failed: GPU lost from the
+#     bus [NV_ERR_GPU_IS_LOST] (0x0000000F) returned from _intrService...」
+#
+# 两个毛病：
+#   1. **"3018 条"读起来像 3018 个不同的毛病**，实际上是同一句话被刷了 3016 遍
+#      （核对过：3018 行里只有 3 种写法，而且全是同一件事——显卡掉总线）。
+#   2. 示例直接把内核的断言原文贴给客户，那串东西连我们自己都要愣一下。
+#
+# 所以按"抹掉时间戳和数字之后长得一样就算同一类"归并，报的是**类别数**，
+# 每类给一条剪短的代表。这不改变判定，只改变怎么说。
+#
+# 抽成纯函数，见 tests/test-hw-checks.sh。
+
+# dmesg_error_kinds <错误文件> -> 每行 "条数<TAB>代表原文"，按条数从多到少
+dmesg_error_kinds() {
+  local f="${1:-}"
+  [[ -f "$f" ]] || return 0
+  # 归一化：去掉行首时间戳、把十六进制和十进制数字抹平，
+  # 这样 "GPU0"/"GPU1"、"@ intr.c:1653"/"@ intr.c:1700" 会并成一类。
+  awk '
+    {
+      raw = $0
+      key = raw
+      sub(/^\[[^]]*\][[:space:]]*/, "", key)
+      gsub(/0x[0-9a-fA-F]+/, "0xN", key)
+      gsub(/[0-9]+/, "N", key)
+      if (!(key in cnt)) { rep[key] = raw; ord[++m] = key }
+      cnt[key]++
+    }
+    END { for (i = 1; i <= m; i++) printf "%d\t%s\n", cnt[ord[i]], rep[ord[i]] }
+  ' "$f" 2>/dev/null | sort -rn -k1,1
+}
+
+# dmesg_error_family <一行日志> -> 这条错误说的是哪种硬件问题（中文），认不出返回空
+#
+# 客户报告里要出现的是"显卡从 PCIe 总线上掉线"，不是
+# "nvAssertOkFailedNoLog: Assertion failed: ... @ intr.c:1653"。
+# 内核断言原文对客户没有任何意义，原文完整留在 raw/dmesg-errors.txt 里（ref 指着它）。
+#
+# ⚠️ 这只是**贴标签**，不参与判定 —— 判定在 dmesg_hw_error_pattern 那边已经做完了。
+# 认不出来的一律走"其他"分支并附上原文，绝不能因为认不出就把这条错误吞掉。
+dmesg_error_family() {
+  local l="${1:-}"
+  case "$l" in
+    *"GPU lost from the bus"*|*NV_ERR_GPU_IS_LOST*|*"has fallen off the bus"*)
+      printf '显卡/扩展卡从 PCIe 总线上掉线' ;;
+    *"in FAULT state"*|*"killing adapter"*|*"reset adapter never cleared"*|*"Reset failed"*)
+      printf '存储控制器/阵列卡固件进入故障状态' ;;
+    *"Machine Check"*|*"Hardware Error"*)
+      printf 'CPU 机器检查异常（MCE）' ;;
+    *"EDAC MC"*" CE "*|*"EDAC MC"*" UE "*|*Uncorrected*|*uncorrectable*)
+      printf '内存 ECC 错误' ;;
+    *"medium error"*|*"Buffer I/O error"*|*"I/O error"*|*"ATA bus error"*|*"failed command"*)
+      printf '硬盘读写错误' ;;
+    *"DPC: containment"*|*ERR_FATAL*|*ERR_NONFATAL*|*"PCIe Bus Error"*|*"AER:"*|*"EDR: "*)
+      printf 'PCIe 链路错误' ;;
+    *"thermal throttl"*|*"critical temperature"*)
+      printf '温度过高触发降频或保护' ;;
+    *"link is down"*)
+      printf '网络链路中断' ;;
+    *) printf '' ;;
+  esac
+}
+
+# dmesg_error_summary <错误文件> <总条数> -> 给客户看的一句话
+#
+# 说的是**有几种问题、各多少条**，不是把内核原文贴出来。
+# 1.8.0 之前写的是「出现 3018 条硬件错误。示例：<一大串内核断言>」——
+# "3018 条"读起来像 3018 个不同的毛病，实际上是同一件事（显卡掉总线）
+# 被刷了 3018 遍。
+dmesg_error_summary() {
+  local f="${1:-}" total="${2:-0}"
+  [[ -f "$f" ]] || { printf '共 %s 条' "$total"; return; }
+
+  local -a fam_name=() fam_cnt=() fam_rep=()
+  local cnt line fam i found
+  while IFS=$'\t' read -r cnt line; do
+    [[ -n "$cnt" ]] || continue
+    fam="$(dmesg_error_family "$line")"
+    [[ -n "$fam" ]] || fam="其他内核硬件错误"
+    found=-1
+    for i in "${!fam_name[@]}"; do
+      [[ "${fam_name[$i]}" == "$fam" ]] && { found="$i"; break; }
+    done
+    if (( found >= 0 )); then
+      fam_cnt[$found]=$(( fam_cnt[found] + cnt ))
+    else
+      fam_name+=("$fam"); fam_cnt+=("$cnt")
+      # 认不出来的那类才留原文（剪短、去时间戳），已认出的不需要
+      if [[ "$fam" == "其他内核硬件错误" ]]; then
+        fam_rep+=("$(printf '%s' "$line" | sed -E 's/^\[[^]]*\][[:space:]]*//' | cut -c1-120)")
+      else
+        fam_rep+=("")
+      fi
+    fi
+  done < <(dmesg_error_kinds "$f")
+
+  (( ${#fam_name[@]} > 0 )) || { printf '共 %s 条' "$total"; return; }
+
+  local out=""
+  for i in "${!fam_name[@]}"; do
+    [[ -n "$out" ]] && out+="；"
+    out+="${fam_name[$i]}（${fam_cnt[$i]} 条）"
+    [[ -n "${fam_rep[$i]}" ]] && out+="：${fam_rep[$i]}"
+  done
+
+  if (( ${#fam_name[@]} == 1 )); then
+    # 最常见的情况：同一件事被刷了几千遍。必须说清楚这是**一个**问题，
+    # 不然"3018 条"会被读成 3018 个毛病。
+    printf '共 %s 条日志，都指向同一个问题：%s' "$total" "${fam_name[0]}"
+    [[ -n "${fam_rep[0]}" ]] && printf '：%s' "${fam_rep[0]}"
+  else
+    printf '共 %s 条日志，涉及 %s 类问题：%s' "$total" "${#fam_name[@]}" "$out"
+  fi
 }
 
 # dmesg_scan_hw_errors <输入日志> <输出文件>
@@ -237,10 +371,10 @@ verify_dmesg_boot() {
   local n; n="$(count_lines "$RAW_DIR/dmesg-errors-boot.txt")"
 
   if (( n > 0 )); then
-    local sample; sample="$(head -3 "$RAW_DIR/dmesg-errors-boot.txt" | tr '\n' ' ' | cut -c1-300)"
+    local sample; sample="$(dmesg_error_summary "$RAW_DIR/dmesg-errors-boot.txt" "$n")"
     result_add "verify_dmesg_boot" "开机内核日志复查" "$ST_FAIL" \
-      "开机与硬件采集阶段内核日志出现 ${n} 条硬件错误（这些发生在压测开始之前，\
-说明机器在上电初始化时就有硬件异常）。示例：${sample}" "raw/dmesg-errors-boot.txt"
+      "开机与硬件采集阶段内核日志出现硬件错误（这些发生在压测开始之前，\
+说明机器在上电初始化时就有硬件异常）。${sample}" "raw/dmesg-errors-boot.txt"
   else
     result_add "verify_dmesg_boot" "开机内核日志复查" "$ST_PASS" \
       "开机与硬件采集阶段无硬件错误日志" "raw/dmesg-pre.txt"
@@ -264,9 +398,9 @@ verify_dmesg() {
   local n; n="$(count_lines "$RAW_DIR/dmesg-errors.txt")"
 
   if (( n > 0 )); then
-    local sample; sample="$(head -3 "$RAW_DIR/dmesg-errors.txt" | tr '\n' ' ' | cut -c1-300)"
+    local sample; sample="$(dmesg_error_summary "$RAW_DIR/dmesg-errors.txt" "$n")"
     result_add "verify_dmesg" "内核日志复查" "$ST_FAIL" \
-      "压测期间内核日志出现 ${n} 条硬件错误。示例：${sample}" "raw/dmesg-errors.txt"
+      "压测期间内核日志出现硬件错误。${sample}" "raw/dmesg-errors.txt"
   else
     result_add "verify_dmesg" "内核日志复查" "$ST_PASS" "压测期间无硬件错误日志" "raw/dmesg-delta.txt"
   fi

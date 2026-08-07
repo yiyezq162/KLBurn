@@ -315,5 +315,77 @@ check "不匹配的文案里不许把原因说成硬件异常" "0" \
 
 # ================================================================
 echo
+echo "=== 显卡中途掉线：gpu_burn 说 OK 也不算数 ==="
+#
+# 1.7.8 现场那台 RTX 5090 开测第 20 秒掉下 PCIe 总线，跑满一小时依旧判 PASS、
+# 零告警。事后翻数据，能区分好坏的证据有三条，**gpu_burn 自己的结论不在其中**：
+# 好机器和坏机器最后都打 "GPU 0: OK"。下面钉的就是那三条。
+
+# ---- 采样统计：有效行 = 真读到了一块卡 ----
+cat > "$TMP/gm-good.csv" <<'EOF'
+time,index,name,temp_c,power_w,clock_sm_mhz,util_pct,mem_used_mb
+02:18:03,0,NVIDIA GeForce RTX 5090,36,64.45,1747,2,0
+02:18:10,0,NVIDIA GeForce RTX 5090,71,412.15,2542,99,28935
+02:18:18,0,NVIDIA GeForce RTX 5090,78,453.12,2542,100,28935
+EOF
+check "全是正常读数时，有效采样 = 总采样" "3 3" "$(gpu_sample_stats "$TMP/gm-good.csv")"
+
+# 真实样本的原样：掉线后 nvidia-smi 每次只吐一句错误，连列都凑不齐
+cat > "$TMP/gm-lost.csv" <<'EOF'
+time,index,name,temp_c,power_w,clock_sm_mhz,util_pct,mem_used_mb
+02:18:03,0,NVIDIA GeForce RTX 5090,36,64.45,1747,2,0
+02:18:18,0,NVIDIA GeForce RTX 5090,36,67.12,2542,4,28935
+02:18:23,No devices were found
+02:18:28,No devices were found
+02:18:33,No devices were found
+EOF
+check "掉线后的行不算有效采样" "5 2" "$(gpu_sample_stats "$TMP/gm-lost.csv")"
+
+# 换一种错误文案也必须照样算作"没读到" —— 判据是正面的"这行是不是正常读数"，
+# 不是去穷举 nvidia-smi 的错误措辞（措辞各版本不一样，穷举迟早漏）
+cat > "$TMP/gm-lost2.csv" <<'EOF'
+time,index,name,temp_c,power_w,clock_sm_mhz,util_pct,mem_used_mb
+02:18:03,0,NVIDIA GeForce RTX 5090,36,64.45,1747,2,0
+02:18:23,Unable to determine the device handle for GPU 0000:98:00.0: GPU is lost
+02:18:28,NVIDIA-SMI has failed because it couldn't communicate with the driver
+EOF
+check "换一种掉线文案也算不到有效采样里" "3 1" "$(gpu_sample_stats "$TMP/gm-lost2.csv")"
+
+: > "$TMP/gm-empty.csv"
+check "空 csv 不崩" "0 0" "$(gpu_sample_stats "$TMP/gm-empty.csv")"
+check "csv 根本不存在也不崩" "0 0" "$(gpu_sample_stats "$TMP/nope.csv")"
+
+# ---- 进度停滞 ----
+# gpu_burn 的进度是 \r 原地刷新的，整个日志常常只有"一行"。
+printf 'Burning for 3600 seconds.\r' > "$TMP/burn-stall.log"
+for _ in 1 2 3 4 5; do
+  printf "50.0%%  proc'd: 109 (28477 Gflop/s)   errors: 0   temps: 55 C \r" >> "$TMP/burn-stall.log"
+done
+printf '\nTested 1 GPUs:\n\tGPU 0: OK\n' >> "$TMP/burn-stall.log"
+check "卡掉线后进度纹丝不动 -> 只有 1 个取值" "1" "$(gpu_burn_progress_steps "$TMP/burn-stall.log")"
+check "而它的结尾照样是 OK（所以结尾判不了掉卡）" "0 0" \
+      "$(gpu_parse_burn_log "$TMP/burn-stall.log")"
+
+printf 'Burning for 3600 seconds.\r' > "$TMP/burn-move.log"
+for n in 81 940 5231 18877 29241; do
+  printf "50.0%%  proc'd: %s (28477 Gflop/s)   errors: 0   temps: 71 C \r" "$n" >> "$TMP/burn-move.log"
+done
+printf '\nTested 1 GPUs:\n\tGPU 0: OK\n' >> "$TMP/burn-move.log"
+check "正常跑的日志进度一直在涨 -> 多个取值" "5" "$(gpu_burn_progress_steps "$TMP/burn-move.log")"
+
+# 读不出进度时必须返回 0（= 不判）。**这条是红线**：认不出日志格式是我们
+# 这边的能力问题，不能倒过来说客户的卡坏了。
+printf 'some other tool output\nwith no progress lines\n' > "$TMP/burn-alien.log"
+check "认不出进度格式时返回 0（交给上层不判，绝不当成掉卡）" "0" \
+      "$(gpu_burn_progress_steps "$TMP/burn-alien.log")"
+check "日志不存在时也返回 0" "0" "$(gpu_burn_progress_steps "$TMP/nope.log")"
+
+# 计数为 0 时 grep -c 会「既打印 0 又返回 1」，写成 `|| printf 0` 就成了 "00"。
+# core.sh 里 count_lines 那段注释记的就是这个坑，这里钉一条防止退回去。
+check "返回值必须是干净的单个整数（不能是 '00'）" "1" \
+      "$(printf '%s' "$(gpu_burn_progress_steps "$TMP/nope.log")" | grep -c '^0$')"
+
+# ================================================================
+echo
 printf '通过 %d 项，失败 %d 项\n' "$PASS" "$FAIL"
 exit $(( FAIL > 0 ? 1 : 0 ))

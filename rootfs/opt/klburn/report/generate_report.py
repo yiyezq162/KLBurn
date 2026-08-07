@@ -89,6 +89,24 @@ def clean(v):
     return s
 
 
+def disk_serial_key(v):
+    """硬盘序列号归一化，用来判断"这两行说的是不是同一块盘"。
+
+    同一块盘从两条路读出来的序列号写法会有差别：lsblk / smartctl 直读的是
+    `K48060R002933`，而阵列卡透传那条常常带补齐空格或大小写不同。
+    只留字母数字并统一成大写，比较才稳。
+
+    返回 None 表示这个序列号不可用于比对（空值、或 dmidecode 那类占位垃圾），
+    **绝不能拿 None 去撞另一个 None**，否则两块都没有序列号的盘会被并成一块。
+    """
+    s = clean(v)
+    if not s:
+        return None
+    key = re.sub(r"[^0-9A-Za-z]", "", s).upper()
+    # 太短的不敢当唯一标识（见过阵列卡把序列号截成 "0"）
+    return key if len(key) >= 4 else None
+
+
 def human_bytes(n):
     try:
         n = float(n)
@@ -186,7 +204,10 @@ def svg_line_chart(series, y_label="", y_suffix="", width=880, height=280,
     if not series:
         return '<p class="muted">（无采样数据）</p>'
 
-    pad_l, pad_r, pad_t, pad_b = 58, 16, 16, 34
+    # pad_l 是留给 Y 轴刻度文字的宽度。刻度用 text-anchor="end" 贴着 pad_l-8 画，
+    # 所以它必须容得下最长的一条刻度（"28935MB" / "3000MHz" 这种 7 个字符）。
+    # 58 太紧，1.8.0 转 PDF 时最左边一列被切掉了半个字。
+    pad_l, pad_r, pad_t, pad_b = 70, 16, 16, 34
     plot_w = width - pad_l - pad_r
     plot_h = height - pad_t - pad_b
 
@@ -212,21 +233,33 @@ def svg_line_chart(series, y_label="", y_suffix="", width=880, height=280,
     parts = ['<svg class="chart" viewBox="0 0 %d %d" '
              'preserveAspectRatio="xMidYMid meet" role="img">' % (width, height)]
 
+    # ⚠️ 颜色和字号必须写成 SVG 的**呈现属性**，不能只靠外部 CSS 的 .grid/.axis。
+    #
+    # 浏览器会把外部样式表级联进内联 SVG，所以只写 CSS 时 HTML 看着是好的；
+    # 但 PDF 渲染器（WeasyPrint）不会 —— 它直接丢掉 `fill:`/`stroke:` 这类规则
+    # （转换时会打 "Ignored fill:#8a9099"），于是刻度文字退回默认字号 16px，
+    # 一下子撑爆 pad_l 预留的宽度，最左边被裁掉半个字。
+    # 写成属性，两边都对；CSS 里那几条留着不冲突（属性优先级更低，但值一样）。
+    GRID = 'stroke="#eef0f3" stroke-width="1"'
+    AXIS = 'font-size="11" fill="#8a9099" font-family="sans-serif"'
+
     # 网格 + Y 轴刻度
     for i in range(5):
         v = lo + (hi - lo) * i / 4.0
         y = py(v)
-        parts.append('<line x1="%.1f" y1="%.1f" x2="%.1f" y2="%.1f" class="grid"/>'
-                     % (pad_l, y, width - pad_r, y))
-        parts.append('<text x="%.1f" y="%.1f" class="axis" text-anchor="end">%s%s</text>'
-                     % (pad_l - 8, y + 4, ("%.0f" % v) if abs(v) >= 10 else ("%.1f" % v), y_suffix))
+        parts.append('<line x1="%.1f" y1="%.1f" x2="%.1f" y2="%.1f" class="grid" %s/>'
+                     % (pad_l, y, width - pad_r, y, GRID))
+        parts.append('<text x="%.1f" y="%.1f" class="axis" %s text-anchor="end">%s%s</text>'
+                     % (pad_l - 8, y + 4, AXIS,
+                        ("%.0f" % v) if abs(v) >= 10 else ("%.1f" % v), y_suffix))
 
     # X 轴标注（起止）
-    parts.append('<text x="%.1f" y="%.1f" class="axis">采样开始</text>' % (pad_l, height - 10))
-    parts.append('<text x="%.1f" y="%.1f" class="axis" text-anchor="end">采样结束</text>'
-                 % (width - pad_r, height - 10))
+    parts.append('<text x="%.1f" y="%.1f" class="axis" %s>采样开始</text>'
+                 % (pad_l, height - 10, AXIS))
+    parts.append('<text x="%.1f" y="%.1f" class="axis" %s text-anchor="end">采样结束</text>'
+                 % (width - pad_r, height - 10, AXIS))
     if y_label:
-        parts.append('<text x="6" y="12" class="axis">%s</text>' % E(y_label))
+        parts.append('<text x="6" y="12" class="axis" %s>%s</text>' % (AXIS, E(y_label)))
 
     for idx, (label, vals) in enumerate(series):
         color = PALETTE[idx % len(PALETTE)]
@@ -242,7 +275,8 @@ def svg_line_chart(series, y_label="", y_suffix="", width=880, height=280,
         txt = "%s (峰值 %.0f%s)" % (label, peak, y_suffix)
         parts.append('<rect x="%.1f" y="%.1f" width="10" height="10" fill="%s"/>'
                      % (lx, pad_t - 2, color))
-        parts.append('<text x="%.1f" y="%.1f" class="legend">%s</text>'
+        parts.append('<text x="%.1f" y="%.1f" class="legend" '
+                     'font-size="11" fill="#333" font-family="sans-serif">%s</text>'
                      % (lx + 14, pad_t + 7, E(txt)))
         lx += 14 + max(90, len(txt) * 7.2)
         if lx > width - 120:
@@ -489,6 +523,19 @@ class Data(object):
             usb_parent = m.group(1)
 
         out = []
+        # 操作系统看得见的盘，按序列号记一份索引。
+        #
+        # 阵列卡跑 JBOD / 直通模式时，同一块物理盘**既有 /dev 节点、又能被阵列卡
+        # 逐块读到**，于是下面那一圈会把它当成"阵列卡后面另一块盘"再列一次 ——
+        # 1.7.8 现场就是这样：一块 FORESEE 128GB SSD（序列号 K48060R002933）
+        # 在报告里出现了两行，客户看到的是"这台机器有两块盘"。
+        #
+        # RAID 模式下不会重复，那是因为操作系统看到的是**虚拟盘**（型号
+        # AVAGO MR9361-16i，序列号是阵列卡自己编的），和后端物理盘本来就是
+        # 两个不同的东西，两行都该在。所以判据只能是序列号，不能是"有没有阵列卡"。
+        os_serial_row = {}
+        # 后面挂着阵列卡物理盘的那些块设备名（smart 文件名形如 sda-pd0.norm.json）
+        vd_names = set(vd for vd, _n in self.raid_pd_keys())
         for d in lsblk.get("blockdevices", []):
             if d.get("type") != "disk":
                 continue
@@ -505,17 +552,37 @@ class Data(object):
             # 这张表只列参与判定的字段。寿命类（通电时间/通电次数/累计读写量）
             # 不参与判定，完整数值在工程数据和内部报告里。
             # 盘好不好，看的是 SMART 健康状态和坏道计数压测前后有没有变化。
+            # 这块"盘"其实是阵列卡做出来的逻辑盘（RAID 模式下操作系统看到的就是它）。
+            #
+            # 判据要两个条件同时成立，缺一不可：
+            #   1) 它后面挂着阵列卡的物理盘
+            #   2) 它自己读不出 SMART
+            # 只看第 1 条会把 JBOD/直通的真盘也误判成逻辑盘 —— 直通时物理盘同样
+            # 有 pd 文件，但它自己的 SMART 是读得出来的。
+            is_vd = (name in vd_names) and (sm.get("smart_passed") is None)
+
+            # 逻辑盘没有"转不转"，也没有自己的温度。
+            # lsblk 对 MegaRAID 逻辑盘默认报 rota=1，照抄就会在报告上写"机械盘"——
+            # 而它背后可能全是 SSD。温度那格同理，读出来的 0°C 是个假数。
+            if is_vd:
+                media = "阵列卡逻辑盘"
+                temp = None
+            else:
+                media = "机械盘" if d.get("rota") else "固态盘"
+                temp = (("%s°C" % smp.get("temperature_c"))
+                        if smp.get("temperature_c") is not None else
+                        (("%s°C" % sm.get("temperature_c"))
+                         if sm.get("temperature_c") is not None else None))
+
             out.append(OrderedDict([
                 ("设备", path),
                 ("型号", clean(sm.get("model")) or clean(d.get("model"))),
                 ("序列号", clean(sm.get("serial")) or clean(d.get("serial"))),
                 ("固件", clean(sm.get("firmware"))),
                 ("容量", human_bytes(d.get("size") or sm.get("capacity_bytes"))),
-                ("接口", (d.get("tran") or "—")),
-                ("介质", "机械盘" if d.get("rota") else "固态盘"),
-                ("当前温度", ("%s°C" % smp.get("temperature_c"))
-                    if smp.get("temperature_c") is not None else
-                    (("%s°C" % sm.get("temperature_c")) if sm.get("temperature_c") is not None else None)),
+                ("接口", ("阵列卡" if is_vd else (d.get("tran") or "—"))),
+                ("介质", media),
+                ("当前温度", temp),
                 ("SMART健康", "正常" if sm.get("smart_passed") is True
                     else ("异常" if sm.get("smart_passed") is False else None)),
             ]))
@@ -524,12 +591,23 @@ class Data(object):
             if show_stress_col:
                 out[-1]["本次压测"] = "是" if path in tested else "否"
 
+            sn = disk_serial_key(out[-1]["序列号"])
+            if sn:
+                os_serial_row[sn] = out[-1]
+
         # 阵列卡后端的物理盘。它们没有自己的 /dev 节点，所以上面按 lsblk 那一圈
         # 扫不到 —— 但客户买的正是这些盘，报告里必须有。
         for vd, n in self.raid_pd_keys():
             sm = read_json(self.rawpath("smart-pre", "%s-pd%s.norm.json" % (vd, n)), {})
             smp = read_json(self.rawpath("smart-post", "%s-pd%s.norm.json" % (vd, n)), {})
             if not sm:
+                continue
+            # 直通/JBOD：这块盘上面已经作为 /dev/sdX 列过了，不能再列一行。
+            # 把已有那行的"接口"补成阵列卡直通即可 —— 客户既知道盘只有一块，
+            # 也知道它是挂在阵列卡后面的。
+            sn = disk_serial_key(clean(sm.get("serial")))
+            if sn and sn in os_serial_row:
+                os_serial_row[sn]["接口"] = "阵列卡直通"
                 continue
             rota = sm.get("rotation_rate")
             out.append(OrderedDict([
@@ -669,6 +747,99 @@ class Data(object):
             n = len(re.findall(r"^\s*\d+/\d+\s+\S+", block, re.M))
             return ("%d 个" % n) if n else None
         return None
+
+    # ---------- 硬盘背板（机框） ----------
+    #
+    # 只进内部报告，**不进交付报告**。
+    # 理由是现场提的：这个数拿不准的时候宁可不写 —— 客户看到"4 盘位"
+    # 而机器实际是 8 盘位（背板不上报、或者只挂了一半），会当成缺件。
+    # 内部留档另说，回档查"这台当初什么背板"时这一条最值钱。
+    #
+    # 两条独立来源，都拿不到就是拿不到，绝不猜：
+    #   1) 阵列卡自己报的机框：storcli /cX/eall show all -> Number of Slots
+    #   2) SES 背板：sg_ses -p cf -> "number of possible elements"
+    #      （元件类型是 "Array device slot" 那一项才是盘位）
+    # 纯直连背板（没有 expander、也不带 SES 芯片）两条都问不出来，
+    # 这种情况下返回空，报告那边写"未检测到"。
+    def backplanes(self):
+        out = []
+
+        # ---- 来源 1：阵列卡机框 ----
+        for fn in ("storcli-enclosure.txt", "raid/perccli64-enclosure.txt"):
+            txt = read_text(self.rawpath(*fn.split("/")))
+            if not txt.strip():
+                continue
+            # 按 "Enclosure /cX/eY :" 切块
+            for block in re.split(r"\n(?=Enclosure\s+/c\d+/e\d+\s*:)", txt):
+                mh = re.search(r"Enclosure\s+(/c(\d+)/e(\d+))\s*:", block)
+                if not mh:
+                    continue
+                slots = re.search(r"^\s*Number of Slots\s*=\s*(\d+)", block, re.M)
+                if not slots:
+                    continue
+                etype = re.search(r"^\s*Enclosure Type\s*=\s*(.+?)\s*$", block, re.M)
+                vend = re.search(r"^\s*Vendor Identification\s*=\s*(.+?)\s*$", block, re.M)
+                prod = re.search(r"^\s*Product Identification\s*=\s*(.+?)\s*$", block, re.M)
+                pd = re.search(r"^\s*Number of PDs\s*=\s*(\d+)", block, re.M)
+                out.append(OrderedDict([
+                    ("背板", "控制器 %s / 机框 %s" % (mh.group(2), mh.group(3))),
+                    ("盘位数", slots.group(1)),
+                    ("在位硬盘", pd.group(1) if pd else None),
+                    ("类型", clean(etype.group(1)) if etype else None),
+                    ("厂商", clean(vend.group(1)) if vend else None),
+                    ("型号", clean(prod.group(1)) if prod else None),
+                    ("来源", "阵列卡"),
+                ]))
+
+        # ---- 来源 2：SES 背板 ----
+        d = self.rawpath("deep")
+        if os.path.isdir(d):
+            for f in sorted(os.listdir(d)):
+                if not f.startswith("sg_ses-cf-"):
+                    continue
+                txt = read_text(os.path.join(d, f))
+                if not txt.strip():
+                    continue
+                # sg_ses -p cf 的元件行形如：
+                #   Element type: Array device slot, subenclosure id: 0,
+                #     number of possible elements: 12
+                # 盘位只认 "Array device slot" / "Device slot" 两种类型，
+                # 风扇、电源、温度传感器的数量不能混进来当盘位。
+                slots = 0
+                for m in re.finditer(
+                        r"Element type:\s*(Array device slot|Device slot)\b"
+                        r".*?number of possible elements:\s*(\d+)",
+                        txt, re.S | re.I):
+                    slots += int(m.group(2))
+                if slots <= 0:
+                    continue
+                vend = re.search(r"vendor:\s*(.+?)\s*(?:product:|$)", txt, re.I | re.M)
+                prod = re.search(r"product:\s*(.+?)\s*(?:rev:|$)", txt, re.I | re.M)
+                out.append(OrderedDict([
+                    ("背板", f[len("sg_ses-cf-"):].replace(".txt", "")),
+                    ("盘位数", str(slots)),
+                    ("在位硬盘", None),
+                    ("类型", "SES"),
+                    ("厂商", clean(vend.group(1)) if vend else None),
+                    ("型号", clean(prod.group(1)) if prod else None),
+                    ("来源", "SES"),
+                ]))
+        return out
+
+    def backplane_summary(self):
+        """把背板列表压成一句话：'12 盘位 x1'、'4 盘位 x3'。拿不到返回 None。"""
+        bps = self.backplanes()
+        if not bps:
+            return None
+        counts = OrderedDict()
+        for b in bps:
+            s = b.get("盘位数")
+            if not s:
+                continue
+            counts[s] = counts.get(s, 0) + 1
+        if not counts:
+            return None
+        return "、".join("%s 盘位 x%d" % (s, n) for s, n in counts.items())
 
     def raid(self):
         txt = read_text(self.rawpath("storcli-show.txt"))
@@ -901,8 +1072,56 @@ font-size:11.5px;line-height:1.45;max-height:460px;font-family:Consolas,Monaco,m
 .notice-info{background:#eef4fd;border-color:#b9d0f0;color:#1f4d8f}
 footer{margin-top:44px;padding-top:14px;border-top:1px solid var(--line);
 color:var(--muted);font-size:12px}
-@media print{body{font-size:11pt}details{break-inside:avoid}details[open] pre{max-height:none}
-h2{break-after:avoid}.result-row{break-inside:avoid}}
+/* ================= 打印 / 转 PDF =================
+   注意：CSS 注释是会跟着 <style> 一起进 HTML 的，所以这里不能用
+   「星号星号」那种强调写法 —— test-report-render 有一条守卫在查
+   「客户报告里不许出现字面的星号」，写进来就会跑红（写这段时刚踩过）。
+
+   PDF 是「拿这份 HTML 渲染出来的」，不是另画一份 —— 所以改了报告内容，
+   PDF 自动跟着变，不存在"改了个东西 PDF 那边没覆盖到"。
+   下面这些只在出 PDF 时生效，屏幕上看 HTML 完全不受影响。
+
+   1.8.0 之前少了这几条，一份真实报告转出来是 179 页，
+   而其中只有 8 页是报告本身，剩下 171 页全是原始日志 —— 而且有三处是坏的。
+   这三处都是"HTML 上一切正常、只有转成 PDF 才露出来"的，
+   断言抓不到，只能把 PDF 渲成图去看（见 architecture.md §11-30）。 */
+@page{size:A4;margin:14mm 12mm}
+@media print{
+  body{font-size:11pt}
+  thead{display:table-header-group}
+  tr,.chart,.result-row,details{break-inside:avoid;page-break-inside:avoid}
+  h2,h3{break-after:avoid;page-break-after:avoid}
+
+  /* (1) 判定行不能用 flex。
+        PDF 渲染器对 flex 只支持一半，详情一长就换行错位 ——
+        实测那台坏卡的报告里，FAIL 徽章、"内核日志复查"、和详情三样
+        叠印在同一个位置，糊成一团完全没法读。
+        退回块级布局：徽章和名称一行，详情另起一行。 */
+  .result-row{display:block}
+  .result-row .rn{display:inline-block;min-width:0;margin-right:8px}
+  .result-row .rd{display:block;margin-top:5px}
+  .badge{margin-right:8px}
+  .kv div{display:block}
+  .kv b{display:inline-block}
+
+  /* (2) 折叠块在 PDF 里保持折叠。
+        HTML 里这 20 块原始日志默认是收起来的（点开才看），
+        而 PDF 渲染器不管 open 属性、一律全展开 —— 于是 171 页日志。
+        光 GPU 压测日志就 40 页进度百分比，内核日志 38 页同一句话。
+        PDF 应该长得像你打开 HTML 时看到的样子，所以这里让它保持收起，
+        并在标题后注明去哪看全文（.html 就在同一个目录里，什么都没丢）。 */
+  details:not([open]) > *:not(summary){display:none !important}
+  details:not([open]) > summary::after{
+    content:"　（完整原文见同目录的 .html）";font-weight:400;
+    color:var(--muted);font-size:12px}
+
+  /* (3) 长行必须换行。
+        pre 用的是 overflow-x:auto —— 浏览器里给你一根横向滚动条，
+        而纸上没有滚动条：超出的部分直接冲出代码块背景、
+        跑到页面外面去，右边一大截被切掉，看着像叠在一起。 */
+  pre{white-space:pre-wrap;word-break:break-all;overflow:visible;max-height:none}
+  .tablewrap{overflow:visible}
+}
 """
 
 
