@@ -48,7 +48,7 @@ collect_system() {
   if [[ -s "$RAW_DIR/dmidecode.txt" ]] && ! grep -qi 'permission denied\|command not found' "$RAW_DIR/dmidecode.txt"; then
     result_add "collect_system" "硬件信息采集" "$ST_PASS" "主板/BIOS/CPU/内存信息采集完成" "raw/dmidecode.txt"
   else
-    result_add "collect_system" "硬件信息采集" "$ST_FAIL" "dmidecode 读取失败，无法获取主板信息" "raw/dmidecode.txt"
+    result_add "collect_system" "硬件信息采集" "$ST_FAIL" "未能读取主板 BIOS 记录的硬件信息" "raw/dmidecode.txt"
   fi
 }
 
@@ -589,7 +589,7 @@ collect_raid() {
       # 同一张坏卡通常在开机内核日志里也留了一串固件故障，「开机内核日志复查」
       # 会各自判一次 FAIL。两条都对，但客户看到的是"失败 2 项"——像两处独立故障。
       # 立个标志，让 verify_dmesg_boot 在文案里点一句"是同一件事"。
-      # 两个函数都在 collect_all 里、同一个 shell 跑（不是子 shell，§11-25），
+      # 两个函数都在 collect_all 里、同一个 shell 跑（不是子 shell，§11-28），
       # 而且 collect_raid 排在 verify_dmesg_boot 前面（test-hw-checks 钉着调用顺序）。
       RAID_FAULT_FOUND=1
       result_add "collect_raid" "阵列卡" "$ST_FAIL" \
@@ -806,17 +806,29 @@ bmc_clear_sel() {
 dmi_psu_list() {
   local f="${1:-$RAW_DIR/dmidecode-psu.txt}"
   [[ -f "$f" ]] || return 0
-  awk 'BEGIN{RS="";FS="\n"}
+  # ⚠️ BOGUS 这份名单和另外两处**必须一致**：
+  #      report/generate_report.py 的 BOGUS（客户报告里怎么显示）
+  #      lib/core.sh 的 _serial_is_bogus()（整机序列号退到哪一级）
+  #    三处各写各的曾经就是不一致的：海光那台的 `N/A` 只有 Python 认，
+  #    而 `To Be Filled By O.E.M`（没有结尾的点）只有 shell 认。
+  #    现在 tests/test-hw-checks.sh 拿同一张表逐个值把三处都实测一遍。
+  #
+  #    <bad index> / <out of spec> 是 dmidecode 自己打的"这条读不出来"标记
+  #    （BIOS 把字符串下标填到了字符串表外面）。Supermicro X11DPG-QT 的两路
+  #    电源就是四个身份字段全是 <BAD INDEX> —— 那是没填，不是填了个型号。
+  #    在这里少认一个占位符的后果是"把没填的身份当成真身份"。
+  awk 'BEGIN{RS="";FS="\n"
+      split("to be filled by o.e.m.|not specified|default string|none|unknown" \
+            "|n/a|na|no dimm|not present|empty|o.e.m.|system manufacturer" \
+            "|system product name|system serial number|0123456789" \
+            "|<bad index>|<out of spec>|-|--", _b, "|")
+      for (_i in _b) BOGUS[_b[_i]] = 1
+    }
     function junk(s) {
       s = tolower(s); gsub(/^[ \t]+|[ \t]+$/, "", s)
-      # <bad index> / <out of spec> 是 dmidecode 自己打的"这条读不出来"标记
-      # （BIOS 把字符串下标填到了字符串表外面）。Supermicro X11DPG-QT 的两路
-      # 电源就是四个身份字段全是 <BAD INDEX> —— 那是没填，不是填了个型号。
-      # 这份名单要和 report/generate_report.py 的 BOGUS 保持一致。
-      return (s == "" || s == "to be filled by o.e.m." || s == "not specified" \
-              || s == "default string" || s == "unknown" || s == "n/a" \
-              || s == "na" || s == "none" || s == "not present" || s == "o.e.m." \
-              || s == "<bad index>" || s == "<out of spec>" || s == "-")
+      # 结尾的点、大小写、后缀各家都不一样，前缀再兜一道
+      if (s == "" || s ~ /^to be filled/) return 1
+      return (s in BOGUS)
     }
     /System Power Supply/ {
       loc=""; st=""; cap=""; capseen=0; idseen=0; idreal=0

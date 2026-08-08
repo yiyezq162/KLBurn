@@ -75,7 +75,8 @@ def E_rich(s):
 BOGUS = {
     "to be filled by o.e.m.", "not specified", "default string", "none",
     "unknown", "n/a", "na", "no dimm", "not present", "empty", "o.e.m.",
-    "system manufacturer", "system product name", "0123456789",
+    "system manufacturer", "system product name", "system serial number",
+    "0123456789",
     # dmidecode 自己打出来的两个"这条读不出来"标记，不是厂商填的内容：
     #   <BAD INDEX>   字符串下标指到了字符串表外面（BIOS 填错了索引）
     #   <OUT OF SPEC> 枚举值不在 SMBIOS 规范里
@@ -87,12 +88,23 @@ BOGUS = {
 }
 
 
+# "To be filled by O.E.M." 各家的大小写和尾巴都不一样：有的没有结尾的点、
+# 有的写成 "To Be Filled By O.E.M. (dmi)"。BOGUS 是精确匹配，兜不住这些变体，
+# 所以再加一道前缀。
+#
+# ⚠️ 这条前缀 lib/core.sh 的 _serial_is_bogus() 从一开始就有，Python 这边没有 ——
+#    而两处的注释都写着"这份名单要和另一边保持一致"。后果和海光那台 `N/A`
+#    是同一个方向、只是反过来：BIOS 写成 "To Be Filled By O.E.M"（没有结尾的点）
+#    时 shell 认、Python 不认，于是这一格原样印进客户报告。
+#    三份名单的一致性现在由 tests/test-hw-checks.sh 逐个值实测，不靠人记。
+_BOGUS_PREFIX = "to be filled"
+
+
 def clean(v):
-    """dmidecode 里大量占位垃圾值，统一过滤掉"""
     if v is None:
         return None
     s = str(v).strip()
-    if not s or s.lower() in BOGUS:
+    if not s or s.lower() in BOGUS or s.lower().startswith(_BOGUS_PREFIX):
         return None
     return s
 
@@ -123,6 +135,44 @@ def dmi_status_cn(v):
         return None
     parts = [x.strip() for x in s.split(",") if x.strip()]
     return "，".join(DMI_STATUS_CN.get(x.lower(), x) for x in parts) or None
+
+
+# 「其他实测指标」那张表的分组列。metric_add 的第一个参数是**内部分组键**
+# （cpu / mem / gpu / disk / nic / pcie，还有逐卡的 gpu0、gpu1……），
+# 它是给 metrics.jsonl 和内部报告做归类用的，不是写给客户看的词。
+# 一份中文报告里夹着一列 `mem` `pcie`，和 1.8.3 修掉的 `PCI`、`Present, OK`
+# 是同一类：照抄内部写法。
+METRIC_GROUP_CN = {
+    "cpu": "处理器", "mem": "内存", "gpu": "显卡", "disk": "硬盘",
+    "nic": "网卡", "pcie": "PCIe", "psu": "电源", "sys": "整机",
+}
+
+
+def metric_group_cn(g):
+    """内部分组键 -> 中文。认不出来的原样留着，绝不丢信息。"""
+    s = (str(g) if g is not None else "").strip()
+    if not s:
+        return s
+    base = METRIC_GROUP_CN.get(s.lower())
+    if base:
+        return base
+    # 逐卡/逐路的分组带序号：gpu0 -> 显卡0、cpu1 -> 处理器1
+    m = re.match(r"^([a-z]+)(\d+)$", s.lower())
+    if m and m.group(1) in METRIC_GROUP_CN:
+        return "%s%s" % (METRIC_GROUP_CN[m.group(1)], m.group(2))
+    return s
+
+
+# 指标名绝大多数本来就是中文（metric_add 的第二个参数），这里只收拾
+# 混进英文的那几个。同样：认不出来的原样留着。
+METRIC_KEY_CN = {
+    "FAULTY卡数": "状态异常卡数",
+}
+
+
+def metric_key_cn(k):
+    s = str(k) if k is not None else ""
+    return METRIC_KEY_CN.get(s.strip(), s)
 
 
 def nic_firmware_display(v):
@@ -358,8 +408,11 @@ class Data(object):
         return os.path.join(self.raw, *p)
 
     # ---------- IPMI 传感器 ----------
+    # BMC 传感器表的输出 -> {传感器名(小写): 读数}
+    # （说明写成 # 注释而不是 docstring：那条"文案里不许出现工具名"的守卫
+    #  用 "[^"]*" 抠字符串，会把三引号 docstring 整块当成一个字符串扫，
+    #  里面同时有中文和工具名就误报。见 test-hw-checks.sh 里的说明。）
     def ipmi_sensors(self):
-        """`ipmitool sensor list` 的输出 -> {传感器名(小写): 读数}"""
         if self._sensors is None:
             d = {}
             for line in read_text(self.rawpath("ipmi-sensors.txt")).splitlines():
@@ -1207,7 +1260,7 @@ color:var(--muted);font-size:12px}
    1.8.0 之前少了这几条，一份真实报告转出来是 179 页，
    而其中只有 8 页是报告本身，剩下 171 页全是原始日志 —— 而且有三处是坏的。
    这三处都是"HTML 上一切正常、只有转成 PDF 才露出来"的，
-   断言抓不到，只能把 PDF 渲成图去看（见 architecture.md §11-30）。 */
+   断言抓不到，只能把 PDF 渲成图去看（见 architecture.md §11-33）。 */
 @page{size:A4;margin:14mm 12mm}
 @media print{
   body{font-size:11pt}
@@ -1605,7 +1658,8 @@ def build_html(data):
         if peak_p:
             A('<p class="sub">逐卡功耗峰值：%s</p>' % E("、".join(peak_p)))
         A(svg_line_chart(power_series, y_label="W", y_suffix="W"))
-        A('<p class="sub">采样间隔 5 秒，数据来自 nvidia-smi，覆盖 GPU 满载压测全程。</p>')
+        A('<p class="sub">采样间隔 5 秒，数据取自显卡驱动的实时读数，'
+          "覆盖 GPU 满载压测全程。</p>")
 
     # ---------------- fio ----------------
     fio = data.fio_results()
@@ -1618,7 +1672,10 @@ def build_html(data):
     # 「失败压测项」是 stress-ng 内部子测试的失败计数，客户看到一个 0
     # 既不知道分母是多少，也不知道它和上面那条 PASS 有什么区别 ——
     # 有区别时上面那条就不会是 PASS。工程数据和内部报告里一个字段都没少。
-    INTERNAL_ONLY_METRICS = {("cpu", "失败压测项")}
+    # 「mem / 测试工具」是内存压测程序的名字。客户不需要知道盘里带的是
+    # stressapptest 还是 stress-ng —— 那是内部实现（§2-1「盘里带了什么工具」），
+    # 而且这一格失败与否也不由它决定。metrics.jsonl 和内部报告里一个字段都没少。
+    INTERNAL_ONLY_METRICS = {("cpu", "失败压测项"), ("mem", "测试工具")}
     shown_metrics = [m for m in data.metrics
                      if (m.get("group"), m.get("key")) not in INTERNAL_ONLY_METRICS]
     if shown_metrics:
@@ -1630,7 +1687,9 @@ def build_html(data):
         for g, items in groups.items():
             for it in items:
                 rows.append(OrderedDict([
-                    ("分组", g), ("指标", it.get("key")), ("数值", it.get("value")),
+                    ("分组", metric_group_cn(g)),
+                    ("指标", metric_key_cn(it.get("key"))),
+                    ("数值", it.get("value")),
                 ]))
         A(table(rows))
 
@@ -1642,7 +1701,7 @@ def build_html(data):
     # 一块盘几百行属性，绝大部分和判定无关，嵌进来只会把报告撑成一堆看不懂的数字。
     # 硬盘的结论看 1.4 表格和 SMART 复查那一项。
     for title, rel in [
-        ("dmidecode 全量输出", "dmidecode.txt"),
+        ("主板与整机信息（BIOS 记录）", "dmidecode.txt"),
         ("CPU 详细信息", "lscpu.txt"),
         ("内存条明细", "dmidecode-memory.txt"),
         ("PCI 设备列表", "lspci.txt"),

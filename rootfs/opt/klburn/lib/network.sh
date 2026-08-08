@@ -339,7 +339,7 @@ check_nic_speed() {
 
   if (( checked == 0 )); then
     result_add "check_nic_speed" "网卡协商速率" "$ST_SKIP" \
-      "现场没有接网线的网口（或 ethtool 读不到速率），无法核对协商速率" "raw/nic-summary.txt"
+      "现场没有接网线的网口（或网卡未上报协商速率），无法核对协商速率" "raw/nic-summary.txt"
   elif (( ${#slow[@]} > 0 )); then
     result_add "check_nic_speed" "网卡协商速率" "$ST_WARN" \
       "$(printf '%s；' "${slow[@]}")共核对 ${checked} 个已接网线的网口。\

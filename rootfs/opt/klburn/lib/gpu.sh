@@ -233,7 +233,7 @@ ${rest}此项不影响整机结论。" \
   # ---------- 情况 D：有卡但驱动起不来，且没有不匹配的证据 ----------
   if (( GPU_USABLE == 0 )); then
     result_add "gpu_detect" "GPU" "$ST_FAIL" \
-      "PCI 上能看到 ${GPU_PRESENT} 张 NVIDIA 显卡，但驱动加载失败 / nvidia-smi 读不到任何设备（显卡、供电或插槽异常）" \
+      "PCI 上能看到 ${GPU_PRESENT} 张 NVIDIA 显卡，但驱动加载失败、系统读不到任何一张（显卡、供电或插槽异常）" \
       "raw/gpu-smi-query.txt"
     return 1
   fi
@@ -381,7 +381,7 @@ gpu_stress() {
       "raw/stress/gpu-burn.log"
   elif (( faulty > 0 || err_sum > 0 )); then
     result_add "stress_gpu" "GPU 压力测试" "$ST_FAIL" \
-      "gpu_burn 报告 ${faulty} 张卡 FAULTY、累计 ${err_sum} 处计算校验错误（显卡故障）；$detail" \
+      "满载测试报告 ${faulty} 张卡状态异常、累计 ${err_sum} 处计算校验错误（显卡故障）；$detail" \
       "raw/stress/gpu-burn.log"
   elif oom_killed "$rc"; then
     # 和内存那边同样的道理：并发跑的内存压测把系统内存吃光时，OOM killer
@@ -393,7 +393,7 @@ gpu_stress() {
 在此之前已完成的计算校验未发现任何错误。${detail}" "raw/stress/gpu-burn.log"
   elif (( rc != 0 )); then
     result_add "stress_gpu" "GPU 压力测试" "$ST_FAIL" \
-      "gpu_burn 异常退出（退出码 $rc）；$detail" "raw/stress/gpu-burn.log"
+      "显卡满载测试程序异常退出（退出码 $rc）；$detail" "raw/stress/gpu-burn.log"
   elif (( overheat > 0 )); then
     result_add "stress_gpu" "GPU 压力测试" "$ST_FAIL" \
       "有 ${overheat} 张卡温度超过 ${GPU_TEMP_FAIL}°C（散热异常）；$detail" "raw/stress/gpu-burn.log"

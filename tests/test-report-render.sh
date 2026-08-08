@@ -90,6 +90,11 @@ cat > "$RD/metrics.jsonl" <<'EOF'
 {"group":"mem","key":"装机容量MB","value":"65536"}
 {"group":"mem","key":"系统识别MB","value":"31763"}
 {"group":"cpu","key":"失败压测项","value":"0"}
+{"group":"cpu","key":"峰值温度","value":"71"}
+{"group":"mem","key":"测试工具","value":"stressapptest"}
+{"group":"gpu0","key":"峰值功耗W","value":"453"}
+{"group":"gpu","key":"FAULTY卡数","value":"0"}
+{"group":"pcie","key":"新增AER可纠正设备数","value":"0"}
 EOF
 
 cat > "$RD/sys_metrics.csv" <<'EOF'
@@ -676,6 +681,26 @@ echo "=== 判的是我们、不是机器的指标，不进客户报告 ==="
 # 有区别时上面那条就不会是 PASS。工程数据和内部报告里一个字段都没少。
 has    "$OUT" "装机容量MB"  "正经指标照常在"
 has_no "$OUT" "失败压测项"  "内部计数不进客户报告"
+# 内存压测程序叫什么是内部实现（§2-1「盘里带了什么工具」）。这一格失败与否
+# 也不由它决定 —— metrics.jsonl 和内部报告里一个字段都没少。
+# 查的是**那一行指标**，不是「测试工具」四个字 —— 抬头里
+# 「测试工具 KLBurn v1.8.4」说的是我们这个产品自己，那句该留。
+has_no "$OUT" "<td>测试工具</td>" "压测程序的名字不进客户报告"
+has_no "$OUT" "stressapptest"     "连值也不许漏出去"
+
+echo
+echo "=== 「其他实测指标」的分组列是中文，不是内部键 ==="
+# metric_add 的第一个参数是内部分组键（mem / pcie / gpu0），给 metrics.jsonl
+# 归类用。一份中文报告里夹着一列 mem、pcie，和 1.8.3 修掉的 PCI、Present, OK
+# 是同一类：照抄内部写法。
+has    "$OUT" "<td>内存</td>"    "mem -> 内存"
+has    "$OUT" "<td>处理器</td>"  "cpu -> 处理器"
+has    "$OUT" "<td>显卡0</td>"   "带序号的分组：gpu0 -> 显卡0"
+has    "$OUT" "<td>PCIe</td>"    "pcie 有它自己的中文写法（就是 PCIe）"
+has_no "$OUT" "<td>mem</td>"     "内部分组键不许出现在表格里"
+has_no "$OUT" "<td>gpu0</td>"    "同上"
+has_no "$OUT" "FAULTY"           "指标名里混进来的英文也要收拾掉"
+has    "$OUT" "状态异常卡数"      "但那一行本身还在，信息不许少"
 
 echo
 echo "=== 抬头提示 ==="
@@ -790,6 +815,19 @@ if python3 "$GEN" --run-dir "$RD3" --out "$OUT4" >/dev/null 2>"$TMP/err4"; then
   has_no "$OUT4" "源码版本"      "同上"
   for w in "测试盘" "精简版" "storcli" "vendor/" "重新出盘" "构建目录" "盘内缺少"; do
     has_no "$OUT4" "$w" "内部/开发用语"
+  done
+  # 采集/压测工具的名字同样是内部实现（§2-1「盘里带了什么工具」）。
+  # 这一组和上面那组分开写是有原因的：工具名会从**两条**路进报告 ——
+  # 源码里的中文文案（test-hw-checks 的 FORBIDDEN 扫得到），以及
+  # metrics.jsonl 的**值**（那是数据，源码里 grep 不到）。1.8.4 之前
+  # 「mem / 测试工具 / stressapptest」就是走第二条路一路印到客户手上的。
+  # 所以这一组必须查**生成物**。
+  #
+  # 注意 <pre> 里嵌的原始日志是存证、不是结论，按 report-policy 允许原样保留；
+  # 这里查的是整份 HTML，所以工具名不能出现在嵌入日志的**正文**里——
+  # 采集失败标记那类已经在别处剔掉了。
+  for w in "stressapptest" "stress-ng" "gpu_burn" "nvidia-smi" "smartctl"; do
+    has_no "$OUT4" "$w" "工具名不进客户报告"
   done
 else
   bad "清洁性检查用的报告没能生成：$(cat "$TMP/err4")"

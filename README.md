@@ -244,7 +244,7 @@ CUDA 运行时库不在显卡驱动里，直接打包动态链接的版本一跑
 颜色整体可关（`PANEL_COLOR=0`，或 stdout 不是 tty 时自动置空），
 写进 `raw/config-review.txt` 的存档就是关掉生成的。
 
-**⑩ 634 项回归测试，全都不需要真实硬件**
+**⑩ 911 项回归测试，全都不需要真实硬件**
 跑全套的同时还会过一遍 shellcheck。
 
 ```bash
@@ -384,7 +384,7 @@ sudo ./build/build-iso.sh --skip-download    # 源 ISO 不存在就报错，不�
     | ' /| |   | |_) | | | | '__| '_ \
     | . \| |___|  _ <| |_| | |  | | | |
     |_|\_\_____|_| \_\\__,_|_|  |_| |_|
-    Server Factory Burn-in Test   v1.7.3                       2026-08-02 14:33:07
+    Server Factory Burn-in Test   v1.8.4                       2026-08-02 14:33:07
    +==============================================================================+
    |                             CONFIGURATION REVIEW                             |
    +==============================================================================+
@@ -420,7 +420,7 @@ sudo ./build/build-iso.sh --skip-download    # 源 ISO 不存在就报错，不�
     | ' /| |   | |_) | | | | '__| '_ \
     | . \| |___|  _ <| |_| | |  | | | |
     |_|\_\_____|_| \_\\__,_|_|  |_| |_|
-    Server Factory Burn-in Test   v1.7.3                                     QUICK
+    Server Factory Burn-in Test   v1.8.4                                     QUICK
    +==============================================================================+
    |                         BURN-IN  CPU + MEMORY + GPU                          |
    +==============================================================================+
@@ -606,8 +606,8 @@ KLBurn/
 │           └── generate_internal.py  ★ 内部工程报告
 ├── tests/                       8 个回归测试 + shellcheck，都不需要真实硬件
 │   ├── lint.sh                  shellcheck 静态检查（没装就跳过）
-│   ├── run-all.sh               一次跑完上面这些（合计 634 项断言）
-│   ├── mutate.sh            ★   变异测试：把修好的 21 个 bug 塞回去，守卫必须跑红
+│   ├── run-all.sh               一次跑完上面这些（合计 911 项断言）
+│   ├── mutate.sh            ★   变异测试：把修好的 59 个 bug 塞回去，守卫必须跑红
 │   ├── check-firmware.sh    ★   固件对账（要一个已构建的 rootfs，所以不在 run-all 里）
 │   └── e2e-qemu.sh          ★   把 ISO 在 QEMU 里真开机跑一遍（要 root）
 ├── vendor/                      离线包（不进版本库，见 vendor/README.md）

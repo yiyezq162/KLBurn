@@ -226,10 +226,10 @@ stress_cpu() {
 
   if (( nfailed > 0 )); then
     result_add "stress_cpu" "CPU 压力测试" "$ST_FAIL" \
-      "stress-ng 报告 ${nfailed} 个压测项失败；$detail" "raw/stress/cpu-stress-ng.log"
+      "CPU 压测报告 ${nfailed} 个子项失败；$detail" "raw/stress/cpu-stress-ng.log"
   elif (( rc != 0 )); then
     result_add "stress_cpu" "CPU 压力测试" "$ST_FAIL" \
-      "stress-ng 异常退出（退出码 $rc）；$detail" "raw/stress/cpu-stress-ng.log"
+      "CPU 压测程序异常退出（退出码 $rc）；$detail" "raw/stress/cpu-stress-ng.log"
   elif [[ -n "$tmax" ]] && (( tmax >= CPU_TEMP_FAIL )); then
     result_add "stress_cpu" "CPU 压力测试" "$ST_FAIL" \
       "CPU 温度达到 ${tmax}°C，超过上限 ${CPU_TEMP_FAIL}°C（散热异常）；$detail" "raw/stress/cpu-stress-ng.log"
@@ -327,7 +327,9 @@ stress_mem() {
   # 说"系统识别内存"而不是"总内存"：装机容量和系统识别容量可能对不上
   # （少条 / 开了内存镜像），那种情况由 check_memory_capacity 单独判 WARN，
   # 这里只能诚实地说压测覆盖的是系统认到的那部分。
-  local detail="${MEM_TOOL} 测试 ${target_mb}MB（占系统识别内存 ${total_mb}MB 的 ${pct}%），持续 $(fmt_dur "$secs")"
+  # ⚠️ 这句进客户报告，**不许出现工具名**（§2-1：盘里带了什么工具是内部实现）。
+  # MEM_TOOL 照常记进 metrics.jsonl，内部报告里一个字都没少。
+  local detail="覆盖 ${target_mb}MB（占系统识别内存 ${total_mb}MB 的 ${pct}%），持续 $(fmt_dur "$secs")"
   local ref="raw/stress/$(basename "$log")"
 
   # ⚠️ 这里绝对不能用 grep -q 'hardware incident' 之类的关键字匹配。
@@ -355,7 +357,7 @@ stress_mem() {
       "检测到 ${incidents} 处硬件异常、${errors} 处数据校验错误（内存条或内存控制器故障）；$detail" "$ref"
   elif [[ "$sat_status" == "FAIL" ]]; then
     result_add "stress_mem" "内存压力测试" "$ST_FAIL" \
-      "stressapptest 自检结论为 FAIL；$detail" "$ref"
+      "内存测试程序的自检结论为未通过；$detail" "$ref"
   elif oom_killed "$rc"; then
     # 被 OOM killer 打死 = 测试程序申请的容量超过了测试系统当时能给的，
     # 和内存条本身好不好没有任何关系。判 WARN 并说清楚，绝不能判 FAIL。

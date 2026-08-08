@@ -144,7 +144,7 @@ EOF
 # 屏幕面板
 # ================================================================
 #
-# 三条硬约束，改这一段之前先读 docs/architecture.md §11-14 / §11-23：
+# 三条硬约束，改这一段之前先读 docs/architecture.md §11-14 / §11-15：
 #
 #   1. **框线只用 ASCII（+ - | =）。** 现场是通过 BMC 的 KVM 或串口看这块屏幕的，
 #      字体和字符集都不受我们控制，Unicode 制表符有很大概率变成一屏乱码 ——
@@ -1067,8 +1067,15 @@ progress_bar_concurrent() {
   local pids=("$@")
   local start w; start=$(date +%s); w="$(panel_width)"
 
-  # 两个累计计数器先打一次基准，不然第一屏的功耗/占用率是空的
-  cpu_power_w      >/dev/null 2>&1 || true
+  # 累计计数器先打一次基准，不然第一屏的占用率是空的。
+  #
+  # ⚠️ **这里只打 cpu_pkg_busy_pct，不要顺手加 cpu_power_w。**仪表盘上没有
+  #    CPU 功耗这一格（那条曲线是 stress.sh 的采样器写进 sys_metrics.csv、
+  #    事后画进报告的），在这儿调它一次好处是零，坏处是实打实的：
+  #    三个采样函数的"上一次读数"都存在 /run/klburn/ 下的文件里（§11-28），
+  #    而这个函数和 stress.sh 的 monitor 是**并发**跑的 —— 在这儿写一次
+  #    rapl.prev，monitor 的下一个采样点就变成"从这一刻起"的区间，
+  #    白白让 CSV 里多一个跟别人不同尺子的点。采样器只能有一个（§11-18）。
   cpu_pkg_busy_pct >/dev/null 2>&1 || true
 
   local now elapsed alive p

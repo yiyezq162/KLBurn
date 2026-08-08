@@ -104,6 +104,10 @@ MUTATIONS=(
 "disk-temp-fake-burn${S}没跑硬盘压测也说「压测结束时温度」（客户以为我们烤过盘）${S}test-hw-checks${S}$RT/lib/verify.sh${S}mut_disk_temp_fake_burn"
 "nic-fw-path${S}网卡固件那一格原样印出 rtl_nic/xxx.fw（看着像漏了一条路径出去）${S}test-report-render${S}$RT/report/generate_report.py${S}mut_nic_fw_path"
 "metric-internal-leak${S}内部计数「失败压测项」重新进客户报告（判的是我们，不是机器）${S}test-report-render${S}$RT/report/generate_report.py${S}mut_metric_internal_leak"
+"metric-tool-name${S}压测工具的名字重新进客户报告（走数据那一路，查源码的守卫拦不住）${S}test-report-render${S}$RT/report/generate_report.py${S}mut_metric_tool_name"
+"result-tool-name${S}判定文案里重新写上 stress-ng（走源码那一路，由 FORBIDDEN 拦）${S}test-hw-checks${S}$RT/lib/stress.sh${S}mut_result_tool_name"
+"metric-group-raw${S}「其他实测指标」的分组列退回内部键（一份中文报告里夹着 mem / pcie / gpu0）${S}test-report-render${S}$RT/report/generate_report.py${S}mut_metric_group_raw"
+"bogus-prefix-drop${S}Python 那份占位符名单丢掉「to be filled」前缀兜底（三份名单又不一致了）${S}test-hw-checks${S}$RT/report/generate_report.py${S}mut_bogus_prefix_drop"
 )
 
 # ================================================================
@@ -626,8 +630,41 @@ mut_nic_fw_path() {
 # 「失败压测项」是 stress-ng 内部子测试的失败计数，判的是我们不是机器。
 mut_metric_internal_leak() {
   replace_line "$RT/report/generate_report.py" \
-    '    INTERNAL_ONLY_METRICS = {("cpu", "失败压测项")}' \
+    '    INTERNAL_ONLY_METRICS = {("cpu", "失败压测项"), ("mem", "测试工具")}' \
     '    INTERNAL_ONLY_METRICS = set()'
+}
+
+# 1.8.4：压测工具的名字重新进客户报告。
+# 这条走的是**数据**那一路（metrics.jsonl 的值），源码里 grep 不到 ——
+# 所以守卫必须查生成物，查源码的那条拦不住它。
+mut_metric_tool_name() {
+  replace_line "$RT/report/generate_report.py" \
+    '    INTERNAL_ONLY_METRICS = {("cpu", "失败压测项"), ("mem", "测试工具")}' \
+    '    INTERNAL_ONLY_METRICS = {("cpu", "失败压测项")}'
+}
+
+# 1.8.4：判定文案里重新写上工具名。走的是**源码字符串**那一路，
+# 由 test-hw-checks 的 FORBIDDEN 拦。
+mut_result_tool_name() {
+  replace_line "$RT/lib/stress.sh" \
+    '      "CPU 压测程序异常退出（退出码 $rc）；$detail" "raw/stress/cpu-stress-ng.log"' \
+    '      "stress-ng 异常退出（退出码 $rc）；$detail" "raw/stress/cpu-stress-ng.log"'
+}
+
+# 1.8.4：「其他实测指标」的分组列退回内部键（mem / pcie / gpu0）。
+mut_metric_group_raw() {
+  replace_line "$RT/report/generate_report.py" \
+    '                    ("分组", metric_group_cn(g)),' \
+    '                    ("分组", g),'
+}
+
+# 1.8.4：Python 那份占位符名单去掉「to be filled」前缀兜底。
+# 后果是 BIOS 写成 "To Be Filled By O.E.M"（没有结尾的点）时
+# shell 认、Python 不认，那一格原样印进客户报告。
+mut_bogus_prefix_drop() {
+  replace_line "$RT/report/generate_report.py" \
+    '    if not s or s.lower() in BOGUS or s.lower().startswith(_BOGUS_PREFIX):' \
+    '    if not s or s.lower() in BOGUS:'
 }
 
 # 把采样状态文件做成"每个进程一份"，等价于退回 1.8.2 用 shell 全局存 ——

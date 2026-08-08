@@ -521,6 +521,97 @@ done
 
 # ================================================================
 echo
+echo "=== 三份占位符名单必须一致（shell / awk / Python）==="
+# 同一张"这一格没填"的名单在项目里有三份，各写各的：
+#   lib/core.sh      _serial_is_bogus()   整机序列号退到主板/MAC
+#   lib/collect.sh   junk()（awk）        电源身份字段算不算"真身份"
+#   report/generate_report.py  BOGUS      客户报告里那一格显示什么
+# 三处的注释都写着"要和另一边保持一致"，而 1.8.4 之前它们并不一致：
+#   `N/A`                      只有 Python 认  -> 报告抬头「整机序列号 NA」
+#   `To Be Filled By O.E.M`    只有 shell 认   -> 原样印进客户报告
+#   `0123456789` / `--`        awk 不认        -> 空槽位被当成在位的电源
+# 靠人记是记不住的（三次不一致，三次都是这么来的），所以这里拿同一张表
+# 把三处**逐个值实测**一遍。加新占位符时三处一起加，这条会告诉你漏了哪个。
+BOGUS_CORE=(
+  "To be filled by O.E.M." "To Be Filled By O.E.M" "TO BE FILLED BY O.E.M."
+  "Not Specified" "Default string" "None" "Unknown" "N/A" "NA" "No DIMM"
+  "Not Present" "Empty" "O.E.M." "System Manufacturer" "System Product Name"
+  "System Serial Number" "0123456789" "<BAD INDEX>" "<OUT OF SPEC>" "-" "--"
+)
+# 反面样本：这些是**真值**，三处都不许当成占位符。
+BOGUS_REAL=( "24003702CHK04234" "21204-00012" "Supermicro" "PWS-2K21A-1R" "100NA460736" )
+
+# ---- 1) shell ----
+_n_bad=0
+for v in "${BOGUS_CORE[@]}"; do _serial_is_bogus "$v" || { _n_bad=$((_n_bad+1)); printf '       shell 漏认：[%s]\n' "$v"; }; done
+check "shell（_serial_is_bogus）认得出核心名单里的每一个" "0" "$_n_bad"
+_n_bad=0
+for v in "${BOGUS_REAL[@]}"; do _serial_is_bogus "$v" && { _n_bad=$((_n_bad+1)); printf '       shell 误杀：[%s]\n' "$v"; }; done
+check "shell 不许把真值当占位符" "0" "$_n_bad"
+
+# ---- 2) awk（junk()，经 dmi_psu_list 驱动）----
+# 造一路"额定 0W + 身份字段全是待测占位符"的电源：junk() 全认出来时
+# dmi_psu_list 的第三列（real）才会是 0。认漏一个 -> idreal=1 -> real=1。
+_n_bad=0
+for v in "${BOGUS_CORE[@]}"; do
+  cat > "$TMP/psu-bogus-one.txt" <<EOF
+Handle 0x0100, DMI type 39, 22 bytes
+System Power Supply
+	Location: PSU1
+	Manufacturer: $v
+	Serial Number: $v
+	Model Part Number: $v
+	Max Power Capacity: 0 W
+	Status: Present, OK
+EOF
+  [[ "$(dmi_psu_list "$TMP/psu-bogus-one.txt" | awk -F'|' '{print $3}')" == "0" ]] \
+    || { _n_bad=$((_n_bad+1)); printf '       awk 漏认：[%s]\n' "$v"; }
+done
+check "awk（junk）认得出核心名单里的每一个" "0" "$_n_bad"
+# 反面：身份是真的，就算额定 0W 也不是空槽位
+_n_bad=0
+for v in "${BOGUS_REAL[@]}"; do
+  cat > "$TMP/psu-real-one.txt" <<EOF
+Handle 0x0100, DMI type 39, 22 bytes
+System Power Supply
+	Location: PSU1
+	Manufacturer: $v
+	Serial Number: $v
+	Model Part Number: $v
+	Max Power Capacity: 0 W
+	Status: Present, OK
+EOF
+  [[ "$(dmi_psu_list "$TMP/psu-real-one.txt" | awk -F'|' '{print $3}')" == "1" ]] \
+    || { _n_bad=$((_n_bad+1)); printf '       awk 误杀：[%s]\n' "$v"; }
+done
+check "awk 不许把真身份当占位符（否则真电源被当成空槽位丢掉）" "0" "$_n_bad"
+
+# ---- 3) Python ----
+# clean() 返回 None 表示"这一格读不出来"，报告里显示成 —
+if command -v python3 >/dev/null 2>&1; then
+  _py_out="$(
+    printf '%s\n' "${BOGUS_CORE[@]}" > "$TMP/bogus-core.txt"
+    printf '%s\n' "${BOGUS_REAL[@]}" > "$TMP/bogus-real.txt"
+    python3 - "$LIB/../report/generate_report.py" "$TMP/bogus-core.txt" "$TMP/bogus-real.txt" <<'PYEOF'
+import importlib.util, sys
+spec = importlib.util.spec_from_file_location("gr", sys.argv[1])
+gr = importlib.util.module_from_spec(spec); spec.loader.exec_module(gr)
+miss = [v for v in open(sys.argv[2], encoding="utf-8").read().splitlines()
+        if v and gr.clean(v) is not None]
+kill = [v for v in open(sys.argv[3], encoding="utf-8").read().splitlines()
+        if v and gr.clean(v) is None]
+for v in miss: print("       Python 漏认：[%s]" % v, file=sys.stderr)
+for v in kill: print("       Python 误杀：[%s]" % v, file=sys.stderr)
+print("%d %d" % (len(miss), len(kill)))
+PYEOF
+  )"
+  check "Python（BOGUS/clean）认得出核心名单里的每一个，且不误杀真值" "0 0" "$_py_out"
+else
+  echo "  (没装 python3，跳过 Python 那一份)"
+fi
+
+# ================================================================
+echo
 echo "=== RAPL 功耗域去重（rapl_pkg_zones）==="
 # ⚠️ 同一个 package 域在 /sys/class/powercap 下能被两条路径同时匹配到：
 #      /sys/class/powercap/intel-rapl:0              ← zone 自己的 class 软链
@@ -565,7 +656,7 @@ echo "=== 两次采样求差的那几个函数：上一次的读数必须跨得�
 # ⚠️ 调用点全是命令替换 / 进程替换：
 #     p="$(cpu_power_w)"  /  while read ... < <(cpu_pkg_busy_pct)
 #   两种都在**子 shell**里跑，函数里对 shell 全局的赋值出了子 shell 就没了
-#   （§11-25）。1.8.2 之前这三个函数就是把"上一次"存在全局里的，于是"上一次"
+#   （§11-28）。1.8.2 之前这三个函数就是把"上一次"存在全局里的，于是"上一次"
 #   永远停在父 shell 那次基准上 —— 每个点算出来的是"从压测开始到现在的平均值"。
 #   1.7.8 那台 6530 的功耗曲线因此前 14 分钟一条直线、计数器一回绕就塌到
 #   429 W 再每点爬 4 瓦，爬到测完都没回去。
@@ -2061,7 +2152,11 @@ echo "=== 客户可见文案里不许出现内部/开发用语（全局扫描）
 # 内部工程报告（generate_internal.py）**不在此列** —— 那份不交付，
 # 里面本来就该直说盘里少带了哪个工具。
 RT="$(cd "$LIB/.." && pwd)"
-FORBIDDEN='测试盘|盘内|精简版|构建目录|重新出盘|vendor/|storcli|README|源码|commit|ISO 里|打包进|未正确安装'
+# 后半段那几个是**采集/压测工具的名字**。1.8.4 之前这张表只有 storcli 一个
+# 工具名（因为只有它咬过人），于是「stressapptest 测试 246632MB」「或 ethtool
+# 读不到速率」这类文案一路印到客户手上 —— 判据和 storcli 那条一模一样，
+# 只是没人把词加进来。工具名一律按 §2-1「盘里带了什么工具」处理。
+FORBIDDEN='测试盘|盘内|精简版|构建目录|重新出盘|vendor/|storcli|README|源码|commit|ISO 里|打包进|未正确安装|stressapptest|stress-ng|gpu_burn|nvidia-smi|dmidecode|ethtool|smartctl|ipmitool'
 
 join_continuations() {
   awk '{

@@ -198,7 +198,7 @@ cpu_temp_max_c() {
 #       p="$(cpu_power_w)"                      # 命令替换
 #       while read ... < <(cpu_pkg_busy_pct)    # 进程替换
 #       while read ... < <(disk_io_rates)
-#    两种都在**子 shell**里跑，函数里对全局的赋值出了子 shell 就没了（§11-25）。
+#    两种都在**子 shell**里跑，函数里对全局的赋值出了子 shell 就没了（§11-28）。
 #    调用方通常会先在父 shell 里调一次"打基准"，于是"上一次"就**永远停在那次
 #    基准上** —— 每个采样点算出来的都是"从压测开始到现在的平均值"，
 #    不是此刻的瞬时值。
@@ -659,6 +659,7 @@ _serial_is_bogus() {
   case "$s" in
     ""|"to be filled by o.e.m."|"not specified"|"default string"|"none" \
       |"unknown"|"n/a"|"na"|"o.e.m."|"empty"|"not present"|"0123456789" \
+      |"no dimm"|"system manufacturer"|"system product name" \
       |"system serial number"|"<bad index>"|"<out of spec>"|"-"|"--") return 0 ;;
   esac
   # "To be filled by O.E.M." 各家大小写和尾巴都不一样，前缀再兜一道
