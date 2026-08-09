@@ -164,24 +164,49 @@ phase_max_temp() {
   awk -F, -v p="$phase" '$2==p && $3!="" {if($3+0>m) m=$3+0} END{if(m>0) printf "%d", m}' \
     "$RUN_DIR/sys_metrics.csv" 2>/dev/null
 }
-# 最低频率要跳过每个阶段开头两个采样点（10 秒）：
-# monitor_start 和压测进程是同一刻起来的，头一两个点采到的还是空载降频后的
-# 频率（实测 1156MHz），算进去报告里就凭空多出一个看着像降频的数字。
+# phase_freq_stats <阶段> -> "<最低频率> <平均频率>"，没数据给 "- -"
+#
+# 要跳过每个阶段开头两个采样点（10 秒）：monitor_start 和压测进程是同一刻
+# 起来的，头一两个点采到的还是空载降频后的频率（实测 1156MHz），算进去
+# 报告里就凭空多出一个看着像降频的数字。
 # 采样点不足 3 个时（超短阶段）就全都算，宁可粗糙也不要空值。
-phase_min_freq() {
+#
+# ⚠️⚠️ **最低和平均必须取同一段样本，所以只能有一个取样口。**
+#
+# 1.9.2 之前是两个各自独立的函数：min 跳前两点、avg 从头算。两个数都没算错，
+# 但它们是**两个口径**，凑在同一行上就出过这种事：
+#     平均频率 2686MHz　　最低频率 2688MHz
+# 最低的比平均的还高。客户不会去想"哦这是两个窗口"，他想的是"这报告算错了"，
+# 而一份被怀疑算错了的报告，后面每一个数字都要重新解释一遍。
+#
+# 合成一个函数不是为了省代码：**只要两个数出自同一组样本，min <= avg 就是
+# 结构上成立的**，不需要任何断言去兜，将来也没人能把它们改回两个窗口。
+phase_freq_stats() {
   local phase="$1"
   awk -F, -v p="$phase" '
     $2==p && $4!="" { v[++n] = $4+0 }
     END {
+      if (n == 0) { printf "- -"; exit }
       start = (n > 2 ? 3 : 1)
-      for (i = start; i <= n; i++) if (m == 0 || v[i] < m) m = v[i]
-      if (m > 0) printf "%d", m
+      mn = ""; s = 0; c = 0
+      for (i = start; i <= n; i++) {
+        if (mn == "" || v[i] < mn) mn = v[i]
+        s += v[i]; c++
+      }
+      # 四舍五入，和 gpu.sh 的 gpu_load_stats 保持同一种取整
+      printf "%d %d", mn, int(s / c + 0.5)
     }' "$RUN_DIR/sys_metrics.csv" 2>/dev/null
 }
+
+# 没数据时 phase_freq_stats 给的是 "-"，而老调用方等的是空串（`${fmin:-未知}`）
+_freq_out() { [[ "${1:--}" == "-" ]] || printf '%s' "$1"; }
+
+# 两个薄包装，保持老调用方式。**不要在这里各自重新算一遍。**
+phase_min_freq() {
+  local mn av; read -r mn av < <(phase_freq_stats "$1"); _freq_out "$mn"
+}
 phase_avg_freq() {
-  local phase="$1"
-  awk -F, -v p="$phase" '$2==p && $4!="" {s+=$4; n++} END{if(n>0) printf "%d", s/n}' \
-    "$RUN_DIR/sys_metrics.csv" 2>/dev/null
+  local mn av; read -r mn av < <(phase_freq_stats "$1"); _freq_out "$av"
 }
 
 # ---------------------------------------------------------------- CPU

@@ -22,6 +22,7 @@ SUITES=(
   test-internal-report
   test-capture
   test-concurrent-burn
+  test-batch-tools
 )
 
 total_pass=0; total_fail=0; failed_suites=()

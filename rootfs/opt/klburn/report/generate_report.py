@@ -146,8 +146,11 @@ METRIC_GROUP_CN = {
     "cpu": "处理器", "mem": "内存", "gpu": "显卡", "disk": "硬盘",
     "nic": "网卡", "pcie": "PCIe", "psu": "电源", "sys": "整机",
     # 1.9.0 起这三组在报告里有各自的小节（配置核对 / 平台设置 / 性能基准），
-    # 不再混进「其他实测指标」那张大表。留在这里是为了两件事：
-    # 认得出老 run-dir 的数据，以及内部报告仍然按分组列它们。
+    # 一般不再混进「其他实测指标」那张大表。留在这里是为了两件事：
+    # 认得出老 run-dir 的数据；以及**那一节没画出来的时候**（比如有 bench 指标
+    # 却一条 bench 判定都没有），它们要退回这张大表而不是凭空消失 ——
+    # 退回来的时候就要用得上这个中文名。
+    # （内部报告用不着它：那份按内部分组键原样列，读者认得 conform / bench。）
     "conform": "配置核对", "platform": "平台设置", "bench": "性能基准",
 }
 
@@ -1210,6 +1213,7 @@ class Data(object):
         if not os.path.isdir(d):
             return []
         rows = OrderedDict()
+        jobs_of = {}
         for fn in sorted(os.listdir(d)):
             m = re.match(r"^fio-(.+)-(read|write)\.json$", fn)
             if not m:
@@ -1220,10 +1224,19 @@ class Data(object):
                 if not bw:
                     continue
                 row = rows.setdefault(dev, OrderedDict([
-                    ("硬盘", "/dev/%s" % dev), ("测试口径", job.get("jobname")),
+                    ("硬盘", "/dev/%s" % dev), ("测试口径", None),
                     ("顺序读带宽", None), ("顺序写带宽", None),
                 ]))
-                row["测试口径"] = job.get("jobname")
+                # ⚠️ 「测试口径」是**逐个方向各一个** job 名
+                # （libaio_read_128k_32_1 / libaio_write_128k_32_1），
+                # 差别就在中间那个方向词上。写成 `row[...] = jobname` 的话，
+                # 读写都跑了的那一行会被排在后面的写覆盖掉，于是「顺序读带宽」
+                # 那一格的数字顶着一个 `_write_` 的口径 —— 客户拿它去和自己
+                # 验收单上的 job 名对照时，对到的是另一个方向。
+                jn = job.get("jobname")
+                if jn and jn not in jobs_of.setdefault(dev, []):
+                    jobs_of[dev].append(jn)
+                row["测试口径"] = " / ".join(jobs_of[dev])
                 row["顺序读带宽" if rw == "read" else "顺序写带宽"] = \
                     "%.1f MB/s" % (bw / 1024.0)
         out = list(rows.values())
@@ -1484,7 +1497,13 @@ def build_html(data):
     #
     # 和上面硬盘那组不同，这条**无条件**藏：它任何状态下都不回答
     # "这台机器合不合格"。results.jsonl 和内部报告照常完整。
-    INTERNAL_ONLY_ROWS = ("collect_deep",)
+    #
+    # `collect_fwts`（固件自检留档，1.9.2 加）同一把尺子，而且更极端一点：
+    # ACPI 表上的告警在**完全正常**的服务器上极其常见（几乎每台都有若干条）。
+    # 印给客户的结果是每台机器都刷一片黄，而且刷的是他看不懂、也无从处理的
+    # 东西 —— 白白让人去找机器的毛病。它对**我们**有价值（同一批板子的 BIOS
+    # 有没有共性问题），所以留在 results.jsonl 和内部报告里，不外发。
+    INTERNAL_ONLY_ROWS = ("collect_deep", "collect_fwts")
     shown = [r for r in shown if r.get("id") not in INTERNAL_ONLY_ROWS]
 
     # ---------------- 判定按"读者关心的三件事"分组 ----------------
@@ -1700,11 +1719,10 @@ def build_html(data):
                                    ("实测值", m.get("value"))])
                       for m in metrics_of(group)])
 
-    def metric_value(key):
-        for m in data.metrics:
-            if m.get("group") == "bench" and m.get("key") == key:
-                return m.get("value")
-        return None
+    # 这里以前还有一个 metric_value(key)：按 key 去 bench 组里捞一个数。
+    # 它唯一的调用点是那张"实测数值汇总"表，表删掉之后函数留在了原地 ——
+    # 一个谁也不调的函数看着像"这个数还有别的地方在用"，下次改 bench 组的
+    # key 名时会有人特意去维护它。删掉重构后没人走的死路，和删那张表是一件事。
 
     # ⚠️ **性能基准这一节里没有"参考值 / 是否达标"这种东西，也不要再加回来。**
     #    这张盘是插上就跑、无人值守的，没有任何地方能拿到"这台机器应该达到多少"——
@@ -1753,9 +1771,16 @@ def build_html(data):
     # ================================================================
     # 性能基准：整段只在真的测了才出现。
     # 一台不做性能验收的机器，报告里多出一节全是 SKIP 的"基准"只会招来提问。
-    bench_m = metrics_of("bench")
+    #
+    # ⚠️ 判据只能是**这一节真的画得出东西**（有判定行、或有逐盘带宽表），
+    #    不能把 metrics_of("bench") 也算进来。bench 组的指标在这一节里
+    #    **一格都不单独印** —— 每个数字都已经写在对应那条结论的句子里
+    #    （见下面那段"不要再加实测数值汇总表"）。拿它当判据的话，
+    #    出现"有 bench 指标、但一条 bench 判定都没有"的 run-dir 时，
+    #    画出来的是一个只有标题和导语、底下什么都没有的空章节。
     bench_disk = data.bench_disk_rows()
-    if bench_rows or bench_m or bench_disk:
+    bench_shown = bool(bench_rows or bench_disk)
+    if bench_shown:
         A("<h2>三、性能基准</h2>")
         A('<p class="sub">以下数值在机器空闲时测得（不与老化压测同时进行，'
           "否则数值会被互相干扰）。<b>本节只如实报出实测数值，不做合格与否的判断，"
@@ -1778,10 +1803,22 @@ def build_html(data):
         #
         # 逐盘带宽是**另一组数**（结论那一行给不出逐盘明细），所以下面那张表留着。
         if bench_disk:
-            A(BSUB("硬盘顺序读写带宽"))
-            A('<p class="sub">128KB 大块顺序读写，逐块单独测量。'
+            # 标题和导语跟着**这张表里真有的方向**走。现场没确认破坏性写入时
+            # 只测得到读，写那一列整个不画（见 bench_disk_rows）——
+            # 标题却还写着"读写"，就是说得比测得多（report-policy 六-4）。
+            #
+            # ⚠️ 两个标题都写成**字面量**，不要拿 "硬盘%s带宽" 拼。
+            #    lib/bench.sh 的判定文案里有一句「逐盘数值见下方「X」」指着它，
+            #    tests/test-hw-checks.sh 靠"这两个字面量在两个文件里都得有"
+            #    来对账；拼出来的字符串 grep 不到，那条对账就成了摆设。
+            if any("顺序写带宽" in r for r in bench_disk):
+                title, way = "硬盘顺序读写带宽", "顺序读写"
+            else:
+                title, way = "硬盘顺序读带宽", "顺序读"
+            A(BSUB(title))
+            A('<p class="sub">128KB 大块%s，逐块单独测量。'
               "「测试口径」一列是本次实际使用的参数，格式为"
-              "「引擎_方向_块大小_队列深度_线程数」。</p>")
+              "「引擎_方向_块大小_队列深度_线程数」。</p>" % way)
             A(table(bench_disk))
         stress_h2 = "四、压力测试结果"
         raw_h2 = "五、原始日志"
@@ -1899,12 +1936,54 @@ def build_html(data):
     # 「mem / 测试工具」是内存压测程序的名字。客户不需要知道盘里带的是
     # stressapptest 还是 stress-ng —— 那是内部实现（§2-1「盘里带了什么工具」），
     # 而且这一格失败与否也不由它决定。metrics.jsonl 和内部报告里一个字段都没少。
-    INTERNAL_ONLY_METRICS = {("cpu", "失败压测项"), ("mem", "测试工具")}
-    # 这三组在上面已经有各自的小节了，再进这张大表就是同一个数字印两遍。
-    # **这是"挪位置"，不是"藏"** —— 它们一个不少地出现在第二/第三节里。
-    OWN_SECTION_GROUPS = {"platform", "conform", "bench"}
+    #
+    # 显存那三格（1.9.0 新增）同一把尺子，但理由再深一层：
+    #   「显存重映射不可纠正行」讲的是**这台机器出厂以来**被永久屏蔽过几行显存，
+    #   和硬盘的通电时间/累计读写量是同一类 —— 它回答不了"这台机器合不合格"，
+    #   客户看到一个孤零零的 5 只会问"那是什么，严重吗"。
+    #   「显存 ECC 可纠正 / 不可纠正」则是那条结论的原始读数，
+    #   而结论那句话（"累计出现 3 次可纠正的显存 ECC 错误，已被硬件自动纠正"）
+    #   已经把数字连同它的含义一起说清楚了，表里再印一个裸数字就是同一个数
+    #   在一页上出现两遍（report-policy 二-10）。
+    #
+    # ⚠️ 藏的只是**这张表里的裸数字**：check_gpu_ecc / check_gpu_remap 两条判定
+    #    连同 WARN/FAIL 的全文照常出现在第二节，metrics.jsonl 和内部报告
+    #    一个字段都没少。**任何 WARN/FAIL 一条都不许藏**那条红线没有被碰。
+    INTERNAL_ONLY_METRICS = {
+        ("cpu", "失败压测项"), ("mem", "测试工具"),
+        ("gpu", "显存ECC可纠正"), ("gpu", "显存ECC不可纠正"),
+        ("gpu", "显存重映射不可纠正行"),
+    }
+    # 逐卡的满载运行读数（1.9.0 新增）。这几个**不是**历史类数据，就是这一轮
+    # 测出来的 —— 藏它们的理由只有一条：`check_gpu_load` 那条结论已经把同样的
+    # 五个数**连同单位和上下文**写成了一句话
+    #     「GPU0 平均频率 2520MHz（最低 2490MHz），平均功耗 430W，
+    #       风扇最高 62%，距降频阈值最少还有 8°C」
+    # 表里再印一遍就是同一个数在一页上出现两遍（report-policy 二-10）。
+    # 而且拆进表格之后单位就没了：一格「距降频阈值最小余量 8」，客户既不知道
+    # 是 8 度还是 8%，也不知道 8 是多是少 —— 那句话里写着「还有 8°C」。
+    #
+    # 卡号是变的（gpu0 / gpu1 / …），所以按**键名**过滤，不按 (组, 键)。
+    INTERNAL_ONLY_GPU_LOAD_KEYS = {
+        "满载最低频率MHz", "满载平均频率MHz", "满载平均功耗W",
+        "峰值风扇转速%", "距降频阈值最小余量",
+    }
+
+    def _internal_only(m):
+        g, k = m.get("group"), m.get("key")
+        if (g, k) in INTERNAL_ONLY_METRICS:
+            return True
+        return bool(re.match(r"^gpu\d+$", str(g or ""))) and k in INTERNAL_ONLY_GPU_LOAD_KEYS
+    # 这几组在上面已经有各自的小节了，再进这张大表就是同一个数字印两遍。
+    # **这是"挪位置"，不是"藏"**：platform / conform 各有一张表，
+    # bench 的每个数字都写在对应那条结论的句子里。
+    #
+    # ⚠️ bench 只在那一节**真的画出来了**的时候才排除。整节没画时（没有任何
+    #    bench 判定、也没有逐盘带宽表）还硬排除的话，那几个指标就两头不落 ——
+    #    从报告里凭空消失。分组只该决定"印在哪一节"，不该决定"印不印"。
+    OWN_SECTION_GROUPS = {"platform", "conform"} | ({"bench"} if bench_shown else set())
     shown_metrics = [m for m in data.metrics
-                     if (m.get("group"), m.get("key")) not in INTERNAL_ONLY_METRICS
+                     if not _internal_only(m)
                      and m.get("group") not in OWN_SECTION_GROUPS]
     if shown_metrics:
         A(SUB("其他实测指标"))

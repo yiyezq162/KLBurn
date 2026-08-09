@@ -611,12 +611,248 @@ verify_sel() {
   fi
 }
 
+# ---------------------------------------------------------------- 硬盘自检（读结果）
+#
+# `smartctl -l selftest` 的头一条就是最近一次自检。判据是**盘自己写的那句状态**，
+# 我们一个数都不定。ATA 和 NVMe 两种日志的表头不一样，但"状态那一段文字"是
+# 同一批固定说法，所以按**文字**认，不按列号取（列号在两种日志里对不上）。
+#
+# selftest_verdict <smartctl -l selftest 的输出文件> -> ok | fail | running | none
+#
+#   ok       Completed without error
+#   fail     Completed: read failure / electrical failure / servo/seek failure /
+#            handling damage / unknown failure、Fatal or unknown error
+#            —— **盘自己说它没通过**，这才是 FAIL
+#   running  还在跑（我们等不及了），或者被中断 / 被主机打断
+#            —— 这是**我们这轮的时间问题**，不是盘的毛病，一律 SKIP
+#   none     没有自检日志 / 这块盘不支持 —— 同样 SKIP
+#
+# ⚠️ 顺序：先认"跑完但失败"，再认"还在跑/被打断"，最后才认"通过"。
+#    反过来的话 "Completed: read failure" 里的 "Completed" 会先被当成通过。
+selftest_verdict() {
+  local f="${1:-}"
+  [[ -s "$f" ]] || { printf 'none'; return; }
+  if grep -aqiE 'Completed:[[:space:]]*(read|electrical|servo|handling|unknown)|Fatal or unknown error' "$f" 2>/dev/null; then
+    printf 'fail'; return
+  fi
+  if grep -aqiE 'in progress|Interrupted|Aborted by host|Self-test routine in progress' "$f" 2>/dev/null; then
+    printf 'running'; return
+  fi
+  if grep -aqiE 'Completed without error' "$f" 2>/dev/null; then
+    printf 'ok'; return
+  fi
+  printf 'none'
+}
+
+verify_disk_selftest() {
+  if ! have smartctl || (( ${#SMART_TARGETS[@]} == 0 )); then
+    result_add "verify_disk_selftest" "硬盘自检" "$ST_SKIP" \
+      "本机未安装可自检的硬盘，本项未做核对。此项不影响整机结论。" ""
+    return
+  fi
+
+  info "Reading on-disk self-test results ..."
+  mkdir -p "$RAW_DIR/smart-selftest" 2>/dev/null || true
+
+  local item key dev dtype t v
+  local n_ok=0 n_fail=0 n_run=0 n_none=0 bad_list=""
+  for item in "${SMART_TARGETS[@]:-}"; do
+    [[ -n "$item" ]] || continue
+    IFS='|' read -r key dev dtype <<< "$item"
+    t="$(cat "$RAW_DIR/smart-pre/${key}.dtype" 2>/dev/null || true)"
+    if [[ -n "$t" ]]; then
+      capture "smart-selftest/${key}.txt" smartctl -l selftest -d "$t" "$dev" || true
+    else
+      capture "smart-selftest/${key}.txt" smartctl -l selftest "$dev" || true
+    fi
+    v="$(selftest_verdict "$RAW_DIR/smart-selftest/${key}.txt")"
+    case "$v" in
+      ok)      n_ok=$(( n_ok + 1 )) ;;
+      fail)    n_fail=$(( n_fail + 1 )); bad_list="${bad_list}${bad_list:+、}${key}" ;;
+      running) n_run=$(( n_run + 1 )) ;;
+      *)       n_none=$(( n_none + 1 )) ;;
+    esac
+  done
+
+  # ⚠️ **盘自己说它没通过 = 真故障，一条都不许被"其他盘都好"冲淡。**
+  if (( n_fail > 0 )); then
+    result_add "verify_disk_selftest" "硬盘自检" "$ST_FAIL" \
+      "${n_fail} 块硬盘自带的自检未通过（${bad_list}）。这是硬盘自身给出的结论，\
+说明盘体存在读写或机械故障，需更换后复测。" "raw/smart-selftest/"
+  elif (( n_ok > 0 )); then
+    local extra=""
+    (( n_run + n_none > 0 )) && extra="；另有 $(( n_run + n_none )) 块盘本轮未取得自检结论，不影响整机结论"
+    result_add "verify_disk_selftest" "硬盘自检" "$ST_PASS" \
+      "${n_ok} 块硬盘自带的自检全部通过（由硬盘自身完成并给出结论）${extra}" \
+      "raw/smart-selftest/"
+  else
+    # 一块都没取到结论：要么没跑完、要么这些盘不提供自检。
+    # **两种都是本轮的条件问题，不是盘的毛病** —— SKIP。
+    result_add "verify_disk_selftest" "硬盘自检" "$ST_SKIP" \
+      "本轮未取得硬盘自带自检的结论（自检未在本轮内完成，或该型号硬盘不提供此功能），\
+本项未做核对。此项不影响整机结论。" "raw/smart-selftest/"
+  fi
+}
+
+# ---------------------------------------------------------------- BMC 传感器
+#
+# ⚠️⚠️ **这是全项目里唯一一处"拿阈值去判"的地方 —— 而那个阈值不是我们定的。**
+#
+# `ipmitool sensor list` 每行十列：
+#     名称 | 读数 | 单位 | 状态 | lnr | lcr | lnc | unc | ucr | unr
+# 后六列是**主板厂商烧进管理控制器的**上下限（下不可恢复 / 下临界 / 下告警 /
+# 上告警 / 上临界 / 上不可恢复）。拿实测读数去比它，和"我们替客户定一个标准"
+# 是**相反**的两件事 —— 那是在读这台机器自己的说明书。
+# 风扇转速、VRM 温度、各路电压、进风口温度全都在这张表里，而 1.9.1 之前
+# 我们只读了电源那两三行；一颗停转的风扇是工厂最常见的缺陷之一，
+# 而它在这张表里是明写着的。
+#
+# 拿 test_out 十份真机数据量过：每台 25~91 条数值型传感器带完整阈值，
+# 越线 0 条 —— 新判定在好机器上不许亮，这一条先验过才敢加。
+#
+# 三个坑：
+#   1. **离散量传感器要整条跳过。**它的读数是 `0x80` 这种事件位、第四列是
+#      `0x0080` 而不是 ok/nc/cr，混着判会把 `PWR_Button` 判成异常。
+#      判据是"读数是数字"（正面判定），和 1.8.3 电源那次是同一课。
+#   2. **读数恰好为 0 一律降一级。**0 既可能是"这个位置没装部件"，也可能是
+#      "装了但停转/没输出"，**从读数上分不开** —— 分不开的东西不该去染
+#      客户的结论（report-policy 二-5）。所以 0 只判 WARN 并写明两种可能。
+#   3. 没有任何数值型阈值的传感器跳过：没有可比的东西，不是"没问题"。
+#
+# ipmi_sensor_scan <sensor list 文件>
+#   -> 每条**可判**的传感器一行："<级别>|<名称>|<读数>|<单位>|<说明>"
+#      级别 = ok / warn / crit / zero
+#   调用方按级别自己数，好让"共核对了几项"和"几项越线"出自同一次扫描。
+ipmi_sensor_scan() {
+  local f="${1:-}"
+  [[ -s "$f" ]] || return 0
+  awk -F'|' '
+    function t(x) { gsub(/^[[:space:]]+/, "", x); gsub(/[[:space:]]+$/, "", x); return x }
+    function isnum(x) { return (x ~ /^-?[0-9]+(\.[0-9]+)?$/) }
+    # 阈值和读数都是 "600.000" 这种写法，整数就去掉小数尾巴
+    function fmt(v) { return (v == int(v)) ? sprintf("%d", v) : sprintf("%.2f", v) }
+    NF >= 10 {
+      name = t($1); val = t($2); unit = t($3)
+      lnr = t($5); lcr = t($6); lnc = t($7); unc = t($8); ucr = t($9); unr = t($10)
+      if (!isnum(val)) next
+      lo_c = isnum(lcr) ? lcr + 0 : (isnum(lnr) ? lnr + 0 : "")
+      hi_c = isnum(ucr) ? ucr + 0 : (isnum(unr) ? unr + 0 : "")
+      lo_w = isnum(lnc) ? lnc + 0 : ""
+      hi_w = isnum(unc) ? unc + 0 : ""
+      if (lo_c == "" && hi_c == "" && lo_w == "" && hi_w == "") next
+      v = val + 0
+      lvl = "ok"; why = ""
+      if      (lo_c != "" && v < lo_c) { lvl = "crit"; why = "低于主板设定的临界下限 " fmt(lo_c) }
+      else if (hi_c != "" && v > hi_c) { lvl = "crit"; why = "高于主板设定的临界上限 " fmt(hi_c) }
+      else if (lo_w != "" && v < lo_w) { lvl = "warn"; why = "低于主板设定的告警下限 " fmt(lo_w) }
+      else if (hi_w != "" && v > hi_w) { lvl = "warn"; why = "高于主板设定的告警上限 " fmt(hi_w) }
+      if (lvl == "crit" && v == 0) lvl = "zero"
+      printf "%s|%s|%s|%s|%s\n", lvl, name, fmt(v), unit, why
+    }' "$f" 2>/dev/null
+}
+
+# 单位换成中文报告里读得下去的写法，并给出这条传感器量的是什么。
+# 认不出来的单位原样留着（绝不吞信息）。
+#
+# ⚠️ **那个上下限也要带单位。**`ipmi_sensor_scan` 吐出来的 why 结尾是个
+#    光秃秃的数字（结构化数据里不该塞单位），拼成一句话时必须补回去 ——
+#    否则客户读到的是「96 °C，高于主板设定的告警上限 95」：95 什么？
+#    和 1.9.1 把逐卡满载读数拆进表格之后单位就没了是同一个毛病，
+#    只不过那次是拆没的，这次是拼漏的。
+ipmi_sensor_phrase() {
+  local name="$1" val="$2" unit="$3" why="$4" cat u
+  case "$unit" in
+    RPM)          cat="风扇";  u="RPM" ;;
+    "degrees C")  cat="温度";  u="°C" ;;
+    Volts)        cat="电压";  u="V" ;;
+    Watts)        cat="功率";  u="W" ;;
+    Amps)         cat="电流";  u="A" ;;
+    percent)      cat="占比";  u="%" ;;
+    *)            cat="读数";  u="${unit}" ;;
+  esac
+  printf '%s %s：%s %s，%s %s' "$cat" "$name" "$val" "$u" "$why" "$u"
+}
+
+verify_bmc_sensors() {
+  if [[ "${IPMI_OK:-0}" != "1" ]]; then
+    result_add "verify_bmc_sensors" "部件传感器复查" "$ST_SKIP" \
+      "本机未提供管理控制器，读不到风扇转速 / 温度 / 电压等部件传感器，本项未做核对。\
+此项不影响整机结论。" ""
+    return
+  fi
+
+  info "Checking BMC sensors against board-defined limits ..."
+  local f="$RAW_DIR/ipmi-sensors-post.txt"
+  [[ -s "$f" ]] || f="$RAW_DIR/ipmi-sensors.txt"
+
+  local rows; rows="$(ipmi_sensor_scan "$f")"
+  local n_all n_crit n_warn n_zero
+  n_all="$(printf '%s\n' "$rows"  | grep -c . || true)"
+  n_crit="$(printf '%s\n' "$rows" | grep -c '^crit|' || true)"
+  n_warn="$(printf '%s\n' "$rows" | grep -c '^warn|' || true)"
+  n_zero="$(printf '%s\n' "$rows" | grep -c '^zero|' || true)"
+  for v in n_all n_crit n_warn n_zero; do
+    [[ "${!v}" =~ ^[0-9]+$ ]] || printf -v "$v" '%s' 0
+  done
+
+  if (( n_all == 0 )); then
+    # 有 BMC，但一条带阈值的数值型传感器都没有（部分精简 BMC 就是这样）
+    result_add "verify_bmc_sensors" "部件传感器复查" "$ST_SKIP" \
+      "本机管理控制器未提供带上下限的部件传感器读数，本项未做核对。此项不影响整机结论。" \
+      "raw/ipmi-sensors-post.txt"
+    return
+  fi
+
+  # 越线的逐条留一份证据文件（客户报告里只列前几条，剩下的在这儿）
+  local ev=""
+  if (( n_crit + n_warn + n_zero > 0 )); then
+    ev="raw/ipmi-sensor-breach.txt"
+    printf '%s\n' "$rows" | grep -v '^ok|' > "$RAW_DIR/ipmi-sensor-breach.txt" 2>/dev/null || true
+  fi
+
+  # 列成一句话。**只列前 6 条**：一台 271 个传感器的机器真坏起来能刷出几十行，
+  # 客户报告里糊一整屏没人看得下去，剩下的指向证据文件。
+  _sensor_list() {
+    local want="$1" n=0 lvl name val unit why out=""
+    while IFS='|' read -r lvl name val unit why; do
+      [[ "$lvl" == "$want" ]] || continue
+      n=$(( n + 1 ))
+      (( n > 6 )) && continue
+      out="${out}${out:+；}$(ipmi_sensor_phrase "$name" "$val" "$unit" "$why")"
+    done <<< "$rows"
+    (( n > 6 )) && out="${out}，等共 ${n} 项"
+    printf '%s' "$out"
+  }
+
+  if (( n_crit > 0 )); then
+    result_add "verify_bmc_sensors" "部件传感器复查" "$ST_FAIL" \
+      "压测后有 ${n_crit} 项部件读数超出主板设定的临界范围：$(_sensor_list crit)。\
+这些上下限由主板厂商写入管理控制器，超出即表示对应部件或其供电异常，需检修后复测。" "$ev"
+  elif (( n_warn > 0 || n_zero > 0 )); then
+    local msg=""
+    (( n_warn > 0 )) && msg="有 ${n_warn} 项部件读数越过主板设定的告警线（尚未到临界线）：$(_sensor_list warn)。"
+    (( n_zero > 0 )) && msg="${msg}有 ${n_zero} 项部件读数为 0：$(_sensor_list zero)。\
+读数为 0 既可能是该位置未安装部件，也可能是部件已停转或无输出，两者从读数上分不开。"
+    result_add "verify_bmc_sensors" "部件传感器复查" "$ST_WARN" \
+      "${msg}机器仍可正常工作，建议出货前现场确认散热与供电。" "$ev"
+  else
+    result_add "verify_bmc_sensors" "部件传感器复查" "$ST_PASS" \
+      "压测结束后核对 ${n_all} 项部件传感器（风扇转速 / 温度 / 电压 / 功率等），\
+读数均在主板设定的上下限之内" "raw/ipmi-sensors-post.txt"
+  fi
+  unset -f _sensor_list
+}
+
 # ---------------------------------------------------------------- 汇总入口
 verify_all() {
   section "PHASE 5/5  POST-TEST VERIFICATION"
   collect_smart "post"
   verify_smart
   verify_disk_temp
+  # 自检是 PHASE 1 发起的，这里只读结果。排在 collect_smart post 之后没关系
+  # （它自己跑自己的 smartctl -l selftest），但必须在 verify_all 里 ——
+  # 少了这一句，盘在后台白跑一遍自检，没人去看结果。
+  verify_disk_selftest
   # 计数器测后快照。必须排在下面三条判定之前 —— 它们读的就是这份。
   collect_counters "post"
   verify_ecc
@@ -625,6 +861,9 @@ verify_all() {
   verify_dmesg
   verify_sel
   capture "sensors-post.txt" sensors
+  # 测后传感器快照必须排在 verify_bmc_sensors 之前 —— 那一条判的就是这份。
+  # （排反了它会退去读测前那份，于是"压测把风扇跑停了"这类事永远查不出来。）
   [[ "${IPMI_OK:-0}" == "1" ]] && capture -t 60 "ipmi-sensors-post.txt" ipmitool sensor list
+  verify_bmc_sensors
   return 0
 }

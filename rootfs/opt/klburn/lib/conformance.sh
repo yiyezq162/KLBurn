@@ -216,25 +216,79 @@ check_nic_uniform() {
 # 规格 = 接口类型 + 容量（同容量同接口的盘才该是同型号）。
 # 读的是 scan_disks 已经落盘的 lsblk.json，不额外跑任何命令。
 #
-# disk_spec_model <lsblk.json> -> 每行 "<接口>_<容量字节>|<型号>"
+# ⚠️⚠️ **比的必须是"这台机器的盘"，而 `.rm` 这个标志判不出这件事。**
+#
+# 我们自己这根启动 U 盘，在真机上报的是 `tran=usb` 但 **`rm=false`** ——
+# `rm` 说的是"介质可不可换"（读卡器那种），不是"它挂在 USB 上"。实测那台
+# 「没插硬盘」的机器：lsblk 里唯一一块 disk 就是我们的盘（SA400S37120G，
+# rm=false），只按 `.rm` 过滤的话，一台**一块硬盘都没有**的机器会得到一条
+# 「硬盘型号一致性 PASS：按接口与容量分为 1 组」—— 而同一份报告里
+# 「硬盘信息采集」写的是「本机未安装硬盘」。两句话自相矛盾，而且那一组
+# 说的是我们自己的 U 盘。真要撞上同容量不同型号的 USB 盘，还会凭空判出一条
+# 「同规格硬盘的型号不一致」并把我们自己那根盘的型号印给客户。
+#
+# 「哪些盘算这台机器自己的」这件事 `scan_disks` 已经算好了（§8.2 那一整套
+# 启动盘反查，`test-disk-exclusion.sh` 守着），结果就在 `DISK_SMART[]` 里。
+# **别在这儿重新发明一遍**，直接拿它当范围。`.rm` 那一条留着当第二道防线。
+#
+# disk_spec_model <lsblk.json> [范围文件] -> 每行 "<接口>_<容量字节>|<型号>"
+#   范围文件：每行一个设备名（`sda` 或 `/dev/sda`）。给了就只认这些。
+#   **给了路径却没有那个文件时宁可一条都不输出**，绝不悄悄退回全量 ——
+#   退回去正是这条 bug 本来的样子。
 disk_spec_model() {
-  local f="${1:-}"
+  local f="${1:-}" scope="${2:-}"
   [[ -s "$f" ]] || return 0
+  local rows
   # ⚠️ `.rm` 在不同 lsblk 版本里既可能是布尔 true/false，也可能是字符串 "1"/"0"。
-  #    只判 `!= true` 的话，老版本上 U 盘会被当成本机硬盘一起比型号。一律先 tostring。
-  jq -r '
+  #    只判 `!= true` 的话，老版本上可换介质的设备会被当成本机硬盘。一律先 tostring。
+  rows="$(jq -r '
     [.blockdevices[]? | recurse(.children[]?)]
     | .[]
     | select(.type == "disk")
     | select((.model // "") != "")
     | select(((.rm // false) | tostring) as $r | $r != "true" and $r != "1")
-    | "\(.tran // "unknown")_\(.size)|\(.model)"
-  ' "$f" 2>/dev/null | sed 's/[[:space:]]*$//'
+    | "\(.name)\t\(.tran // "unknown")_\(.size)|\(.model)"
+  ' "$f" 2>/dev/null | sed 's/[[:space:]]*$//')"
+  [[ -n "$rows" ]] || return 0
+
+  if [[ -n "$scope" ]]; then
+    [[ -f "$scope" ]] || return 0
+    # ⚠️ **别用 `NR==FNR` 那个惯用法读范围文件。**范围为空是正常情况
+    #    （这台机器一块本机硬盘都没有），而第一个文件是空的时候 NR 和 FNR
+    #    会在第二个文件里一路相等 —— 整条数据流全被当成"范围行"吃掉。
+    #    这里恰好和我们想要的结果一样（空范围 -> 不输出），
+    #    **对的结果、错的理由**：改天语义一变就是一个没人看得出来的 bug。
+    #    在 BEGIN 里显式读进来，空文件就是空 keep[]，没有任何巧合成分。
+    printf '%s\n' "$rows" | awk -F'\t' -v scopefile="$scope" '
+      BEGIN {
+        while ((getline line < scopefile) > 0) {
+          gsub(/[[:space:]]/, "", line); sub(/^\/dev\//, "", line)
+          if (line != "") keep[line] = 1
+        }
+        close(scopefile)
+      }
+      ($1 in keep) { print $2 }'
+  else
+    printf '%s\n' "$rows" | cut -f2-
+  fi
+}
+
+# 这台机器"自己的盘" —— 直接取 scan_disks 的结果，每行一个设备名。
+# DISK_SMART = 可压测的 + 因已挂载而不压测的真实盘；U 盘和虚拟设备不在里面。
+disk_uniform_scope() {
+  local p
+  for p in "${DISK_SMART[@]:-}"; do
+    [[ -n "$p" ]] || continue
+    printf '%s\n' "${p##*/}"
+  done
 }
 
 check_disk_uniform() {
   local f="$RAW_DIR/lsblk.json"
-  local rows; rows="$(disk_spec_model "$f")"
+  # 范围文件也留在 raw/ 里：日后有人问"为什么只比了两块盘"，这就是答案
+  local scope="$RAW_DIR/disk-uniform-scope.txt"
+  disk_uniform_scope > "$scope"
+  local rows; rows="$(disk_spec_model "$f" "$scope")"
   if [[ -z "$rows" ]]; then
     result_add "check_disk_uniform" "硬盘型号一致性" "$ST_SKIP" \
       "未采集到可比对的硬盘型号，本项未做核对。此项不影响整机结论。" ""
@@ -349,8 +403,11 @@ gpu_ecc_scan() {
 check_gpu_ecc() {
   (( ${GPU_USABLE:-0} > 0 )) || return 0
   local f="$RAW_DIR/gpu-ecc.csv"
-  # volatile = 本次上电以来；aggregate = 出厂以来累计。验收看的是 volatile，
-  # aggregate 一并记进工程数据（内部报告读它）。
+  # volatile = 本次上电以来；aggregate = 出厂以来累计。判定看的是 volatile，
+  # aggregate 一并落进 raw/gpu-ecc.csv 存档 —— 内部报告不单独解析它，
+  # 但「原始文件索引」那一节指得到这个文件、并写明了五列各是什么
+  # （generate_internal.py 的 RAW_INDEX）。**别把它写进交付报告**：
+  # "出厂以来累计"讲的是这台机器过去经历了什么，不是这一轮测出了什么（§11-50）。
   timeout 60 nvidia-smi \
     --query-gpu=index,ecc.errors.corrected.volatile.total,ecc.errors.uncorrected.volatile.total,ecc.errors.corrected.aggregate.total,ecc.errors.uncorrected.aggregate.total \
     --format=csv,noheader,nounits > "$f" 2>/dev/null || true
@@ -483,15 +540,29 @@ bios_vtd_state() {
   local f="${1:-}" iommu_dir="${2:-/sys/class/iommu}"
   if [[ -d "$iommu_dir" ]]; then
     if compgen -G "$iommu_dir/*" >/dev/null 2>&1; then printf 'enabled'; return; fi
-    # 目录在但空的 = 内核有这套框架、没有任何 IOMMU 被启用
-    [[ -f "$f" ]] || { printf 'disabled'; return; }
+    # 目录在但空的 = 内核有这套框架、没有任何 IOMMU 被启用。
+    # ⚠️ **到这儿就是答案了，不要再往下去翻内核日志。**
+    #    原来这里写的是"没有 dmesg 才认 disabled"，于是有 dmesg 时会掉进下面
+    #    那两条 grep，两条都没命中就报 unknown —— 把一个**已经确定的 disabled**
+    #    换成了"读不到"。sysfs 是活的状态，它说空的就是空的。
+    printf 'disabled'; return    # sysfs 说了算，不往下走
   fi
   [[ -f "$f" ]] || { printf 'unknown'; return; }
-  if grep -aqiE 'DMAR: (IOMMU|Intel-IOMMU).*(enabled|hardware identity mapping)|AMD-Vi: (Interrupt remapping enabled|Found IOMMU)' "$f" 2>/dev/null; then
-    printf 'enabled'; return
-  fi
+  # 先查"关"（"enabled by BIOS" 这类句子里也带 BIOS 二字，顺序反了会互相误伤）
   if grep -aqiE 'DMAR: (Disabling IOMMU|IOMMU disabled)|Intel-IOMMU: disabled|DMAR: No DMAR devices found|AMD-Vi: (Disabled|not supported)' "$f" 2>/dev/null; then
     printf 'disabled'; return
+  fi
+  # ⚠️ 下面这几条是**照着真机日志**写的，别按印象改。
+  #    十份真机 run-dir 实测：原来那两条 `DMAR: IOMMU enabled` /
+  #    `AMD-Vi: Found IOMMU` **一台都没命中过** —— 6.8 内核根本不打这两句。
+  #    真正打出来的是：
+  #      Intel / 澜起：DMAR: Intel(R) Virtualization Technology for Directed I/O
+  #      海光（AMD 系）：iommu: Default domain type: Translated
+  #    最后那条来自通用 iommu 层，只有真的有 IOMMU 驱动注册上来才会打，
+  #    所以拿它当"开着"的正面证据是站得住的（Passthrough 也算开着 ——
+  #    那是 iommu=pt，BIOS 里的 VT-d 仍然是开的）。
+  if grep -aqiE 'DMAR: Intel\(R\) Virtualization Technology for Directed I/O|DMAR: (IOMMU|Intel-IOMMU).*(enabled|hardware identity mapping)|AMD-Vi: (Interrupt remapping enabled|Found IOMMU)|iommu: Default domain type:' "$f" 2>/dev/null; then
+    printf 'enabled'; return
   fi
   printf 'unknown'
 }
@@ -804,9 +875,14 @@ check_sn_consistency() {
 }
 
 # ---------------------------------------------------------------- 汇总入口
-# 排在 collect_all 之后调用：它读的全是采集阶段已经落盘的文件
+# 排在 collect_all 之后调用：一致性比对读的全是采集阶段已经落盘的文件
 # （dmidecode-memory / nic/ / lsblk.json / ipmi-fru / dmesg-pre），
-# 自己不重复跑任何耗时命令。
+# 排在它前面就是拿空文件去比。
+#
+# ⚠️ "不跑任何命令"是**不准确**的说法，别照着它去掉超时：显存那三项要现问
+#    显卡驱动（各一次 nvidia-smi），平台设置要读 DMI type 41、序列号要读
+#    system-serial-number。它们都是秒级的、而且**每一条都带 timeout** ——
+#    这一整段的契约是"几秒钟就过去，绝不拖住整轮测试"，不是"一条命令都不跑"。
 conformance_all() {
   info "Cross-checking configuration consistency ..."
   check_dimm_uniform

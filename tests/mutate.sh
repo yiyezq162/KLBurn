@@ -115,6 +115,27 @@ MUTATIONS=(
 "disk-tool-name${S}硬盘压测文案重新写上工具名（1.8.4 漏掉 fio 的那条，走源码那一路）${S}test-hw-checks${S}$RT/lib/stress.sh${S}mut_disk_tool_name"
 "accept-group-drop${S}报告分节时把压测那一段的判定漏掉（分组只该决定印在哪一节，不该吞判定）${S}test-report-render${S}$RT/report/generate_report.py${S}mut_accept_group_drop"
 "accept-metric-dup${S}已经有专属小节的指标又进「其他实测指标」（同一个数字印两遍）${S}test-report-render${S}$RT/report/generate_report.py${S}mut_accept_metric_dup"
+"gpumem-history-leak${S}显存的累计/历史读数又漏进客户报告（和硬盘通电时间同一把尺子）${S}test-internal-report${S}$RT/report/generate_report.py${S}mut_gpumem_history_leak"
+"bench-caliber-overwrite${S}逐盘带宽表的「测试口径」被写方向覆盖（读带宽那格顶着 _write_ 的口径）${S}test-report-render${S}$RT/report/generate_report.py${S}mut_bench_caliber_overwrite"
+"bench-title-static${S}逐盘带宽表的标题写死成「读写」（只测了读的机器上说得比测得多）${S}test-report-render${S}$RT/report/generate_report.py${S}mut_bench_title_static"
+"bench-empty-section${S}性能基准整节的判据把 bench 指标也算进去（画出一个只有标题的空章节）${S}test-report-render${S}$RT/report/generate_report.py${S}mut_bench_empty_section"
+"bench-status-warn${S}性能基准判出 WARN（性能数字不参与合格判定，只有 PASS/SKIP）${S}test-report-render${S}$RT/lib/bench.sh${S}mut_bench_status_warn"
+"bench-pointer-static${S}判定文案里的指路写死成「读写」那一节（指向报告里不存在的小节）${S}test-hw-checks${S}$RT/lib/bench.sh${S}mut_bench_pointer_static"
+"disk-uniform-usb${S}硬盘一致性不再按 scan_disks 的范围比（没插硬盘的机器拿我们自己那根 U 盘凑一组判 PASS）${S}test-hw-checks${S}$RT/lib/conformance.sh${S}mut_disk_uniform_usb"
+"vtd-empty-fallthrough${S}VT-d 在 sysfs 空目录时又掉回去翻内核日志（一个已经确定的 disabled 被换成「读不到」）${S}test-hw-checks${S}$RT/lib/conformance.sh${S}mut_vtd_empty_fallthrough"
+"vtd-fake-patterns${S}VT-d 的内核日志判据退回真机上一条都不命中的那两句${S}test-hw-checks${S}$RT/lib/conformance.sh${S}mut_vtd_fake_patterns"
+"gpu-load-metric-dup${S}逐卡满载读数又拆进「其他实测指标」（和那句结论重复，而且拆完就没了单位）${S}test-internal-report${S}$RT/report/generate_report.py${S}mut_gpu_load_metric_dup"
+"freq-window-split${S}最低频率和平均频率拆回两个窗口（报告上印出「最低 2688 > 平均 2686」）${S}test-log-parsing${S}$RT/lib/stress.sh${S}mut_freq_window_split"
+"bmc-zero-as-fail${S}传感器读数 0 直接判临界（空着的风扇位把好机器判 FAIL）${S}test-hw-checks${S}$RT/lib/verify.sh${S}mut_bmc_zero_as_fail"
+"bmc-judge-pre-snapshot${S}部件传感器判的是测前那份快照（压测把风扇跑停了永远查不出来）${S}test-hw-checks${S}$RT/lib/verify.sh${S}mut_bmc_judge_pre_snapshot"
+"bmc-discrete-mixed-in${S}离散量传感器也拿去比阈值（PWR_Button 这种被判成异常）${S}test-hw-checks${S}$RT/lib/verify.sh${S}mut_bmc_discrete_mixed_in"
+"selftest-fail-as-pass${S}硬盘自检「Completed: read failure」被当成通过（坏盘拿着干净报告出厂）${S}test-hw-checks${S}$RT/lib/verify.sh${S}mut_selftest_fail_as_pass"
+"selftest-never-read${S}发起了硬盘自检却没人读结果（盘在后台白跑一遍）${S}test-hw-checks${S}$RT/lib/verify.sh${S}mut_selftest_never_read"
+"nic-selftest-after-linkup${S}网卡自检排到拉链路之后（自检把链路踢掉，好机器被判成网口不通）${S}test-hw-checks${S}$RT/lib/collect.sh${S}mut_nic_selftest_after_linkup"
+"fwts-to-customer${S}固件自检漏进客户报告（好机器上 ACPI 告警极常见，每台都刷一片黄）${S}test-internal-report${S}$RT/report/generate_report.py${S}mut_fwts_to_customer"
+"memtest-first-entry${S}memtest 菜单项插到第一条（插上盘开机跑的是内存测试，不是我们的测试）${S}test-batch-tools${S}build/lib/patch-grub.py${S}mut_memtest_first_entry"
+"summary-empty-as-pass${S}批次汇总把「一条判定都没有」算成 PASS（第四处口径自成一套）${S}test-batch-tools${S}tools/klburn-summary.py${S}mut_summary_empty_as_pass"
+"sdc-nonzero-as-fail${S}专项验证把「非零退出」直接当成机器坏了（工具跑不起来 = 判客户的机器 FAIL）${S}test-log-parsing${S}$RT/lib/validate.sh${S}mut_sdc_nonzero_as_fail"
 )
 
 # ================================================================
@@ -297,7 +318,7 @@ mut_raid_hint_subshell() {
 # 一个字都不会少拿。放回客户报告就是拿内部流程去占客户的版面（report-policy 二-4）。
 mut_deep_to_customer() {
   replace_line "$RT/report/generate_report.py" \
-    'INTERNAL_ONLY_ROWS = ("collect_deep",)' \
+    'INTERNAL_ONLY_ROWS = ("collect_deep", "collect_fwts")' \
     '    INTERNAL_ONLY_ROWS = ()'
 }
 
@@ -637,8 +658,8 @@ mut_nic_fw_path() {
 # 「失败压测项」是 stress-ng 内部子测试的失败计数，判的是我们不是机器。
 mut_metric_internal_leak() {
   replace_line "$RT/report/generate_report.py" \
-    '    INTERNAL_ONLY_METRICS = {("cpu", "失败压测项"), ("mem", "测试工具")}' \
-    '    INTERNAL_ONLY_METRICS = set()'
+    '        ("cpu", "失败压测项"), ("mem", "测试工具"),' \
+    '        ("cpu", "这个键根本不存在"),'
 }
 
 # 1.8.4：压测工具的名字重新进客户报告。
@@ -646,8 +667,8 @@ mut_metric_internal_leak() {
 # 所以守卫必须查生成物，查源码的那条拦不住它。
 mut_metric_tool_name() {
   replace_line "$RT/report/generate_report.py" \
-    '    INTERNAL_ONLY_METRICS = {("cpu", "失败压测项"), ("mem", "测试工具")}' \
-    '    INTERNAL_ONLY_METRICS = {("cpu", "失败压测项")}'
+    '        ("cpu", "失败压测项"), ("mem", "测试工具"),' \
+    '        ("cpu", "失败压测项"),'
 }
 
 # 1.8.4：判定文案里重新写上工具名。走的是**源码字符串**那一路，
@@ -710,8 +731,17 @@ mut_linpack_col_by_pos() {
 # 凭空多出一条"满载最低频率 210MHz"，看着像严重降频。
 mut_gpu_clkmin_noskip() {
   replace_line "$RT/lib/gpu.sh" \
-    '      start = (cn > 2 ? 3 : 1)' \
+    '      start = (n > 2 ? 3 : 1)' \
     '      start = 1'
+}
+
+# CPU 那边把"最低"和"平均"拆回两个各自的窗口。两个数都不算错，
+# 但凑在同一行上就会出现"平均频率 2686MHz　最低频率 2688MHz"——
+# 最低的比平均的还高。r08 那份真机报告上就印着这个。
+mut_freq_window_split() {
+  replace_line "$RT/lib/stress.sh" \
+    '  local mn av; read -r mn av < <(phase_freq_stats "$1"); _freq_out "$av"' \
+    '  awk -F, -v p="$1" '"'"'$2==p && $4!="" {s+=$4; n++} END{if(n>0) printf "%d", s/n}'"'"' "$RUN_DIR/sys_metrics.csv" 2>/dev/null'
 }
 
 # 硬盘压测文案重新写上工具名。这正是 1.8.4 漏掉的那一条 ——
@@ -758,6 +788,180 @@ mut_serial_na() {
   replace_line "$RT/lib/core.sh" \
     '      |"unknown"|"n/a"|"na"|"o.e.m."|"empty"|"not present"|"0123456789" \' \
     '      |"unknown"|"o.e.m."|"empty"|"not present"|"0123456789" \'
+}
+
+# 显存的累计 / 历史读数又漏进客户报告。和硬盘的通电时间、累计读写量
+# 完全同一把尺子：它讲的是"这台机器过去经历了什么"，回答不了"合不合格"，
+# 客户看到一个孤零零的 5 只会问"那是什么，严重吗"。
+mut_gpumem_history_leak() {
+  replace_line "$RT/report/generate_report.py" \
+    '        ("gpu", "显存ECC可纠正"), ("gpu", "显存ECC不可纠正"),' \
+    '        ("gpu", "这个键根本不存在"),'
+}
+
+# 逐盘带宽表的「测试口径」退回 `row[...] = jobname`：读和写各写一次，
+# 后写的把先写的覆盖掉，于是「顺序读带宽」那一格的数字顶着一个
+# `libaio_write_...` 的口径。数字没错，但标错了它是怎么来的 ——
+# 而这张表存在的理由就是"客户拿它去和自己验收单上的 job 名对照"。
+mut_bench_caliber_overwrite() {
+  replace_line "$RT/report/generate_report.py" \
+    '                row["测试口径"] = " / ".join(jobs_of[dev])' \
+    '                row["测试口径"] = jn'
+}
+
+# 逐盘带宽表的标题写死成「读写」。现场 99% 不确认破坏性写入，
+# 于是一张只有读带宽的表顶着"读写"的标题 —— 说得比测得多（六-4），
+# 而且 lib/bench.sh 那句指路也就指向了一个不存在的小节。
+mut_bench_title_static() {
+  replace_line "$RT/report/generate_report.py" \
+    '                title, way = "硬盘顺序读带宽", "顺序读"' \
+    '                title, way = "硬盘顺序读写带宽", "顺序读写"'
+}
+
+# 性能基准整节的判据又把 bench 指标算进去。那几个指标在这一节里一格都不
+# 单独印（每个数都写在对应那条结论里），所以"有指标、没判定"的 run-dir
+# 会画出一个只有标题和导语、底下什么都没有的空章节。
+mut_bench_empty_section() {
+  replace_line "$RT/report/generate_report.py" \
+    '    bench_shown = bool(bench_rows or bench_disk)' \
+    '    bench_shown = bool(bench_rows or bench_disk or metrics_of("bench"))'
+}
+
+# 性能基准判出 WARN。**这几项只有 PASS（量到）和 SKIP（量不到）** ——
+# 一旦允许它判 WARN/FAIL，下一步就是有人往里塞一个"应该达到多少"的数，
+# 而这张盘无人值守，那个数只能是我们自己编的（1.9.0 删掉的就是它）。
+mut_bench_status_warn() {
+  replace_line "$RT/lib/bench.sh" \
+    '  result_add "$id" "$name" "$ST_PASS" \' \
+    '  result_add "$id" "$name" "$ST_WARN" \'
+}
+
+# 判定文案里那句指路写死成「读写」那一节。只测了读的机器上，
+# 报告里那一节叫「硬盘顺序读带宽」，这句话指向的小节根本不存在。
+mut_bench_pointer_static() {
+  replace_line "$RT/lib/bench.sh" \
+    '  local scope="顺序读" secname="硬盘顺序读带宽"' \
+    '  local scope="顺序读" secname="硬盘顺序读写带宽"'
+}
+
+# 硬盘一致性不再按 scan_disks 算好的范围比，退回只看 lsblk 的 .rm。
+# 真机上我们那根启动 U 盘是 tran=usb 但 **rm=false**，拦不住 ——
+# 一台**一块硬盘都没有**的机器会拿它凑出一组，判「硬盘型号一致性 PASS」，
+# 而同一份报告里「硬盘信息采集」写着「本机未安装硬盘」。
+mut_disk_uniform_usb() {
+  replace_line "$RT/lib/conformance.sh" \
+    '  local rows; rows="$(disk_spec_model "$f" "$scope")"' \
+    '  local rows; rows="$(disk_spec_model "$f")"'
+}
+
+# VT-d 在 "sysfs 目录在、但是空的" 时又掉回去翻内核日志。
+# 那时候答案**已经确定**了（内核有这套框架、没有任何 IOMMU 被启用），
+# 再往下走两条 grep，都没命中就报 unknown —— 把一个确定的 disabled
+# 换成了"读不到"。
+mut_vtd_empty_fallthrough() {
+  replace_line "$RT/lib/conformance.sh" \
+    '    printf '"'"'disabled'"'"'; return    # sysfs 说了算，不往下走' \
+    '    [[ -f "$f" ]] || { printf '"'"'disabled'"'"'; return; }'
+}
+
+# VT-d 的内核日志判据退回 1.9.0 那两句。它们在十份真机 run-dir 上
+# **一台都没命中过**（6.8 内核不打那两句），也就是说那条兜底路是死的。
+# 逐卡满载读数又拆进「其他实测指标」。同一个数在一页上出现两遍，
+# 而且拆进表格之后单位就丢了：一格「距降频阈值最小余量 8」，
+# 客户既不知道是 8 度还是 8%，也不知道 8 是多是少。
+mut_gpu_load_metric_dup() {
+  replace_line "$RT/report/generate_report.py" \
+    '        "满载最低频率MHz", "满载平均频率MHz", "满载平均功耗W",' \
+    '        "这个键根本不存在",'
+}
+
+# 专项验证把"非零退出"直接当成机器坏了。这两个工具跑不起来的理由太多了：
+# 参数不对、CPU 不支持某组测试、驱动版本不匹配、被超时打断 —— 全是非零。
+# 不要求"日志里有明确的失败证据"就判 FAIL，等于拿**我们这边的问题**
+# 去判客户的机器不合格，正是一号红线。
+mut_sdc_nonzero_as_fail() {
+  replace_line "$RT/lib/validate.sh" \
+    'data (miscompare|corruption)' \
+    '  if [[ "$rc" != "0" ]]; then'
+}
+
+# memtest 菜单项插到**第一条**。`set default=0` 指的就是第一条 ——
+# 插上盘开机跑的就变成了内存测试，而这张盘的全部意义是"插上就跑"。
+# 这是整个项目里最容易把盘变成砖的一处改动。
+mut_memtest_first_entry() {
+  replace_line "build/lib/patch-grub.py" \
+    "    return lines + [''] + block.rstrip('\\n').split('\\n'), True" \
+    "    return block.rstrip('\\n').split('\\n') + [''] + lines, True"
+}
+
+# 批次汇总把"一条判定都没有"算成 PASS。盘里、客户报告、内部报告三处
+# 都是"没有结果 != 通过"，汇总表是第四处 —— 它自成一套的下场是
+# "报告说无效、汇总表说合格"，而发货看的往往就是那张汇总表。
+mut_summary_empty_as_pass() {
+  replace_line "tools/klburn-summary.py" \
+    '        overall = "INVALID"' \
+    '        overall = "PASS"'
+}
+
+# 固件自检漏进客户报告。fwts 在**完全正常**的服务器上也会报出若干条
+# ACPI 告警 —— 印给客户就是每台机器都刷一片黄，而且刷的是他看不懂、
+# 也无从处理的东西。这条和 collect_deep 是同一个机制、同一个理由。
+mut_fwts_to_customer() {
+  replace_line "$RT/report/generate_report.py" \
+    '    INTERNAL_ONLY_ROWS = ("collect_deep", "collect_fwts")' \
+    '    INTERNAL_ONLY_ROWS = ("collect_deep",)'
+}
+
+# 硬盘自检结果里「Completed: read failure」被当成通过。这句话里也有
+# "Completed" —— 判据顺序反了就会把**盘自己说的"我没通过"**读成通过，
+# 一块正在坏的盘拿着干净报告出厂。
+mut_selftest_fail_as_pass() {
+  replace_line "$RT/lib/verify.sh" \
+    "  if grep -aqiE 'Completed:[[:space:]]*(read|electrical|servo|handling|unknown)|Fatal or unknown error' \"\$f\" 2>/dev/null; then" \
+    "  if grep -aqiE 'ZZ_NEVER_MATCHES_ZZ' \"\$f\" 2>/dev/null; then"
+}
+
+# 发起了自检却没人读结果。盘在后台老老实实跑了一遍短自检，结论没人看 ——
+# 加了工具却不看它说什么，等于没加。
+mut_selftest_never_read() {
+  delete_line "$RT/lib/verify.sh" '  verify_disk_selftest'
+}
+
+# 网卡自检排到拉链路之后。offline 自检会把链路踢下去，后面 DHCP 拿到的
+# 是一个刚被自己踢掉的链路 —— 一台网口完全正常的机器被判成"网口不通"。
+mut_nic_selftest_after_linkup() {
+  delete_line "$RT/lib/collect.sh" '  check_nic_selftest  # 定义在 lib/network.sh'
+}
+
+# 传感器读数恰好为 0 时不再降级。0 既可能是"这个位置没装部件"，也可能是
+# "装了但停转"，从读数上分不开 —— 不降级的话，一台空着两个风扇位的好机器
+# 会被判 FAIL。这是二号红线（分不清的东西不该去染客户的结论）。
+mut_bmc_zero_as_fail() {
+  replace_line "$RT/lib/verify.sh" \
+    '      if (lvl == "crit" && v == 0) lvl = "zero"' \
+    '      if (0) lvl = "zero"'
+}
+
+# 部件传感器判的是**测前**那份快照。那样"压测把风扇跑停了""VRM 烤到 100℃"
+# 这一整类事永远查不出来 —— 而那正是这条判定存在的理由。
+mut_bmc_judge_pre_snapshot() {
+  replace_line "$RT/lib/verify.sh" \
+    '  [[ "${IPMI_OK:-0}" == "1" ]] && capture -t 60 "ipmi-sensors-post.txt" ipmitool sensor list' \
+    '  [[ "${IPMI_OK:-0}" == "1" ]] && capture -t 60 "ipmi-sensors-pre-only.txt" ipmitool sensor list'
+}
+
+# 离散量传感器也拿去比阈值。它的"读数"是 0x80 这种事件位，
+# 混进来就会把 PWR_Button / CPU0_Status 判成异常 —— 和 1.8.3 电源那次同一课。
+mut_bmc_discrete_mixed_in() {
+  replace_line "$RT/lib/verify.sh" \
+    '      if (!isnum(val)) next' \
+    '      if (!isnum(val)) { val = 0; lcr = 1; lnc = 1 }'
+}
+
+mut_vtd_fake_patterns() {
+  replace_line "$RT/lib/conformance.sh" \
+    'Virtualization Technology for Directed I/O|' \
+    '  if grep -aqiE '"'"'DMAR: (IOMMU|Intel-IOMMU).*(enabled|hardware identity mapping)|AMD-Vi: (Interrupt remapping enabled|Found IOMMU)'"'"' "$f" 2>/dev/null; then'
 }
 
 # ================================================================
@@ -851,6 +1055,17 @@ fi
 
 printf '\n========================================\n'
 printf '抓住 %d 条，逃掉 %d 条，施加失败 %d 条\n' "$CAUGHT" "$ESCAPED" "$BROKEN"
+
+# ⚠️ **一条都没跑成也会走到这儿，而下面那个判据全是 0 —— 它会打绿字。**
+# 实际踩到过：`./tests/mutate.sh 某个打错的名字` 屏幕上是「全部被抓住」。
+# 一条"什么都没做也说全过了"的闸门，和没有这个闸门是一回事。
+if (( CAUGHT + ESCAPED + BROKEN == 0 )); then
+  printf '\033[1;31m一条变异都没跑成\033[0m\n'
+  [[ -n "$ONLY" ]] \
+    && printf '  「%s」不在变异清单里。看一眼：./tests/mutate.sh --list\n' "$ONLY" \
+    || printf '  变异清单是空的？检查 MUTATIONS 数组\n'
+  exit 1
+fi
 if (( ESCAPED )); then
   printf '\033[1;31m逃掉的：\033[0m\n'
   printf '  %s\n' "${ESCAPED_LIST[@]}"

@@ -2422,7 +2422,7 @@ echo "=== 汇总入口的调用链不能少人（少一个 = 那项结论从报�
 # declare -f 打出来的函数体不含注释，所以数的是真调用。
 
 for fn in collect_smart verify_smart verify_disk_temp verify_dmesg verify_sel \
-          collect_counters verify_ecc verify_throttle verify_aer; do
+          collect_counters verify_ecc verify_throttle verify_aer verify_bmc_sensors; do
   check "verify_all 必须调用 $fn" \
         "yes" "$(declare -f verify_all | grep -q "\b${fn}\b" && echo yes || echo no)"
 done
@@ -2471,11 +2471,39 @@ for fn in conformance_all bench_all; do
   check "factory-test.sh 必须调用 $fn" "yes" \
         "$(grep -qE "^[[:space:]]*${fn}( |\$)" "$FT" && echo yes || echo no)"
 done
+# 校验清单必须**在两份报告和 PDF 都出完之后**才生成 —— 报告自己也在清单里，
+# 排在前面的话清单里就没有报告，那它就证明不了"你手上这份和我归档的是同一份"。
+check "factory-test.sh 必须生成校验清单" "yes" \
+      "$(grep -qE '^[[:space:]]*write_checksums' "$FT" && echo yes || echo no)"
+ft_pdf="$(grep -n 'render_pdf "\$INTERNAL_HTML"' "$FT" | head -1 | cut -d: -f1)"
+ft_sum="$(grep -n '^write_checksums' "$FT" | head -1 | cut -d: -f1)"
+check "校验清单要排在两份 PDF 之后（报告自己也在清单里）" "yes" \
+      "$( [[ -n "$ft_pdf" && -n "$ft_sum" && "$ft_pdf" -lt "$ft_sum" ]] && echo yes || echo no )"
 # 基准要在压测之前跑：和满载压测同时跑出来的带宽/算力数字没有任何参考价值
 check "bench_all 必须排在并发压测之前（空闲时测才有意义）" "yes" \
       "$(if [[ "$(grep -n '^[[:space:]]*bench_all' "$FT" | head -1 | cut -d: -f1)" \
                -lt "$(grep -n 'stress_cpu "\$CPU_SECS"' "$FT" | head -1 | cut -d: -f1)" ]]; \
          then echo yes; else echo no; fi)"
+
+# ---------------------------------------------------------------- 指路要对得上
+#
+# `bench_disk_bandwidth` 的文案里有一句「逐盘数值见下方「X」」，X 是报告里
+# 那张逐盘表的小节标题 —— 而那个标题是**跟着数据动的**：现场没确认破坏性
+# 写入时只测得到读，写那一列整个不画，标题也就只写「顺序读」。
+#
+# 两个字面量分别落在两个文件里（判定文案在 shell、小节标题在 Python），
+# 改一边忘了另一边，客户读到的就是一句指向报告里根本不存在的小节的话。
+# 这条按**字面量**对账，所以两边都不许把它拼出来（Python 那边有注释说明）。
+GEN_PY="$(cd "$LIB/.." && pwd)/report/generate_report.py"
+for secname in "硬盘顺序读写带宽" "硬盘顺序读带宽"; do
+  check "小节名「${secname}」必须在 bench.sh 和报告生成器里同时存在" "yes yes" \
+        "$( { grep -qF "$secname" "$LIB/bench.sh" && printf 'yes' || printf 'no'; } ; printf ' ' ; \
+            { grep -qF "$secname" "$GEN_PY" && printf 'yes' || printf 'no'; } )"
+done
+# 同一条判据必须抓得住不存在的名字，否则上面两条是摆设。
+check "小节名对账守卫本身抓得住漏掉的一边" "no no" \
+      "$( { grep -qF "硬盘这个小节根本不存在" "$LIB/bench.sh" && printf 'yes' || printf 'no'; } ; printf ' ' ; \
+          { grep -qF "硬盘这个小节根本不存在" "$GEN_PY" && printf 'yes' || printf 'no'; } )"
 
 # 顺序也有讲究，写死几条最容易被改坏的：
 chain="$(declare -f collect_all)"
@@ -2494,6 +2522,16 @@ check "collect_ipmi 必须排在 collect_raid 之前（阵列卡要和 BMC 传�
       "$(if [[ "$(grep -n 'collect_ipmi' <<<"$chain" | head -1 | cut -d: -f1)" \
                -lt "$(grep -n 'collect_raid' <<<"$chain" | head -1 | cut -d: -f1)" ]]; \
          then echo yes; else echo no; fi)"
+# 测后传感器快照必须排在判定之前，否则它读的是**测前**那份 ——
+# "压测把风扇跑停了"这一整类事就永远查不出来，而那正是这条判定的理由。
+vchain="$(declare -f verify_all)"
+# ⚠️ 两个行号都必须**取得到**才算数。上面那一批"谁排在谁前面"的断言都用
+#    `[[ "$a" -lt "$b" ]]`，而 bash 在 `[[ ]]` 里把空串当 0 —— 采集那一行整个
+#    没了的时候 a 是空、0 < b 成立，断言反而变绿。这一条把空值单独拦掉。
+_vpos() { grep -n -- "$1" <<<"$vchain" | head -1 | cut -d: -f1; }
+vp_cap="$(_vpos 'ipmi-sensors-post.txt')"; vp_jdg="$(_vpos 'verify_bmc_sensors')"
+check "ipmi-sensors-post.txt 的采集必须排在 verify_bmc_sensors 之前" "yes" \
+      "$( [[ -n "$vp_cap" && -n "$vp_jdg" && "$vp_cap" -lt "$vp_jdg" ]] && echo yes || echo no )"
 check "collect_system 必须排在 check_pcie_link 之前（PCIe 判定读的是它落下的 lspci-vv.txt）" \
       "yes" \
       "$(if [[ "$(grep -n 'collect_system' <<<"$chain" | head -1 | cut -d: -f1)" \
@@ -2681,6 +2719,246 @@ check "占位符要先过滤掉，否则一台内存一致的机器会被判成�
       "$(dmi_dimm_field "$TMP/conf-mem-bogus.txt" "Part Number" | count_uniq)"
 
 echo
+echo "=== 设备自己的自检：硬盘 / 网卡（1.9.2）==="
+#
+# 这两条的共同点：**结论是设备自己给的，我们一个判据都不定。**
+# 我们只负责发起、把它说的话转述过来，以及在它没说话的时候老老实实 SKIP。
+
+# ---- 硬盘：smartctl -l selftest（ATA 和 NVMe 两种日志都要认）----
+cat > "$TMP/st-ok.txt" <<'EOF'
+SMART Self-test log structure revision number 1
+Num  Test_Description    Status                  Remaining  LifeTime(hours)  LBA_of_first_error
+# 1  Short offline       Completed without error       00%      2143         -
+EOF
+check "跑完没错 -> ok" "ok" "$(selftest_verdict "$TMP/st-ok.txt")"
+
+cat > "$TMP/st-fail.txt" <<'EOF'
+Num  Test_Description    Status                  Remaining  LifeTime(hours)  LBA_of_first_error
+# 1  Short offline       Completed: read failure       90%      2143         1953458
+EOF
+check "盘自己说读失败 -> fail" "fail" "$(selftest_verdict "$TMP/st-fail.txt")"
+# ⚠️ "Completed: read failure" 里也有 Completed —— 顺序反了会读成通过。
+check "「Completed: read failure」不许被当成通过" "0" \
+      "$(selftest_verdict "$TMP/st-fail.txt" | grep -c '^ok$' || true)"
+
+cat > "$TMP/st-run.txt" <<'EOF'
+Num  Test_Description    Status                  Remaining  LifeTime(hours)  LBA_of_first_error
+# 1  Short offline       Self-test routine in progress 70%      2143         -
+EOF
+check "还在跑 -> running（我们等不及，不是盘的毛病）" "running" "$(selftest_verdict "$TMP/st-run.txt")"
+
+cat > "$TMP/st-abort.txt" <<'EOF'
+Num  Test_Description    Status                  Remaining  LifeTime(hours)  LBA_of_first_error
+# 1  Short offline       Interrupted (host reset)      80%      2143         -
+EOF
+check "被主机打断 -> running（硬盘压测踩的，不是盘坏了）" "running" \
+      "$(selftest_verdict "$TMP/st-abort.txt")"
+
+cat > "$TMP/st-nvme.txt" <<'EOF'
+Self-test Log (NVMe Log 0x06)
+Num  Test_Description  Status                       Power_on_Hours  Failing_LBA  NSID Seg SCT Code
+ 0   Short             Completed without error                7461            -     -   -   -    -
+EOF
+check "NVMe 的日志格式也要认（按文字认，不按列号取）" "ok" "$(selftest_verdict "$TMP/st-nvme.txt")"
+printf 'Self-test Log (NVMe Log 0x06)\nNo Self-tests Logged\n' > "$TMP/st-none.txt"
+check "没有自检记录 -> none（SKIP，不是 FAIL）" "none" "$(selftest_verdict "$TMP/st-none.txt")"
+check "文件不存在 -> none" "none" "$(selftest_verdict "$TMP/nope-st.txt")"
+
+# ---- 网卡：ethtool -t ----
+printf 'The test result is PASS\nThe test extra info:\nRegister test  (offline)  0\n' \
+  > "$TMP/nst-pass.txt"
+check "网卡自检通过" "pass" "$(nic_selftest_verdict "$TMP/nst-pass.txt")"
+printf 'The test result is FAIL\nThe test extra info:\nEeprom test (offline)  1\n' \
+  > "$TMP/nst-fail.txt"
+check "网卡自检失败" "fail" "$(nic_selftest_verdict "$TMP/nst-fail.txt")"
+# ⚠️ "The test result is FAIL" 里也有 "test result is" —— 顺序反了会读成通过
+check "FAIL 不许被当成 PASS" "0" \
+      "$(nic_selftest_verdict "$TMP/nst-fail.txt" | grep -c '^pass$' || true)"
+printf 'netlink error: Operation not supported\n' > "$TMP/nst-unsup.txt"
+check "驱动不实现自检 -> unsupported（SKIP，不是这块卡坏了）" "unsupported" \
+      "$(nic_selftest_verdict "$TMP/nst-unsup.txt")"
+check "空输出 -> unsupported" "unsupported" "$(nic_selftest_verdict "$TMP/nope-nst.txt")"
+
+# ---- 发起和读结果必须都挂在链上，而且顺序不能反 ----
+check "collect_all 必须发起硬盘自检" "yes" \
+      "$(declare -f collect_all | grep -q '\bdisk_selftest_start\b' && echo yes || echo no)"
+check "verify_all 必须去读硬盘自检的结果（否则盘白跑一遍）" "yes" \
+      "$(declare -f verify_all | grep -q '\bverify_disk_selftest\b' && echo yes || echo no)"
+check "collect_all 必须跑网卡自检" "yes" \
+      "$(declare -f collect_all | grep -q '\bcheck_nic_selftest\b' && echo yes || echo no)"
+# 网卡 offline 自检会把链路踢下去 —— 排在拉链路之后的话，
+# 后面 DHCP 拿到的是一个刚被自己踢掉的链路，好机器会被判成"网口不通"。
+cchain="$(declare -f collect_all)"
+_cpos() { grep -n -- "$1" <<<"$cchain" | head -1 | cut -d: -f1; }
+cp_st="$(_cpos 'check_nic_selftest')"; cp_up="$(_cpos 'net_link_up_all')"
+check "check_nic_selftest 必须排在 net_link_up_all 之前（自检会踢链路）" "yes" \
+      "$( [[ -n "$cp_st" && -n "$cp_up" && "$cp_st" -lt "$cp_up" ]] && echo yes || echo no )"
+# 自检发起要用 collect_smart 读通那次的 -d，所以必须排在它后面
+cp_ss="$(_cpos 'disk_selftest_start')"; cp_cs="$(_cpos 'collect_smart "pre"')"
+check "disk_selftest_start 必须排在 collect_smart pre 之后（要用它落的 .dtype）" "yes" \
+      "$( [[ -n "$cp_ss" && -n "$cp_cs" && "$cp_cs" -lt "$cp_ss" ]] && echo yes || echo no )"
+
+echo
+echo "=== BMC 部件传感器 vs 主板自己写的阈值（1.9.2）==="
+#
+# ⚠️ 这是全项目唯一一处"拿阈值去判"的地方，而阈值不是我们定的 ——
+#    后六列是主板厂商烧进 BMC 的。拿读数去比它，和"我们替客户定标准"
+#    是相反的两件事。
+#
+# 下面这几行是**真机原样**（澜起 C5218R / 海光 7380 的 ipmitool sensor list）。
+cat > "$TMP/sensors-ok.txt" <<'EOF'
+CPU1 Temp        | 34.000     | degrees C  | ok    | 5.000     | 5.000     | 10.000    | 92.000    | 97.000    | 97.000
+VRMCpu1 Temp     | 30.000     | degrees C  | ok    | 5.000     | 5.000     | 10.000    | 95.000    | 100.000   | 105.000
+InFAN1_Speed     | 3200.000   | RPM        | ok    | 400.000   | 600.000   | 800.000   | 23000.000 | 25000.000 | 28000.000
+PSU1_FanSpeed    | 6000.000   | RPM        | ok    | 200.000   | 400.000   | 600.000   | 36000.000 | 38000.000 | 40000.000
+PWR_Button       | 0x0        | discrete   | 0x0080| na        | na        | na        | na        | na        | na
+CPU0_Status      | 0x80       | discrete   | 0x8080| na        | na        | na        | na        | na        | na
+FAN_Total_Power  | 6.000      | Watts      | ok    | 0.000     | 0.000     | 0.000     | 380.000   | 400.000   | 450.000
+Chassis_Intr     | na         | discrete   | na    | na        | na        | na        | na        | na        | na
+EOF
+check "只判数值型传感器，离散量（读数是 0x80 那种）整条跳过" "5" \
+      "$(ipmi_sensor_scan "$TMP/sensors-ok.txt" | grep -c . || true)"
+check "好机器上一条都不许亮（十份真机数据实测就是 0 条）" "0" \
+      "$(ipmi_sensor_scan "$TMP/sensors-ok.txt" | grep -vc '^ok|' || true)"
+
+# 一颗停转的风扇 —— 工厂最常见的缺陷之一，而它在这张表里是明写着的
+cat > "$TMP/sensors-fan.txt" <<'EOF'
+InFAN1_Speed     | 3200.000   | RPM        | ok    | 400.000   | 600.000   | 800.000   | 23000.000 | 25000.000 | 28000.000
+InFAN2_Speed     | 200.000    | RPM        | lcr   | 400.000   | 600.000   | 800.000   | 23000.000 | 25000.000 | 28000.000
+EOF
+check "转速掉到主板设定的临界下限以下 -> crit" "1" \
+      "$(ipmi_sensor_scan "$TMP/sensors-fan.txt" | grep -c '^crit|' || true)"
+check "越线那条要说清楚是低于哪个限、限是多少" "1" \
+      "$(ipmi_sensor_scan "$TMP/sensors-fan.txt" | grep -c '低于主板设定的临界下限 600' || true)"
+check "没越线的那条照常记成 ok（用来数「共核对了几项」）" "1" \
+      "$(ipmi_sensor_scan "$TMP/sensors-fan.txt" | grep -c '^ok|' || true)"
+
+# ⚠️ **读数恰好为 0 一律降一级。**0 既可能是"这个位置没装部件"，也可能是
+#    "装了但停转"，从读数上分不开 —— 分不开的东西不该去染客户的结论。
+#    这条不降级的话，一台空着两个风扇位的好机器会被判 FAIL。
+cat > "$TMP/sensors-zero.txt" <<'EOF'
+InFAN3_Speed     | 0.000      | RPM        | lcr   | 400.000   | 600.000   | 800.000   | 23000.000 | 25000.000 | 28000.000
+EOF
+check "读数为 0 -> zero（降级），不是 crit" "1" \
+      "$(ipmi_sensor_scan "$TMP/sensors-zero.txt" | grep -c '^zero|' || true)"
+check "读数为 0 时不许出现 crit" "0" \
+      "$(ipmi_sensor_scan "$TMP/sensors-zero.txt" | grep -c '^crit|' || true)"
+
+# 上告警线（unc）和上临界线（ucr）要分开：一个是 WARN 一个是 FAIL
+cat > "$TMP/sensors-temp.txt" <<'EOF'
+VRMCpu1 Temp     | 96.000     | degrees C  | unc   | 5.000     | 5.000     | 10.000    | 95.000    | 100.000   | 105.000
+VRMCpu2 Temp     | 101.000    | degrees C  | ucr   | 5.000     | 5.000     | 10.000    | 95.000    | 100.000   | 105.000
+EOF
+check "越 non-critical -> warn" "1" \
+      "$(ipmi_sensor_scan "$TMP/sensors-temp.txt" | grep -c '^warn|' || true)"
+check "越 critical -> crit"     "1" \
+      "$(ipmi_sensor_scan "$TMP/sensors-temp.txt" | grep -c '^crit|' || true)"
+
+# 一条阈值都没有的传感器：**跳过**。"没有可比的东西"不等于"没问题"
+cat > "$TMP/sensors-nothr.txt" <<'EOF'
+Some_Reading     | 42.000     | unspecified| ok    | na        | na        | na        | na        | na        | na
+EOF
+check "没有任何数值型阈值 -> 整条跳过（不是判 ok）" "0" \
+      "$(ipmi_sensor_scan "$TMP/sensors-nothr.txt" | grep -c . || true)"
+check "文件不存在 -> 一行都不输出（调用方据此 SKIP）" "0" \
+      "$(ipmi_sensor_scan "$TMP/nope-sensors.txt" | grep -c . || true)"
+
+# 文案：单位要换成中文报告里读得下去的写法，传感器名（主板丝印）原样留着
+# ⚠️ **上下限那个数也必须带单位。**scan 吐出来的是光秃秃的数字（结构化数据里
+#    不塞单位），拼成一句话时要补回去 —— 否则客户读到的是
+#    「96 °C，高于主板设定的告警上限 95」：95 什么？
+#    和 1.9.1「拆进表格之后单位就没了」是同一个毛病，只是这次是拼漏的。
+check "单位换算 + 说清楚量的是什么 + 限值也带单位" \
+      "风扇 InFAN2_Speed：200 RPM，低于主板设定的临界下限 600 RPM" \
+      "$(ipmi_sensor_phrase "InFAN2_Speed" "200" "RPM" "低于主板设定的临界下限 600")"
+check "摄氏度不许原样写 degrees C，限值也要跟着换" \
+      "温度 VRMCpu2 Temp：101 °C，高于主板设定的临界上限 100 °C" \
+      "$(ipmi_sensor_phrase "VRMCpu2 Temp" "101" "degrees C" "高于主板设定的临界上限 100")"
+check "认不出来的单位原样留着，绝不吞信息" "1" \
+      "$(ipmi_sensor_phrase "X" "1" "Bogons" "y" | grep -c 'Bogons')"
+
+# ⚠️ **拿十份真机数据全部跑一遍：好机器上一条都不许亮。**
+# 一条新判定最危险的失败方式不是漏判，是每台好机器都刷红 —— 那会让整份报告
+# 失去可信度，而且没人会先怀疑判据。所以这条守卫直接吃 test_out 下的真文件，
+# 有几份吃几份（仓库里没有这些数据时自动跳过，不影响 CI）。
+REPO_ROOT="$(cd "$LIB/../../../.." && pwd)"
+real_n=0
+while IFS= read -r real; do
+  [[ -s "$real" ]] || continue
+  real_n=$(( real_n + 1 ))
+  tag="$(basename "$(dirname "$(dirname "$real")")" | cut -c1-26)"
+  check "真机 ${tag}…：可判传感器数 > 0" "yes" \
+        "$( [[ "$(ipmi_sensor_scan "$real" | grep -c . || true)" -gt 0 ]] && echo yes || echo no )"
+  check "真机 ${tag}…：一条都不许亮" "0" \
+        "$(ipmi_sensor_scan "$real" | grep -vc '^ok|' || true)"
+done < <(find "$REPO_ROOT/test_out" -name 'ipmi-sensors.txt' 2>/dev/null | sort)
+# 自检：上面那个循环真的吃到东西了没有。吃到 0 份也会"全绿"，
+# 而那正是"只在玩具输入上为绿"的另一种长相。
+check "真机传感器样本至少吃到一份（否则上面整组是空转）" "yes" \
+      "$( (( real_n > 0 )) && echo yes || echo no )"
+
+# ---- 判定出口：四态各走一遍 ----
+sensor_case() {
+  RAW_DIR="$TMP/bmc-case"; RUN_DIR="$RAW_DIR"
+  rm -rf "$RAW_DIR"; mkdir -p "$RAW_DIR"
+  [[ -n "${1:-}" ]] && printf '%s\n' "$1" > "$RAW_DIR/ipmi-sensors-post.txt"
+  LAST_STATUS=""; LAST_DETAIL=""
+  IPMI_OK="${2:-1}" verify_bmc_sensors >/dev/null 2>&1
+  RAW_DIR="$TMP"; RUN_DIR="$TMP"
+}
+
+sensor_case "$(cat "$TMP/sensors-ok.txt")"
+check "全部在范围内 -> PASS" "PASS" "$LAST_STATUS"
+check "PASS 文案要报出共核对了几项" "1" \
+      "$(printf '%s' "$LAST_DETAIL" | grep -c '核对 5 项部件传感器')"
+check "PASS 文案要点明限是主板设定的（不是我们定的）" "1" \
+      "$(printf '%s' "$LAST_DETAIL" | grep -c '主板设定的上下限')"
+
+sensor_case "$(cat "$TMP/sensors-fan.txt")"
+check "有风扇掉到临界线以下 -> FAIL" "FAIL" "$LAST_STATUS"
+check "FAIL 文案要说清是哪一颗、掉到多少、限是多少" "1" \
+      "$(printf '%s' "$LAST_DETAIL" | grep -c '风扇 InFAN2_Speed：200 RPM，低于主板设定的临界下限 600 RPM')"
+check "FAIL 文案里要写明这是部件异常、需检修" "1" \
+      "$(printf '%s' "$LAST_DETAIL" | grep -c '需检修后复测')"
+check "越线的逐条要落一份证据文件" "1" \
+      "$(grep -c '^crit|InFAN2_Speed' "$TMP/bmc-case/ipmi-sensor-breach.txt" 2>/dev/null || true)"
+
+# sensors-temp.txt 里一条越告警线、一条越临界线 —— 有 crit 就必须 FAIL，
+# 不许被同一批里的 warn 冲淡（"真坏就是坏"）
+sensor_case "$(cat "$TMP/sensors-temp.txt")"
+check "同一批里既有告警又有临界 -> 整条判 FAIL（不许被冲淡）" "FAIL" "$LAST_STATUS"
+
+cat > "$TMP/sensors-warnonly.txt" <<'EOF'
+VRMCpu1 Temp     | 96.000     | degrees C  | unc   | 5.000     | 5.000     | 10.000    | 95.000    | 100.000   | 105.000
+CPU1 Temp        | 34.000     | degrees C  | ok    | 5.000     | 5.000     | 10.000    | 92.000    | 97.000    | 97.000
+EOF
+sensor_case "$(cat "$TMP/sensors-warnonly.txt")"
+check "只越告警线 -> WARN（不是 FAIL）" "WARN" "$LAST_STATUS"
+check "WARN 文案要写明机器仍可正常工作（配置/关注，不是故障）" "1" \
+      "$(printf '%s' "$LAST_DETAIL" | grep -c '机器仍可正常工作')"
+
+sensor_case "$(cat "$TMP/sensors-zero.txt")"
+check "读数为 0 -> WARN 而不是 FAIL（装没装从读数上分不开）" "WARN" "$LAST_STATUS"
+check "0 的文案必须把两种可能都写出来" "1" \
+      "$(printf '%s' "$LAST_DETAIL" | grep -c '既可能是该位置未安装部件，也可能是部件已停转')"
+
+sensor_case "" 0
+check "没有 BMC -> SKIP（不是 FAIL：读不到不是机器的毛病）" "SKIP" "$LAST_STATUS"
+check "SKIP 文案要写「此项不影响整机结论」" "1" \
+      "$(printf '%s' "$LAST_DETAIL" | grep -c '此项不影响整机结论')"
+
+sensor_case "$(cat "$TMP/sensors-nothr.txt")" 1
+check "有 BMC 但一条带阈值的传感器都没有 -> SKIP（不是 PASS）" "SKIP" "$LAST_STATUS"
+
+# 测后那份不在时要退到测前那份，而不是直接 SKIP
+RAW_DIR="$TMP/bmc-fallback"; RUN_DIR="$RAW_DIR"
+rm -rf "$RAW_DIR"; mkdir -p "$RAW_DIR"
+cp "$TMP/sensors-ok.txt" "$RAW_DIR/ipmi-sensors.txt"
+LAST_STATUS=""; IPMI_OK=1 verify_bmc_sensors >/dev/null 2>&1
+check "只有测前那份时退回去用它（有数据就别 SKIP）" "PASS" "$LAST_STATUS"
+RAW_DIR="$TMP"; RUN_DIR="$TMP"
+
+echo
 echo "=== 平台设置：x2APIC / VT-d / 子 NUMA 划分 ==="
 printf 'x2apic: enabled by BIOS, switching to x2apic ops\nSetting APIC routing to cluster x2apic.\n' \
   > "$TMP/dmesg-x2-on.txt"
@@ -2704,6 +2982,29 @@ check "没有 sysfs 时退回读内核日志" "enabled" \
       "$(bios_vtd_state "$TMP/dmesg-vtd-on.txt" "$TMP/no-such-dir")"
 check "两边都读不到 -> unknown" "unknown" \
       "$(bios_vtd_state "$TMP/dmesg-x2-none.txt" "$TMP/no-such-dir")"
+# sysfs 目录空着**就是答案**，不许再掉进 dmesg 那两条 grep 里把它变成 unknown。
+# 原来写的是"没有 dmesg 才认 disabled"，于是有 dmesg、又没命中任何一条时
+# 报的是"读不到"—— 一个已经确定的结论被换成了不确定。
+check "sysfs 空目录 + 一份什么都没说的 dmesg -> 仍然是 disabled" "disabled" \
+      "$(bios_vtd_state "$TMP/dmesg-x2-none.txt" "$TMP/iommu-empty")"
+
+# ⚠️ **下面这几条用的是真机日志原文。**
+# 原来那两条判据（`DMAR: IOMMU enabled` / `AMD-Vi: Found IOMMU`）在
+# test_out 的十份真机 run-dir 上**一台都没命中过** —— 6.8 内核不打那两句。
+# 也就是说 dmesg 那条兜底路一直是死的，只有测试自己造的字符串喂得进去。
+printf '[Mon Aug  3 17:50:32 2026] DMAR: Host address width 52\n[Mon Aug  3 17:50:33 2026] DMAR: Intel(R) Virtualization Technology for Directed I/O\n' \
+  > "$TMP/dmesg-vtd-intel-real.txt"
+check "真机 Intel/澜起的原话要认得出（DMAR: Intel(R) Virtualization…）" "enabled" \
+      "$(bios_vtd_state "$TMP/dmesg-vtd-intel-real.txt" "$TMP/no-such-dir")"
+printf '[Tue Aug  4 14:04:29 2026] iommu: Default domain type: Translated\n[Tue Aug  4 14:04:29 2026] iommu: DMA domain TLB invalidation policy: lazy mode\n' \
+  > "$TMP/dmesg-vtd-hygon-real.txt"
+check "真机海光的原话要认得出（iommu: Default domain type:）" "enabled" \
+      "$(bios_vtd_state "$TMP/dmesg-vtd-hygon-real.txt" "$TMP/no-such-dir")"
+# 只有 ACPI 表、没有初始化成功那句 = 不能算开着（宁可 unknown，绝不猜）
+printf '[Mon Aug  3 22:30:40 2026] ACPI: DMAR 0x000000005D13CB70 000218 (v01 SUPERM)\n[Mon Aug  3 22:30:42 2026] DMAR: DRHD base: 0x000000d37fc000 flags: 0x0\n' \
+  > "$TMP/dmesg-vtd-acpionly.txt"
+check "只有 ACPI DMAR 表、没有初始化成功那句 -> unknown（不许猜成 enabled）" "unknown" \
+      "$(bios_vtd_state "$TMP/dmesg-vtd-acpionly.txt" "$TMP/no-such-dir")"
 
 check "2 路 2 节点 = 每路 1 个"  "1" "$(numa_per_socket 2 2)"
 check "2 路 8 节点 = 每路 4 个"  "4" "$(numa_per_socket 8 2)"
@@ -2862,6 +3163,55 @@ cat > "$TMP/lsblk-oldrm.json" <<'EOF'
 EOF
 check "老 lsblk 把 rm 写成字符串 \"1\" 时也要排掉 U 盘" "1" \
       "$(disk_spec_model "$TMP/lsblk-oldrm.json" | grep -c .)"
+
+# ⚠️⚠️ **`.rm` 判不出"这是不是我们自己那根启动盘"。**
+#
+# 上面两份 fixture 都把 U 盘写成 rm=true —— 那是**造出来的**输入。
+# 真机上实测：我们的启动盘是 `tran=usb` 但 **`rm=false`**（rm 说的是
+# "介质可不可换"，不是"挂在 USB 上"）。test_out 那台「没插硬盘」的机器里，
+# lsblk 唯一一块 disk 就是它（SA400S37120G, rm=false）。
+#
+# 只按 rm 过滤的后果，是一台**一块硬盘都没有**的机器拿到一条
+# 「硬盘型号一致性 PASS：按接口与容量分为 1 组」，而同一份报告里
+# 「硬盘信息采集」写着「本机未安装硬盘」—— 两句话自相矛盾，
+# 而且那一组说的是我们自己的盘。
+#
+# 范围一律取 scan_disks 已经算好的 DISK_SMART[]（§8.2 那套启动盘反查）。
+cat > "$TMP/lsblk-usb-notrm.json" <<'EOF'
+{"blockdevices":[
+ {"name":"sda","type":"disk","tran":"usb","size":120034123776,"model":"SA400S37120G","rm":false},
+ {"name":"sdb","type":"disk","tran":"sata","size":960197124096,"model":"INTEL SSDSC2KB960G8","rm":false}
+]}
+EOF
+check "真机形态：rm=false 的启动 U 盘，光靠 .rm 拦不住（这就是那条 bug）" "2" \
+      "$(disk_spec_model "$TMP/lsblk-usb-notrm.json" | grep -c .)"
+printf 'sdb\n' > "$TMP/scope-one.txt"
+check "给了范围就只比范围里的盘" "1" \
+      "$(disk_spec_model "$TMP/lsblk-usb-notrm.json" "$TMP/scope-one.txt" | grep -c .)"
+check "范围里的那块盘才是被比的那块" "sata_960197124096|INTEL SSDSC2KB960G8" \
+      "$(disk_spec_model "$TMP/lsblk-usb-notrm.json" "$TMP/scope-one.txt")"
+printf '/dev/sdb\n' > "$TMP/scope-devpath.txt"
+check "范围文件写成 /dev/sdb 也认" "1" \
+      "$(disk_spec_model "$TMP/lsblk-usb-notrm.json" "$TMP/scope-devpath.txt" | grep -c .)"
+# 一块盘都没有的机器：范围是空的，输出必须也是空的 ——
+# **绝不能因为"范围空了"就退回全量**，那正是这条 bug 本来的样子。
+: > "$TMP/scope-empty.txt"
+check "没插硬盘（范围为空）-> 一条都不输出，判 SKIP 而不是拿 U 盘凑一组" "0" \
+      "$(disk_spec_model "$TMP/lsblk-usb-notrm.json" "$TMP/scope-empty.txt" | grep -c . || true)"
+# 上面那条要是靠 `NR==FNR` 那个惯用法实现的，空范围也会得到 0 ——
+# **对的结果、错的理由**。所以再钉一条"范围非空时确实按范围放行"，
+# 两条一起才能区分"真的读了范围"和"整条数据流被当成范围吃掉了"。
+printf 'sda\n' > "$TMP/scope-usbonly.txt"
+check "范围只写 U 盘时就只输出 U 盘那一行（证明范围真的被读进去了）" \
+      "usb_120034123776|SA400S37120G" \
+      "$(disk_spec_model "$TMP/lsblk-usb-notrm.json" "$TMP/scope-usbonly.txt")"
+check "给了范围路径却没有那个文件 -> 宁可不比（不许悄悄退回全量）" "0" \
+      "$(disk_spec_model "$TMP/lsblk-usb-notrm.json" "$TMP/no-such-scope.txt" | grep -c . || true)"
+# 范围是 scan_disks 算的，不是这里重新发明的
+check "check_disk_uniform 必须拿 DISK_SMART 当范围（别再自己判 U 盘）" "yes" \
+      "$(declare -f disk_uniform_scope | grep -q 'DISK_SMART' && echo yes || echo no)"
+check "check_disk_uniform 必须把范围传给 disk_spec_model" "yes" \
+      "$(declare -f check_disk_uniform | grep -q 'disk_spec_model "\$f" "\$scope"' && echo yes || echo no)"
 
 # ================================================================
 # 收尾自检：这个脚本会 source 被测的 lib，而 lib 里也有 ok()。

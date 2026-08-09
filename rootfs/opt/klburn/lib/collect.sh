@@ -267,6 +267,43 @@ smart_target_keys() {
 }
 
 # collect_smart <phase>   phase = pre | post
+# ---------------------------------------------------------------- 硬盘自检（发起）
+#
+# **让盘自己查一遍。**我们一直只是读 SMART 属性（盘平时记下来的那些计数），
+# 从没让盘跑它自己的出厂自检 —— 而那是每家厂商工厂流程里的标配动作：
+# 短自检约两分钟、只读不写、盘在后台自己跑，读写头、伺服、通道、
+# 一段随机扇区，全是我们从外面查不到的东西。
+#
+# 结论是**盘自己给的**：我们不定任何判据，只负责发起和转述
+# （见 verify_disk_selftest）。
+#
+# ⚠️ 在 PHASE 1 发起、PHASE 5 才读结果。中间隔着整轮压测，
+#    跑得完的概率最大；跑不完（或者被硬盘压测打断）一律 SKIP，不判 FAIL。
+# ⚠️ `-d` 必须和 collect_smart 读通那次用同一个，所以读的是它落下的 .dtype。
+disk_selftest_start() {
+  have smartctl || return 0
+  (( ${#SMART_TARGETS[@]} > 0 )) || return 0
+
+  info "Starting on-disk short self-test on ${#SMART_TARGETS[@]} device(s) ..."
+  local log="$RAW_DIR/smart-selftest-start.txt"
+  : > "$log"
+  local item key dev dtype t
+  for item in "${SMART_TARGETS[@]:-}"; do
+    [[ -n "$item" ]] || continue
+    IFS='|' read -r key dev dtype <<< "$item"
+    t="$(cat "$RAW_DIR/smart-pre/${key}.dtype" 2>/dev/null || true)"
+    {
+      printf '===== %s (%s%s) =====\n' "$key" "$dev" "${t:+ -d $t}"
+      if [[ -n "$t" ]]; then
+        timeout 60 smartctl -t short -d "$t" "$dev" 2>&1
+      else
+        timeout 60 smartctl -t short "$dev" 2>&1
+      fi
+      printf '\n'
+    } >> "$log"
+  done
+}
+
 collect_smart() {
   local phase="$1"
   local dir="smart-$phase"
@@ -307,6 +344,11 @@ collect_smart() {
     else
       capture "$dir/${key}.json" smartctl -a -j "$dev" || true
     fi
+
+    # 把"这块盘是靠哪种设备类型读通的"记下来。硬盘自检要用同一个 -d，
+    # 而"哪种能读通"是上面那个 for 循环试出来的 —— 不记下来的话，
+    # 发起自检和读自检结果就得各自再试一遍，三处判据迟早不一致。
+    printf '%s' "$t" > "$RAW_DIR/$dir/${key}.dtype" 2>/dev/null || true
 
     # 归一化成固定字段，后面 verify.sh / 报告生成器直接读这个，
     # 免得每取一个字段都重跑一遍 smart.jq
@@ -1598,6 +1640,60 @@ collect_deep() {
   # 有一行说明"这些数据已经存下来了"，但不影响整机结论。
   result_add "collect_deep" "扩展信息留档" "$ST_PASS" \
     "已完整保存本机的固件版本、插槽、传感器、存储与网络设备的详细参数，供日后追溯。" ""
+
+  collect_fwts
+}
+
+# ---------------------------------------------------------------- 固件自检
+#
+# 固件（BIOS / UEFI / ACPI）本身有没有毛病。Canonical 的 Ubuntu 服务器认证
+# 就是拿 fwts 做固件那一段，UEFI Forum 也把它列为 ACPI 自认证工具。
+# 出厂机器的 BIOS 往往是刚刷进去的，这一层以前我们完全没查过。
+#
+# ⚠️⚠️ **这一条的结论只进内部报告，客户报告里一个字都没有。**
+#
+# 理由不是它不重要，而是它**不回答"这台机器合不合格"**：ACPI 表上的告警在
+# 完全正常的服务器上极其常见（几乎每台都有若干条 MEDIUM）。印给客户的结果
+# 是"每台机器都刷一片黄"——和 0.6.0 把 CPU 告警线定在 88°C 时每台机器都刷黄
+# 是同一个毛病，而且这次刷的是客户看不懂、也无从处理的东西。
+# 它对我们有价值：**同一批板子的 BIOS 有没有共性问题**，回档时查得到。
+#
+# 实现上走的就是 report-policy 二-5 那个现成机制：id 登记进
+# `generate_report.py` 的 `INTERNAL_ONLY_ROWS`，**无条件不进客户报告**，
+# 而 `results.jsonl` 和内部报告照常完整。
+#
+# 只跑 Canonical 认证里的那两项（klog / oops）：它们扫的是内核日志里
+# 固件相关的报错，几秒钟就完；整套 fwts 有上百项，跑起来要几分钟，
+# 而且大半和服务器无关。
+collect_fwts() {
+  if ! have fwts; then
+    result_add "collect_fwts" "固件自检留档" "$ST_SKIP" \
+      "当前测试环境未包含固件自检程序，本项未做核对。此项不影响整机结论。" ""
+    return 0
+  fi
+
+  info "Running firmware (BIOS/UEFI/ACPI) sanity checks ..."
+  mkdir -p "$RAW_DIR/deep" 2>/dev/null || true
+  local log="$RAW_DIR/deep/fwts.log"
+  # -q 只出结果不刷进度；-r 指定日志文件。跑失败不影响任何结论。
+  timeout 300 fwts -q -r "$log" klog oops >/dev/null 2>&1 || true
+
+  # 结尾那张汇总表：Total: | Pass | Fail | Abort | Warn | Skip | Info |
+  local nfail nwarn
+  nfail="$(awk -F'|' '/^Total:/ {gsub(/ /,"",$3); print $3+0; exit}' "$log" 2>/dev/null)"
+  nwarn="$(awk -F'|' '/^Total:/ {gsub(/ /,"",$5); print $5+0; exit}' "$log" 2>/dev/null)"
+  [[ "$nfail" =~ ^[0-9]+$ ]] || nfail=0
+  [[ "$nwarn" =~ ^[0-9]+$ ]] || nwarn=0
+
+  if (( nfail > 0 || nwarn > 0 )); then
+    result_add "collect_fwts" "固件自检留档" "$ST_WARN" \
+      "固件自检（内核日志中的固件相关报错）报出 ${nfail} 项失败、${nwarn} 项告警，\
+详情已留档。此项只留档、不参与整机结论。" "raw/deep/fwts.log"
+  else
+    result_add "collect_fwts" "固件自检留档" "$ST_PASS" \
+      "固件自检（内核日志中的固件相关报错）未报出失败或告警项，详情已留档。\
+此项只留档、不参与整机结论。" "raw/deep/fwts.log"
+  fi
 }
 
 # ---------------------------------------------------------------- 温度传感器
@@ -1619,6 +1715,13 @@ collect_all() {
   check_pcie_link     # 读的是 collect_system 落下的 lspci-vv.txt，必须排在它后面
   collect_sensors
   collect_smart "pre"
+  # 硬盘自己的出厂自检，在这儿**发起**，结果留到 verify_disk_selftest 去读。
+  # 短自检约两分钟、非破坏性、盘在后台自己跑，不占我们的时间；
+  # 越早发起，到复查那一步它跑完的可能性越大。
+  disk_selftest_start
+  # 网卡自己的自检要在**把口拉起来之前**跑：offline 自检会把链路踢下去，
+  # 排在后面的话 DHCP 那一步会拿到一个刚被自己踢掉的链路。
+  check_nic_selftest  # 定义在 lib/network.sh
   # 顺序有讲究：网口是 down 的时候 ethtool 报的速率/链路状态是假的
   # （插着网线也报 Unknown!/no），所以先把口拉起来再采集，最后才做连通性测试。
   net_link_up_all     # 定义在 lib/network.sh

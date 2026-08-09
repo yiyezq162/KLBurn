@@ -361,3 +361,58 @@ tar xzf mlc_v3.12.tgz && cp Linux/mlc Linux/redist.txt vendor/bench/mlc/
 
 能配的只有"怎么测"的参数（跑几次、多大矩阵、队列深度、每个方向跑多少秒），
 见 `build/chroot-setup.sh` 里生成 `klburn.conf` 的那一段。
+
+---
+
+## 6. bench/ 里的另外两个：部件专项诊断（可选，1.9.2 新增）
+
+这两个和上面那五项**性质不一样**：基准只报数不判合格，而这两个会明确说
+"这颗 CPU 算错了""这张卡的显存有问题"——那是真故障，会判 FAIL。
+判定在 [`lib/validate.sh`](../rootfs/opt/klburn/lib/validate.sh)，不在 `bench.sh`。
+
+放法和上面完全一样：**放进去就带上，不放就干净地 SKIP。**
+
+### opendcdiag —— 处理器算得对不对
+
+有现成脚本：
+
+```bash
+./build/build-opendcdiag.sh
+```
+
+**它抓的是 `stress-ng` 抓不到的那一类**：程序正常返回、退出码 0、日志干干净净，
+只是**结果算错了**。这叫静默数据损坏（SDC，业界也叫"会算错的核"）。
+Google 和 Meta 各自发过论文之后，它已经出现在做 AI / HPC 那批客户的验收单上。
+
+默认在 PHASE 2/5（机器空闲时）跑 120 秒，改时长：`klburn.conf` 里写
+`VALIDATE_SDC_SECS=<秒>`。
+
+### dcgmi —— 显卡厂商自己的诊断
+
+NVIDIA DCGM 里的 `dcgmi`。**它和 `gpu_burn` 不是一回事**：
+
+| | 干什么 | 抓什么 |
+|---|---|---|
+| `gpu_burn` | 功耗病毒，把卡烤满 | 满载稳不稳、温度、掉不掉卡 |
+| `dcgmi diag` | 厂商诊断，逐项检查 | 显存总线、ECC 纠错逻辑、PCIe、供电 —— **烤卡覆盖不到的** |
+
+两个互补，不是替代关系，所以两个都留着。
+
+放法：把 `dcgmi` 连同它要的运行库整个目录铺进 `vendor/bench/dcgm/`。
+**分发授权自己确认一遍** —— DCGM 的授权和 cuda-samples 不一样，
+我们没替你判断能不能随盘走。
+
+默认跑 `-r 2`（快速档，约半分钟）；想跑深的在 `klburn.conf` 里写
+`VALIDATE_DCGM_LEVEL=3`。
+
+### ⚠️ 这两条一次真机都没跑过
+
+手上没有服务器、也没有 N 卡，离线只验到**"没有工具时干净地 SKIP"**这一半。
+放工具进去之后第一次跑，照
+[`docs/first-run-checklist.md`](../docs/first-run-checklist.md) 里那两条逐项确认。
+
+判读上有一条定性写在 `lib/validate.sh` 里，改之前先读：
+**非零退出 ≠ 机器有问题。**这两个工具跑不起来的理由太多了（参数不对、
+CPU 不支持某组测试、驱动版本不匹配、被超时打断），要在日志里找到
+**明确的失败证据**才判 FAIL；找不到就 SKIP。拿我们这边的问题去判客户的机器
+不合格，是这个项目的一号红线。

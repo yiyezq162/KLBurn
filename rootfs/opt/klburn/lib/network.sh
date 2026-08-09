@@ -305,6 +305,82 @@ nic_current_mbps() {
 
 # 只判"已接网线"的口。没插线的口 ethtool 报的速率是假的，绝不能参与判定
 # （这正是 collect_all 里要先 net_link_up_all 再 collect_nic 的原因）。
+# ---------------------------------------------------------------- 网卡自检
+#
+# **让网卡自己查一遍。**现在网卡这一块的判定全都依赖"有没有插网线"：
+# 没插线就只能 SKIP，而工厂里绝大多数机器就是没插线的。网卡自己的
+# offline 自检**不需要对端、不需要网线**，查的是寄存器、回环、中断、
+# EEPROM 这些从外面完全看不到的东西。
+#
+# ⚠️ **必须排在 net_link_up_all 之前跑**：offline 自检会把链路踢下去，
+#    排在后面的话后面那步 DHCP 拿到的是一个刚被自己踢掉的链路。
+#
+# ⚠️ 结论是**网卡自己给的**（`The test result is PASS/FAIL`），我们不定判据。
+#    驱动不实现自检的很常见（virtio、部分国产卡），一律 SKIP —— 那是
+#    驱动的能力问题，不是这块卡坏了（一号红线）。
+#
+# nic_selftest_verdict <ethtool -t 的输出文件> -> pass | fail | unsupported
+nic_selftest_verdict() {
+  local f="${1:-}"
+  [[ -s "$f" ]] || { printf 'unsupported'; return; }
+  # 先认 FAIL：`The test result is FAIL` 里也有 "test result is"，
+  # 顺序反了会把失败读成通过。
+  if grep -aqiE 'The test result is[[:space:]]+FAIL' "$f" 2>/dev/null; then
+    printf 'fail'; return
+  fi
+  if grep -aqiE 'The test result is[[:space:]]+PASS' "$f" 2>/dev/null; then
+    printf 'pass'; return
+  fi
+  printf 'unsupported'
+}
+
+check_nic_selftest() {
+  local ifaces=() ifn
+  while read -r ifn; do [[ -n "$ifn" ]] && ifaces+=("$ifn"); done < <(net_phys_ifaces)
+
+  if ! have ethtool || (( ${#ifaces[@]} == 0 )); then
+    result_add "check_nic_selftest" "网卡自检" "$ST_SKIP" \
+      "未发现物理网口，本项未做核对。此项不影响整机结论。" ""
+    return
+  fi
+
+  info "Running on-NIC self-test on ${#ifaces[@]} port(s) ..."
+  mkdir -p "$RAW_DIR/nic" 2>/dev/null || true
+
+  local n_pass=0 n_fail=0 n_unsup=0 bad="" v f
+  for ifn in "${ifaces[@]}"; do
+    f="$RAW_DIR/nic/${ifn}-selftest.txt"
+    # 有的驱动只实现 online 自检；offline 不支持时退一步再试一次。
+    # 两次都不行就是这个驱动不提供自检。
+    { timeout 90 ethtool -t "$ifn" offline 2>&1 || true; } > "$f"
+    if [[ "$(nic_selftest_verdict "$f")" == "unsupported" ]]; then
+      { printf '(offline unsupported, retrying online)\n'
+        timeout 90 ethtool -t "$ifn" online 2>&1 || true; } >> "$f"
+    fi
+    v="$(nic_selftest_verdict "$f")"
+    case "$v" in
+      pass) n_pass=$(( n_pass + 1 )) ;;
+      fail) n_fail=$(( n_fail + 1 )); bad="${bad}${bad:+、}${ifn}" ;;
+      *)    n_unsup=$(( n_unsup + 1 )) ;;
+    esac
+  done
+
+  if (( n_fail > 0 )); then
+    result_add "check_nic_selftest" "网卡自检" "$ST_FAIL" \
+      "${n_fail} 个网口自带的自检未通过（${bad}）。这是网卡自身给出的结论，\
+说明该网口存在硬件故障，需更换或返修后复测。" "raw/nic/"
+  elif (( n_pass > 0 )); then
+    local extra=""
+    (( n_unsup > 0 )) && extra="；另有 ${n_unsup} 个网口的驱动不提供自检功能，不影响整机结论"
+    result_add "check_nic_selftest" "网卡自检" "$ST_PASS" \
+      "${n_pass} 个网口自带的自检全部通过（由网卡自身完成并给出结论，不依赖网线与对端设备）${extra}" \
+      "raw/nic/"
+  else
+    result_add "check_nic_selftest" "网卡自检" "$ST_SKIP" \
+      "本机网口的驱动不提供自检功能，本项未做核对。此项不影响整机结论。" "raw/nic/"
+  fi
+}
+
 check_nic_speed() {
   info "Checking NIC negotiated link speed ..."
 

@@ -529,13 +529,50 @@ step "6/9 改写引导配置"
 # consoleblank=0 防止 2 小时长测时屏幕黑屏，现场看不到进度
 KERNEL_ARGS="layerfs-path=${BASE_LAYER} nouveau.modeset=0 modprobe.blacklist=nouveau consoleblank=0"
 
+# ---- memtest86+：第二个启动项（1.9.2 新增）----
+#
+# 为什么要它：`stressapptest` 跑在操作系统里，只覆盖得到**系统可见内存减去
+# 安全余量**那一部分 —— 真机报告上写的就是"占系统识别内存的 81%~95%"。
+# 剩下那 5%~19%（内核自己占的）从来没被测过，而且 memtest 的地址线 /
+# 位模式测试是 OS 里那套做不了的。
+#
+# ⚠️ **它不进无人值守流程**：跑完只在屏幕上显示、不落任何结果文件，
+#    所以它一个字都进不了报告。它是"操作员另选的第二种跑法"。
+#
+# ⚠️ **必须追加在最后，绝不能动第一条。**`set default=0` 指的就是第一条 ——
+#    我们那条自启动的测试项。往前插一条的后果是插上盘开机跑的是内存测试，
+#    而这张盘的全部意义是"插上就跑"。
+MEMTEST_ENTRY=""
+mt_found=""
+for mt in "$ROOTFS_DIR"/boot/memtest86+*.efi "$ROOTFS_DIR"/boot/memtest86+*.bin; do
+  [[ -f "$mt" ]] || continue
+  cp -f "$mt" "$ISO_DIR/boot/"
+  mt_found="yes"
+  log "memtest86+: $(basename "$mt") -> ISO /boot/"
+done
+if [[ -n "$mt_found" ]]; then
+  MEMTEST_ENTRY="$WORK_DIR/memtest-entry.cfg"
+  # $grub_platform 是 GRUB 自己的变量：EFI 下链式加载 .efi，传统 BIOS 下直接
+  # 引导 .bin。两条路都写上，省得换一台机器就进不去。
+  cat > "$MEMTEST_ENTRY" <<'MTEOF'
+menuentry "Memory test (memtest86+, KLBURN-MEMTEST)" {
+	if [ "$grub_platform" = "efi" ]; then
+		chainloader /boot/memtest86+x64.efi
+	else
+		linux16 /boot/memtest86+x64.bin
+	fi
+}
+MTEOF
+fi
+
 for cfg in "$ISO_DIR/boot/grub/grub.cfg" "$ISO_DIR/boot/grub/loopback.cfg"; do
   python3 "$SCRIPT_DIR/lib/patch-grub.py" \
     --cfg "$cfg" \
     --args "$KERNEL_ARGS" \
     --title "${PRODUCT_NAME} Factory Test v${KLBURN_VERSION}" \
     --drop "HWE kernel" \
-    --timeout 5
+    --timeout 5 \
+    ${MEMTEST_ENTRY:+--append-entry "$MEMTEST_ENTRY" --append-marker KLBURN-MEMTEST}
 done
 
 # 安装器的自动应答残留，删掉以免干扰

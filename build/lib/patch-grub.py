@@ -105,6 +105,19 @@ def set_global(lines, key, value):
     return lines
 
 
+def append_entry(lines, block, marker):
+    """在末尾追加一个 menuentry 块。幂等：先按 marker 把旧的整块删掉。
+
+    ⚠️ **只能往后加，绝不能碰第一条。**`set default=0` 指的就是第一条 ——
+    我们那条自启动的测试项。往前插一条的后果是插上盘开机跑的是别的东西，
+    而这张盘的全部意义就是"插上就跑"。
+    """
+    if not block:
+        return lines, False
+    lines, _ = drop_blocks(lines, re.escape(marker))
+    return lines + [''] + block.rstrip('\n').split('\n'), True
+
+
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument('--cfg', required=True)
@@ -112,6 +125,10 @@ def main():
     ap.add_argument('--title', default='')
     ap.add_argument('--drop', default='')
     ap.add_argument('--timeout', default='5')
+    ap.add_argument('--append-entry', default='',
+                    help='把这个文件的内容当作 menuentry 块追加到末尾')
+    ap.add_argument('--append-marker', default='',
+                    help='上面那块的识别串（重复执行时先按它删掉旧的）')
     a = ap.parse_args()
 
     try:
@@ -129,6 +146,17 @@ def main():
     if a.title:
         lines, retitled = retitle_first(lines, a.title)
 
+    appended = False
+    if a.append_entry:
+        try:
+            with open(a.append_entry, encoding='utf-8') as f:
+                block = f.read()
+        except OSError:
+            block = ''
+        if block.strip():
+            lines, appended = append_entry(lines, block,
+                                           a.append_marker or 'menuentry')
+
     if npatched == 0 and a.args:
         print(f'  patch-grub: 警告 —— {a.cfg} 里没有匹配到 linux /casper/ 行',
               file=sys.stderr)
@@ -137,7 +165,7 @@ def main():
         f.write('\n'.join(lines) + '\n')
 
     print(f'  patch-grub: {a.cfg} -> 删除 {dropped} 个菜单项, '
-          f'改写 {npatched} 条内核行, 改标题={retitled}')
+          f'改写 {npatched} 条内核行, 改标题={retitled}, 追加菜单项={appended}')
     return 0
 
 

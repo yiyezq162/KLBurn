@@ -946,7 +946,7 @@ check "硬件清单必须有 8 个小节（没装的硬件标未安装，不是�
 #    results.jsonl 算出来，**不写死数字** —— 写死的话以后 fixture 多加一条判定，
 #    这条守卫就悄悄变成摆设了。规则算错也不会静悄悄：算成 0 就当场红。
 HIDE_RE='"id":"(stress_disk|verify_smart)","name":"[^"]*","status":"(PASS|SKIP)"'
-INTERNAL_RE='"id":"collect_deep"'
+INTERNAL_RE='"id":"(collect_deep|collect_fwts)"'
 disk_skipped() { grep -qE '"id":"stress_disk","name":"[^"]*","status":"SKIP"' "$1"; }
 n_hidden="$(grep -cE "$INTERNAL_RE" "$RD/results.jsonl" || true)"
 if disk_skipped "$RD/results.jsonl"; then
@@ -998,6 +998,7 @@ cat >> "$RDA/results.jsonl" <<'EOF'
 {"id":"check_bios_profile","name":"平台关键设置","status":"PASS","detail":"已读取平台关键设置的实际状态：处理器 x2APIC 已关闭；IO 虚拟化 已关闭；每路 NUMA 节点 每路 1 个（未启用子 NUMA 划分）。","ref":"","time":"t"}
 {"id":"bench_cpu_flops","name":"CPU 浮点算力","status":"PASS","detail":"全核浮点矩阵运算（问题规模 40000 阶，重复 4 次取最好成绩）的平均算力实测 3010.0 GFlops。","ref":"","time":"t"}
 {"id":"bench_mem_bw","name":"内存读取带宽","status":"PASS","detail":"内存满负载读取带宽实测 245678.9 MB/s（本机内存运行频率 4800 MT/s，已装满 16 个通道）。","ref":"","time":"t"}
+{"id":"bench_disk_bw","name":"硬盘读写带宽","status":"PASS","detail":"对 1 块硬盘逐块测量 128KB 大块顺序读带宽（每块每个方向各 20 秒），逐盘数值见下方「硬盘顺序读带宽」。本次未进行破坏性写入测试，因此只测量了读带宽。","ref":"raw/bench/","time":"t"}
 EOF
 cat >> "$RDA/metrics.jsonl" <<'EOF'
 {"group":"platform","key":"处理器 x2APIC","value":"已关闭"}
@@ -1034,7 +1035,45 @@ check "CPU 算力那个数在整份报告里只出现一次" "1" \
       "$(grep -o '3010.0 GFlops' "$OUTA" | grep -c . || true)"
 check "算力的问题规模也只出现一次" "1" \
       "$(grep -o '40000 阶' "$OUTA" | grep -c . || true)"
-has "$OUTA" "<h3>3.2 硬盘顺序读写带宽</h3>" "逐盘带宽表（另一组数，该留）"
+# 这份 fixture 只有 read 那一份 json（= 现场没确认破坏性写入），所以标题、导语
+# 都只能说「顺序读」。写成固定的「顺序读写」就是说得比测得多（六-4）——
+# 一张只有读带宽的表顶着"读写"的标题，客户会问"写的数呢"。
+has "$OUTA" "<h3>3.2 硬盘顺序读带宽</h3>" "只测了读时，标题不许写成「读写」"
+has_no "$OUTA" "128KB 大块顺序读写"        "导语同理，不许说没做过的那个方向"
+has_no "$OUTA" "顺序写带宽"                "写那一列整个不画（不是留一列破折号）"
+
+# 读写都跑了的那一份：标题变回「读写」，而且**两个方向的 job 名都要在**。
+#
+# ⚠️ 这一条钉的是一个真实缺陷：「测试口径」原来是 `row[...] = jobname`，
+#    读和写各写一次、后写的把先写的覆盖掉，于是「顺序读带宽」那一格的数字
+#    顶着一个 `libaio_write_...` 的口径。客户拿这张表去和自己验收单上的
+#    job 名对照时，对到的是另一个方向 —— 数字没错，但标错了它是怎么来的。
+RDW="$TMP/run-accept-rw"
+cp -r "$RDA" "$RDW"
+cat > "$RDW/raw/bench/fio-sda-write.json" <<'EOF'
+{"jobs":[{"jobname":"libaio_write_128k_32_1","read":{"bw":0,"iops":0},"write":{"bw":491520,"iops":3840},"error":0}]}
+EOF
+# 判定文案也换成"读写都跑了"那一版（lib/bench.sh 按 write_ok 拼的另一支），
+# 这样下面那条指路守卫在**两个方向上**都过一遍
+grep -v '"id":"bench_disk_bw"' "$RDA/results.jsonl" > "$RDW/results.jsonl"
+cat >> "$RDW/results.jsonl" <<'EOF'
+{"id":"bench_disk_bw","name":"硬盘读写带宽","status":"PASS","detail":"对 1 块硬盘逐块测量 128KB 大块顺序读与顺序写带宽（每块每个方向各 20 秒），逐盘数值见下方「硬盘顺序读写带宽」。","ref":"raw/bench/","time":"t"}
+EOF
+OUTW="$TMP/report-accept-rw.html"
+"$GEN" --run-dir "$RDW" --out "$OUTW" >/dev/null 2>&1
+has "$OUTW" "<h3>3.2 硬盘顺序读写带宽</h3>" "读写都测了时标题才写「读写」"
+has "$OUTW" "libaio_read_128k_32_1 / libaio_write_128k_32_1" \
+    "两个方向的测试口径都要列出来（不许被后写的那个覆盖掉）"
+check "读带宽那一格不许只挂着写的口径" "0" \
+      "$(python3 - "$OUTW" <<'PYEOF'
+import re, sys
+h = open(sys.argv[1], encoding="utf-8").read()
+m = re.search(r"<h3>3\.2 [^<]*</h3>.*?</table>", h, re.S)
+seg = m.group(0) if m else ""
+# 有读带宽这一列、却一个 read 口径都没有 = 覆盖掉了
+print(1 if ("顺序读带宽" in seg and "libaio_read" not in seg) else 0)
+PYEOF
+)"
 
 # 平台设置那四个值同理：判定行里说"读到了几项"，值只在下面那张表里出现。
 check "平台设置的值不在判定行里重复" "1" \
@@ -1054,15 +1093,85 @@ has "$OUTA" "不做合格与否的判断" "要明写这一节不判合格"
 check "分成三节之后，判定总条数一条都不许少" \
       "$(( $(grep -c . "$RDA/results.jsonl") - $(grep -cE "$INTERNAL_RE" "$RDA/results.jsonl" || true) - $(grep -cE "$HIDE_RE" "$RDA/results.jsonl" || true) ))" \
       "$(cnt "$OUTA" '<div class="result-row r-[A-Z]+"')"
-# 性能数字**不参与**整机结论。这份 fixture 里唯一的 FAIL 来自 verify_ecc，
-# 基准项全是 PASS —— 真正要守的是"基准项永远不会是 FAIL/WARN"。
-check "性能基准那几条只能是 PASS 或 SKIP（性能数字不判合格）" "0" \
-      "$(grep -E '"id":"bench_' "$RDA/results.jsonl" | grep -cE '"status":"(FAIL|WARN)"' || true)"
+# 性能数字**不参与**整机结论 —— 基准项永远不会是 FAIL/WARN。
+#
+# ⚠️ 这一条以前是拿上面那份 fixture 的 results.jsonl 自己去数的，而那份 jsonl
+#    正是本文件几行之前手写的：**它永远是 0，代码怎么改都不会红**。
+#    "一个从没红过的测试等于没写"，这条比没写更糟 —— 它看着像有人在守。
+#    真正要守的东西在源码里：`lib/bench.sh` 的出口只能是 PASS 或 SKIP。
+BENCH_SH="$ROOT/rootfs/opt/klburn/lib/bench.sh"
+check "lib/bench.sh 里不许出现 ST_WARN / ST_FAIL（性能数字不判合格）" "0" \
+      "$(grep -cE 'ST_WARN|ST_FAIL' "$BENCH_SH" || true)"
+# 同一条判据必须抓得住违规：拿一份写了 ST_FAIL 的样本喂进去，它必须给非 0。
+check "上面那条判据本身有能力变红" "1" \
+      "$(printf 'result_add "bench_x" "x" "$ST_FAIL" "d" ""\n' | grep -cE 'ST_WARN|ST_FAIL' || true)"
+# 生成物这一头也钉一条：报告里 bench_ 那几行不许出现 FAIL/WARN 的徽章。
+check "报告里性能基准那一节没有 FAIL/WARN 徽章" "0" \
+      "$(python3 - "$OUTA" <<'PYEOF'
+import re, sys
+h = open(sys.argv[1], encoding="utf-8").read()
+m = re.search(r"<h2>三、性能基准</h2>(.*?)<h2>", h, re.S)
+print(len(re.findall(r'class="badge b-(?:FAIL|WARN)"', m.group(1))) if m else 0)
+PYEOF
+)"
 
 # 同一个数字不许印两遍：platform / conform / bench 三组有自己的小节，
 # 就不该再出现在「其他实测指标」那张大表里
 check "已经有专属小节的指标不再进「其他实测指标」" "0" \
       "$(grep -oE '<td>平台设置</td>|<td>配置核对</td>|<td>性能基准</td>' "$OUTA" | grep -c . || true)"
+
+# ---------------------------------------------------------------- 指路不许指空
+#
+# 判定文案里有几处「……见下方「X」」。X 是报告里某个小节的标题，而那些小节
+# 是"有数据才画"的、标题本身还会跟着数据变（逐盘带宽表在只测了读的时候
+# 叫「硬盘顺序读带宽」）。两边一旦对不上，客户读到的就是一句指向
+# 报告里根本不存在的小节的话 —— 和 1.7.6 那句指向被藏掉的 SMART 复查
+# 是同一个毛病，那次是靠人眼看出来的。
+#
+# ⚠️ 先自检**这份报告里真的有指路可查**。一条"遍历零个元素"的断言永远是绿的，
+#    而且和"全都指得中"长得一模一样 —— 这正是本轮删掉的那条假断言的病根。
+for rpt in "$OUTA" "$OUTW"; do
+  check "$(basename "$rpt")：至少有一句「见下方「X」」（否则下面那条是空转）" "yes" \
+        "$(grep -oE '见下方「[^」]+」' "$rpt" | grep -q . && echo yes || echo no)"
+  check "$(basename "$rpt")：每一句「见下方「X」」都能找到对应的标题" "" \
+        "$(python3 - "$rpt" <<'PYEOF'
+import re, sys
+h = open(sys.argv[1], encoding="utf-8").read()
+heads = set(re.findall(r"<h[23]>(?:[\d.]+\s*)?([^<]+)</h[23]>", h))
+names = set(re.findall(r'<span class="rn">([^<]+)</span>', h))
+bad = [t for t in re.findall(r"见下方「([^」]+)」", h)
+       if t not in heads and t not in names]
+print("、".join(sorted(set(bad))))
+PYEOF
+)"
+done
+# 同样要能变红：把一个不存在的小节名喂给同一条判据。
+check "指路守卫抓得住指空的那一句" "查无此节" \
+      "$(python3 - <<'PYEOF'
+import re
+h = '<h3>3.2 真的有这一节</h3><p>见下方「查无此节」</p>'
+heads = set(re.findall(r"<h[23]>(?:[\d.]+\s*)?([^<]+)</h[23]>", h))
+print("、".join(t for t in re.findall(r"见下方「([^」]+)」", h) if t not in heads))
+PYEOF
+)"
+
+# ---------------------------------------------------------------- 不许出空章节
+#
+# 「性能基准」整节是有条件的。判据必须是**这一节真的画得出东西**，
+# 不能把 bench 组的指标也算进去 —— 那几个指标在这一节里一格都不单独印
+# （每个数都写在对应那条结论里），拿它当判据就会出现一个
+# 只有标题和导语、底下什么都没有的空章节。
+# 而且指标本身也不能因此蒸发：整节没画时它们要退回「其他实测指标」。
+RDB="$TMP/run-bench-metric-only"
+cp -r "$RD" "$RDB"
+cat >> "$RDB/metrics.jsonl" <<'EOF'
+{"group":"bench","key":"内存读取带宽（MB/s）","value":"245678.9"}
+EOF
+OUTB="$TMP/report-bench-metric-only.html"
+"$GEN" --run-dir "$RDB" --out "$OUTB" >/dev/null 2>&1
+has_no "$OUTB" "<h2>三、性能基准</h2>" "一条 bench 判定都没有时不许画出性能基准那一节"
+has    "$OUTB" "245678.9"              "整节没画时，bench 指标必须退回「其他实测指标」而不是蒸发"
+has    "$OUTB" "<td>性能基准</td>"      "退回去的那一行要带上分组名"
 
 # ================================================================
 echo

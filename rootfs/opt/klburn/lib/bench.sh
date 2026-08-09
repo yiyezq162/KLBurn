@@ -644,10 +644,17 @@ bench_disk_bandwidth() {
     fi
   done
 
-  local scope="顺序读"
-  (( write_ok == 1 )) && scope="顺序读与顺序写"
+  # ⚠️ 后半句是**指路**，指向报告里那张逐盘表的小节标题。而那个标题是跟着
+  #    "这次到底测了哪几个方向"动的（现场没确认破坏性写入时只测得到读，
+  #    写那一列整个不画，标题也就只写「顺序读」）—— 两边用同一个判据拼，
+  #    否则这句话会指向一个报告里根本不存在的小节。
+  #    tests/test-report-render.sh 有一条"每个「见下方「X」」都得有对应标题"钉着。
+  local scope="顺序读" secname="硬盘顺序读带宽"
+  if (( write_ok == 1 )); then
+    scope="顺序读与顺序写"; secname="硬盘顺序读写带宽"
+  fi
   local detail="对 ${n} 块硬盘逐块测量 128KB 大块${scope}带宽（每块每个方向各 ${secs} 秒），\
-逐盘数值见下方「硬盘顺序读写带宽」"
+逐盘数值见下方「${secname}」"
 
   if (( write_ok == 1 )); then
     result_add "bench_disk_bw" "硬盘读写带宽" "$ST_PASS" "${detail}。" "raw/bench/"

@@ -439,6 +439,159 @@ else
 fi
 
 echo
+echo "=== 校验清单：只落文件 + 只写进内部报告（1.9.2）==="
+SRD="$TMP/run-sums"; mkdir -p "$SRD/raw"
+cp "$RD/meta.json" "$SRD/meta.json"
+cp "$RD/results.jsonl" "$SRD/results.jsonl"
+: > "$SRD/metrics.jsonl"
+printf 'aa  ./report.html\nbb  ./raw/dmidecode.txt\ncc  ./results.jsonl\n' > "$SRD/SHA256SUMS"
+SC="$TMP/sums-cust.html"; SI="$TMP/sums-int.html"
+python3 "$CUST" --run-dir "$SRD" --out "$SC" >/dev/null 2>&1
+python3 "$GEN"  --run-dir "$SRD" --out "$SI" >/dev/null 2>&1
+has "$SI" "SHA256SUMS"     "内部报告要说清楚清单在哪"
+has "$SI" "sha256sum -c"   "以及怎么用它校验"
+has "$SI" "共 <b>3</b> 个文件" "文件数要对得上"
+grep -qF -- "SHA256SUMS" "$SC" && bad "交付报告里出现了校验清单（客户校验不了，只会招提问）" \
+                               || ok "交付报告里没有校验清单"
+grep -qiE 'sha256|校验和|指纹' "$SC" && bad "交付报告里出现了哈希/指纹类字样" \
+                                     || ok "交付报告里没有哈希/指纹类字样"
+# 没有那份清单时内部报告不许崩，也不许凭空写一句
+NRD="$TMP/run-nosums"; mkdir -p "$NRD/raw"
+cp "$RD/meta.json" "$NRD/meta.json"; : > "$NRD/results.jsonl"; : > "$NRD/metrics.jsonl"
+if python3 "$GEN" --run-dir "$NRD" --out "$TMP/nosums.html" >/dev/null 2>&1; then
+  ok "没有 SHA256SUMS 时内部报告照常生成"
+else
+  bad "没有 SHA256SUMS 就把内部报告搞崩了"
+fi
+has_no "$TMP/nosums.html" "SHA256SUMS" "没有清单就别提它"
+
+echo
+echo "=== 成对断言：固件自检只进内部（1.9.2）==="
+#
+# fwts 查的是 BIOS / UEFI / ACPI 本身合不合规。**完全正常的服务器上
+# ACPI 告警也极其常见**，印给客户就是每台机器都刷一片黄，而且刷的是
+# 他看不懂、也无从处理的东西 —— 白白让人去找机器的毛病。
+# 对我们有价值（同一批板子的 BIOS 有没有共性问题），所以留在内部。
+FRD="$TMP/run-fwts"; mkdir -p "$FRD/raw/deep"
+cp "$RD/meta.json" "$FRD/meta.json"
+cat > "$FRD/results.jsonl" <<'EOF'
+{"id":"collect_system","name":"硬件信息采集","status":"PASS","detail":"主板/BIOS/CPU/内存信息采集完成","ref":"","time":"t"}
+{"id":"collect_fwts","name":"固件自检留档","status":"WARN","detail":"固件自检（内核日志中的固件相关报错）报出 0 项失败、3 项告警，详情已留档。此项只留档、不参与整机结论。","ref":"raw/deep/fwts.log","time":"t"}
+EOF
+: > "$FRD/metrics.jsonl"
+printf 'Total:         |    2|    0|    0|    3|    0|    0|\n' > "$FRD/raw/deep/fwts.log"
+FC="$TMP/fwts-cust.html"; FI="$TMP/fwts-int.html"
+python3 "$CUST" --run-dir "$FRD" --out "$FC" >/dev/null 2>&1
+python3 "$GEN"  --run-dir "$FRD" --out "$FI" >/dev/null 2>&1
+
+grep -qF -- "固件自检留档" "$FC" && bad "交付报告里出现了固件自检（会让客户去找机器的毛病）" \
+                                 || ok "交付报告里没有固件自检那一条"
+has "$FI" "固件自检留档" "内部报告必须有（这一项的价值全在我们这边）"
+has "$FI" "3 项告警"     "内部报告要留着计数"
+# ⚠️ **它是 WARN，而且被藏掉了 —— 这是「只藏 PASS/SKIP」那条红线唯一的例外，
+#    所以必须单独说清楚为什么。**那条红线管的是"这台机器有没有毛病"的判定；
+#    固件自检**根本不回答那个问题**，它和 collect_deep 一样属于
+#    "判的是我们、不是机器"，id 登记在 INTERNAL_ONLY_ROWS，无条件不外发。
+#    整机结论也不看它。
+check "它被藏掉之后整机结论不受影响（是 WARN，不是 FAIL）" "1" \
+      "$(grep -c 'class="verdict v-PASS"' "$FC" || true)"
+has_no "$FC" "ACPI" "客户报告里连 ACPI 这个词都不该出现"
+# 反面自检：同一份 fixture 里那条普通判定必须照常出现在客户报告里，
+# 否则"客户报告里没有固件自检"可能只是因为整份报告压根没渲染出来。
+has "$FC" "硬件信息采集" "同一份 fixture 里的普通判定照常进客户报告（证明上面不是空转）"
+
+echo
+echo "=== 成对断言：显存的累计 / 历史读数只进内部（1.9.0）==="
+#
+# 和硬盘的通电时间、累计读写量是同一把尺子（二-3）：
+#   「显存重映射不可纠正行」讲的是**这台机器出厂以来**被永久屏蔽过几行显存，
+#   它回答不了"这台机器合不合格"，客户看到一个孤零零的 5 只会问"那是什么"。
+#   「显存 ECC 可纠正 / 不可纠正」是那条结论的原始读数，而结论那句话已经把
+#   数字连同含义一起说清楚了，表里再印一个裸数字就是同一个数印两遍（二-10）。
+#
+# ⚠️ 藏的只是**「其他实测指标」那张表里的裸数字**。两条判定连同 WARN 全文
+#    照常进交付报告 —— "任何 WARN/FAIL 一条都不许藏"那条红线不许碰。
+#    所以这一组是**三头**钉的：交付报告没有裸数字 / 交付报告有 WARN 结论 /
+#    内部报告一个字段都不少。少钉一头，另外两头都能装成绿的。
+GRD="$TMP/run-gpumem"; mkdir -p "$GRD/raw"
+cp "$RD/meta.json" "$GRD/meta.json"
+cat > "$GRD/results.jsonl" <<'EOF'
+{"id":"check_gpu_ecc","name":"显卡显存 ECC","status":"WARN","detail":"2 张显卡本次上电以来累计出现 3 次可纠正的显存 ECC 错误（已被硬件自动纠正，数据未受影响）。偶发数次属正常；数量偏大时建议出货前复测确认。","ref":"raw/gpu-ecc.csv","time":"t"}
+{"id":"check_gpu_remap","name":"显存行重映射","status":"WARN","detail":"2 张显卡累计有 5 行显存因不可纠正错误被永久屏蔽（已成功替换为备用行，当前功能与容量不受影响）。这说明这些显存曾出现过硬故障，建议出货前确认是否接受。","ref":"raw/gpu-remapped-rows.csv","time":"t"}
+EOF
+cat > "$GRD/metrics.jsonl" <<'EOF'
+{"group":"gpu","key":"显存ECC可纠正","value":"3"}
+{"group":"gpu","key":"显存ECC不可纠正","value":"0"}
+{"group":"gpu","key":"显存重映射不可纠正行","value":"5"}
+{"group":"gpu","key":"计算错误总数","value":"0"}
+{"group":"gpu0","key":"满载最低频率MHz","value":"2490"}
+{"group":"gpu0","key":"满载平均频率MHz","value":"2520"}
+{"group":"gpu0","key":"满载平均功耗W","value":"430"}
+{"group":"gpu0","key":"峰值风扇转速%","value":"62"}
+{"group":"gpu0","key":"距降频阈值最小余量","value":"8"}
+{"group":"gpu0","key":"峰值温度","value":"71"}
+EOF
+cat >> "$GRD/results.jsonl" <<'EOF'
+{"id":"check_gpu_load","name":"显卡满载运行状态","status":"PASS","detail":"满载期间各卡的实测运行读数：GPU0 平均频率 2520MHz（最低 2490MHz），平均功耗 430W，风扇最高 62%，距降频阈值最少还有 8°C。","ref":"","time":"t"}
+EOF
+GC="$TMP/gpumem-cust.html"; GI="$TMP/gpumem-int.html"
+python3 "$CUST" --run-dir "$GRD" --out "$GC" >/dev/null 2>&1
+python3 "$GEN"  --run-dir "$GRD" --out "$GI" >/dev/null 2>&1
+
+for k in "显存ECC可纠正" "显存ECC不可纠正" "显存重映射不可纠正行"; do
+  grep -qF -- "$k" "$GC" && bad "交付报告泄漏了累计/历史读数「$k」" \
+                         || ok "交付报告不含「$k」这一格裸数字"
+  has "$GI" "$k" "内部报告必须留着（这是它存在的理由）"
+done
+check "内部报告里那三个值也一个不少" "3 0 5" \
+      "$(python3 - "$GRD" "$GI" <<'PYEOF'
+import json, re, sys
+rd, gi = sys.argv[1], sys.argv[2]
+h = open(gi, encoding="utf-8").read()
+out = []
+for line in open(rd + "/metrics.jsonl", encoding="utf-8"):
+    m = json.loads(line)
+    if m["key"].startswith("显存"):
+        # 值必须和它的键出现在同一行表格里，不能只是碰巧在页面别处出现过
+        out.append(m["value"] if re.search(
+            r"<td>%s</td>\s*<td>%s</td>" % (re.escape(m["key"]), re.escape(m["value"])), h) else "缺")
+print(" ".join(out))
+PYEOF
+)"
+# **另一头**：坏消息一个字都不许少。
+has "$GC" "显卡显存 ECC"   "判定行本身照常进交付报告"
+has "$GC" "显存行重映射"   "同上"
+check "两条 WARN 都在交付报告里（藏的是裸数字，不是坏消息）" "2" \
+      "$(grep -oE 'class="badge b-WARN"' "$GC" | grep -c . || true)"
+has "$GC" "累计出现 3 次可纠正的显存 ECC 错误" "数字连同含义仍然写在结论里"
+has "$GC" "累计有 5 行显存因不可纠正错误被永久屏蔽" "同上"
+# **第三头**：过滤不许扩大化。同为 gpu 组的普通指标必须还进得去，
+# 否则一条 `group == "gpu" 全丢` 的错误改法也能让上面那几条全绿。
+has "$GC" "计算错误总数" "同组的普通指标不许被连坐"
+
+echo
+echo "=== 成对断言：逐卡满载读数只写在那句结论里，不再拆进表格（1.9.1）==="
+#
+# 这五个**不是**历史类数据，就是这一轮测出来的。藏它们的理由只有一条：
+# `check_gpu_load` 那条结论已经把同样五个数**连同单位和上下文**写成一句话了，
+# 表里再印一遍就是同一个数在一页上出现两遍（二-10）。
+# 而且拆进表格之后单位就没了：一格「距降频阈值最小余量 8」，
+# 客户既不知道是 8 度还是 8%，也不知道 8 是多是少 —— 那句话里写着「还有 8°C」。
+for k in "满载最低频率MHz" "满载平均频率MHz" "满载平均功耗W" "峰值风扇转速%" "距降频阈值最小余量"; do
+  grep -qF -- "$k" "$GC" && bad "交付报告里又拆出了「$k」这一格（和结论重复）" \
+                         || ok "交付报告不含「$k」这一格"
+  has "$GI" "$k" "内部报告必须留着"
+done
+# 另一头：那句结论本身、连同五个数和它们的单位，一个字都不许少
+has "$GC" "显卡满载运行状态"                   "判定行照常进交付报告"
+has "$GC" "平均频率 2520MHz（最低 2490MHz）"    "频率连同单位写在结论里"
+has "$GC" "平均功耗 430W"                      "功耗同上"
+has "$GC" "风扇最高 62%"                       "风扇同上"
+has "$GC" "距降频阈值最少还有 8°C"              "余量同上（表格里那个 8 是没有单位的）"
+# 过滤是按「卡号是变的」写的，别把整组 gpu0 连坐掉
+has "$GC" "峰值温度" "同一张卡的其他指标不许被连坐"
+
+echo
 echo "=== 边界：不能崩 ==="
 EMPTY="$TMP/empty"; mkdir -p "$EMPTY"
 printf '{}\n' > "$EMPTY/meta.json"

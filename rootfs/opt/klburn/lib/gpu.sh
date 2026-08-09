@@ -111,10 +111,17 @@ gpu_burn_progress_steps() {
 #   1 time  2 index  3 name  4 temp_c  5 power_w  6 clock_sm_mhz
 #   7 util_pct  8 mem_used_mb  9 fan_pct  10 temp_tlimit_c
 #
-# ⚠️ **最低频率要跳过每张卡的前两个采样点。**采样器和 gpu_burn 是同一刻起来的，
+# ⚠️ **要跳过每张卡的前两个采样点。**采样器和 gpu_burn 是同一刻起来的，
 #    头一两个点采到的还是空载降频后的频率（实测几百 MHz），算进去的话
 #    报告上会凭空多出一条"满载最低频率 210MHz"，看着像严重降频。
-#    这和 stress.sh 里 phase_min_freq 是同一个坑，同一个解法。
+#    这和 stress.sh 里 phase_freq_stats 是同一个坑，同一个解法。
+#
+# ⚠️⚠️ **跳几个点是按"这张卡的第几次采样"算的，而且最低/平均/平均功耗
+#    三样必须一起跳。**1.9.2 之前只有最低频率跳、两个平均值从头加，于是
+#    那句结论里可能出现"平均频率 2686MHz（最低 2688MHz）"——最低的比平均的
+#    还高。两个数都没算错，是两个口径；但客户读到的是"这报告算错了"，
+#    而一份被怀疑算错了的报告，后面每个数字都要重新解释一遍。
+#    同一组样本算出来的 min <= avg 是**结构上**成立的，不必拿断言去兜。
 #
 # ⚠️ 读不到的列（老驱动没有 tlimit、被动散热的卡没有风扇）输出 **`-`**，
 #    绝不能当成 0 —— "风扇转速 0%" 和 "这张卡没有风扇" 是两件事。
@@ -124,22 +131,32 @@ gpu_load_stats() {
   local csv="${1:-}" idx="${2:-}"
   [[ -f "$csv" ]] || { printf -- '- - - - -'; return; }
   awk -F, -v i="$idx" '
+    # 按**这张卡的第几次采样**存，频率和功耗共用同一个下标 —— 跳前两个点的
+    # 时候两样才会一起跳。风扇取峰值、距降频阈值取最小余量，这两个是极值，
+    # 跳不跳都不会自相矛盾，所以照旧边读边算。
     NR > 1 && $2 == i {
       n++
-      if ($6 ~ /^[0-9]+$/) { c[++cn] = $6 + 0; csum += $6 + 0 }
+      if ($6 ~ /^[0-9]+$/) { chas[n] = 1; cval[n] = $6 + 0 }
+      if ($5 ~ /^[0-9.]+$/) { phas[n] = 1; pval[n] = $5 + 0 }
       if ($9  ~ /^[0-9]+$/ && ($9 + 0 > fan || fanseen == 0)) { fan = $9 + 0; fanseen = 1 }
       if ($10 ~ /^-?[0-9]+$/ && (tlseen == 0 || $10 + 0 < tl)) { tl = $10 + 0; tlseen = 1 }
-      if ($5 ~ /^[0-9.]+$/) { psum += $5 + 0; pn++ }
     }
     END {
-      cmin = ""; cavg = ""
-      start = (cn > 2 ? 3 : 1)
-      for (k = start; k <= cn; k++) if (cmin == "" || c[k] < cmin) cmin = c[k]
+      cmin = ""; cavg = ""; pavg = ""
+      start = (n > 2 ? 3 : 1)
+      for (k = start; k <= n; k++) {
+        if (chas[k]) {
+          if (cmin == "" || cval[k] < cmin) cmin = cval[k]
+          csum += cval[k]; cn++
+        }
+        if (phas[k]) { psum += pval[k]; pn++ }
+      }
       if (cn > 0) cavg = int(csum / cn + 0.5)
+      if (pn > 0) pavg = int(psum / pn + 0.5)
       printf "%s %s %s %s %s",
              (cmin == "" ? "-" : cmin), (cavg == "" ? "-" : cavg),
              (fanseen ? fan : "-"), (tlseen ? tl : "-"),
-             (pn > 0 ? int(psum / pn + 0.5) : "-")
+             (pavg == "" ? "-" : pavg)
     }' "$csv" 2>/dev/null
 }
 

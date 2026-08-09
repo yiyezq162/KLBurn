@@ -139,6 +139,8 @@ TOOL_PROVIDES = {
     "mlc_avx512": ("内存峰值读带宽（MB/s）",
                    "Intel Memory Latency Checker 的 AVX-512 版本（需放进构建期的 vendor/bench/）"),
     "fio":        ("硬盘的顺序 / 随机读写带宽与 IOPS", "fio"),
+    "fwts":       ("固件（BIOS / UEFI / ACPI）自身的合规性检查结果",
+                   "Firmware Test Suite（fwts，Ubuntu universe 里的包）"),
 }
 
 
@@ -285,6 +287,10 @@ RAW_INDEX = (
     (r"^smart-post/.*\.norm\.json$", "存储",
      "压测后 SMART 的归一化字段",
      "同上", "和 smart-pre 逐字段比，任何一格变大都是硬伤"),
+    (r"^smart-(pre|post)/.*\.dtype$", "存储",
+     "这块盘是靠哪种设备类型（smartctl 的 -d）读通的，空文件表示自动识别",
+     "某块盘的 SMART 或自检结果读不出来、想知道换哪个 -d 再试时",
+     "发起自检、读自检结果都复用它 —— 三处各自再试一遍的话，判据迟早不一致"),
     (r"^smart-pre/.*\.(txt|json)$", "存储",
      "每块盘压测前的完整 SMART 输出",
      "要看某块盘出厂时的健康度、通电时间、寿命时",
@@ -392,6 +398,11 @@ RAW_INDEX = (
      "确认 BMC 在不在线、固件该不该升时", "读不到就是这台机器没有 BMC 或没启用 IPMI"),
     (r"^ipmi-sensors(-post)?\.txt$", "BMC", "BMC 全部传感器读数（post 是压测后的）",
      "电源判定、温度交叉核对时", "PSU*_Vin 是判断某一路有没有进电的依据"),
+    (r"^ipmi-sensor-breach\.txt$", "BMC",
+     "**压测后越过主板自身上下限的那几条传感器**（每行 级别|名称|读数|单位|说明）",
+     "「部件传感器复查」判 WARN/FAIL 时，这就是逐条明细",
+     "级别 crit=越临界线（判 FAIL）、warn=越告警线、zero=读数为 0（装没装分不开，只判 WARN）；"
+     "阈值取自 ipmi-sensors-post.txt 后六列，是**主板厂商写进 BMC 的**，不是我们定的"),
     (r"^ipmi-sdr\.txt$", "BMC", "BMC 传感器定义表（装没装卡都会有定义）",
      "查主板设计上有哪些传感器时", "有定义但全无读数 = 该位置现在没有东西在响应"),
     (r"^ipmi-sel-pre\.txt$", "BMC", "压测前的 BMC 事件日志（机器的历史）",
@@ -447,12 +458,37 @@ RAW_INDEX = (
      "逐卡的显存行重映射状态（可纠正 / 不可纠正 / 待生效 / 是否失败）",
      "显存行重映射判 WARN/FAIL 时",
      "failure=Yes 是备用行用尽（按 NVIDIA 口径要返修）；pending=Yes 只是需要重启"),
+    (r"^disk-uniform-scope\.txt$", "存储",
+     "硬盘型号一致性这一项**比了哪几块盘**（每行一个设备名）",
+     "有人问「为什么只比了两块盘」「我们那根 U 盘算不算进去了」时",
+     "取自 scan_disks 的 DISK_SMART[]，U 盘和虚拟设备本来就不在里面；"
+     "空文件 = 这台机器一块本机硬盘都没有，那一项判 SKIP"),
     (r"^net-pci-addresses\.txt$", "网络",
      "系统里当前存在的网口对应的 PCI 总线地址",
      "核对板载网口是不是在 BIOS 里被禁用了时",
      "和 deep/dmidecode-onboard.txt 里的 Bus Address 对照，能对上就说明这个口是活的"),
     (r"^nic-drivers\.txt$", "网络", "每个网口用的是哪个驱动（口名|驱动名）",
      "虚拟设备核对判 WARN 时", "virtio_net / vmxnet3 / hv_netvsc 这几个是虚拟网卡"),
+    (r"^deep/fwts\.log$", "系统",
+     "固件（BIOS / UEFI / ACPI）自检的完整输出",
+     "同一批板子怀疑有共性 BIOS 问题时，或者客户问「你们查过固件吗」时",
+     "看结尾那张 Total 汇总表的 Fail / Warn 两列；**这一项只留档、不参与整机结论**，"
+     "而且不进客户报告 —— 完全正常的服务器上 ACPI 告警也很常见，"
+     "印给客户等于白白让人去找机器的毛病"),
+    (r"^smart-selftest/.*$", "存储",
+     "每块盘**自己跑**的短自检结果（smartctl -l selftest 原文）",
+     "「硬盘自检」判 FAIL 时，或者想知道某块盘为什么没取到结论时",
+     "看 Status 那一列：Completed without error 才算过；"
+     "in progress / Interrupted 是本轮没跑完（我们的时间问题，判 SKIP）"),
+    (r"^smart-selftest-start\.txt$", "存储",
+     "发起短自检时 smartctl 的回话（含预计耗时）",
+     "自检一条结论都没取到、想知道是不是压根没发起成功时",
+     "正常会写 \"Testing has begun\" 和预计完成时间"),
+    (r"^nic/.*-selftest\.txt$", "网络",
+     "每个网口**自己跑**的自检结果（ethtool -t 原文）",
+     "「网卡自检」判 FAIL 时，或者想知道哪几项子测试没过时",
+     "看 \"The test result is\" 那一行；驱动不实现自检时这里是 "
+     "\"Operation not supported\"，那是驱动的能力问题，判 SKIP"),
     (r"^deep/dmidecode-onboard\.txt$", "网络",
      "主板上焊死的板载设备清单及其 PCI 地址（DMI type 41）",
      "核对板载网口 / 板载阵列卡是否被禁用时",
@@ -772,6 +808,58 @@ class Internal(Data):
                                         b[0] if len(b) > 0 else None)),
                 ("不可纠正（前→后）", cell(a[1] if len(a) > 1 else None,
                                           b[1] if len(b) > 1 else None)),
+            ]))
+        return rows
+
+    # ---------- BMC 部件传感器 ----------
+    def bmc_sensors(self):
+        """`ipmitool sensor list` -> 数值型传感器逐条一行，带主板自己的上下限。
+
+        ⚠️ **这里只做展示，绝不重新判一遍。**判定在 lib/verify.sh 的
+        `ipmi_sensor_scan` 里，越线的那几条另外落在 `raw/ipmi-sensor-breach.txt`。
+        Python 这边再写一份阈值比较，就是第二套判据 —— 两边迟早会不一致，
+        而且不一致的时候没人看得出来是哪边错了（占位符名单那三份的教训）。
+
+        十列：名称|读数|单位|状态|lnr|lcr|lnc|unc|ucr|unr
+        离散量（读数是 `0x80` 那种事件位）整条跳过：它没有上下限可言，
+        一百多行十六进制堆在表里只会把真正有读数的那几十行淹掉。
+        """
+        txt = read_text(self.rawpath("ipmi-sensors-post.txt"))
+        phase = "压测后"
+        if not txt.strip():
+            txt = read_text(self.rawpath("ipmi-sensors.txt"))
+            phase = "压测前"
+        rows = []
+        for line in txt.splitlines():
+            c = [x.strip() for x in line.split("|")]
+            if len(c) < 10:
+                continue
+            if not re.match(r"^-?\d+(\.\d+)?$", c[1] or ""):
+                continue
+
+            def n(v):
+                return v if re.match(r"^-?\d+(\.\d+)?$", v or "") else None
+
+            if not any(n(c[i]) for i in (4, 5, 6, 7, 8, 9)):
+                continue
+            rows.append(OrderedDict([
+                ("传感器", c[0]), ("%s读数" % phase, c[1]), ("单位", c[2]),
+                ("下限·不可恢复", n(c[4])), ("下限·临界", n(c[5])), ("下限·告警", n(c[6])),
+                ("上限·告警", n(c[7])), ("上限·临界", n(c[8])), ("上限·不可恢复", n(c[9])),
+            ]))
+        return rows
+
+    def bmc_sensor_breach(self):
+        """raw/ipmi-sensor-breach.txt -> 越线的那几条。判定那边写的，这里只渲染。"""
+        cn = {"crit": "越临界线", "warn": "越告警线", "zero": "读数为 0"}
+        rows = []
+        for line in read_text(self.rawpath("ipmi-sensor-breach.txt")).splitlines():
+            p = line.split("|")
+            if len(p) < 5:
+                continue
+            rows.append(OrderedDict([
+                ("级别", cn.get(p[0], p[0])), ("传感器", p[1]),
+                ("读数", "%s %s" % (p[2], p[3])), ("说明", p[4]),
             ]))
         return rows
 
@@ -1438,6 +1526,23 @@ def build_internal_html(d):
          % (thr.get("disk_temp_warn"), thr.get("disk_temp_fail"))),
     ])))
 
+    # 校验清单（1.9.2 加）。它是在两份报告和 PDF 都出完之后才生成的，
+    # 所以这份内部报告里**只能说它在哪、怎么用**，列不出内容 —— 列出来就成了
+    # "报告里印着报告自己的哈希"那种自指的东西。
+    sums = os.path.join(d.run_dir, "SHA256SUMS")
+    if os.path.exists(sums):
+        try:
+            nfiles = sum(1 for x in open(sums, encoding="utf-8", errors="replace")
+                         if x.strip())
+        except OSError:
+            nfiles = 0
+        A('<p class="sub">本轮共 <b>%d</b> 个文件（含两份报告与 PDF）的 SHA256 '
+          "已写进报告目录下的 <code>SHA256SUMS</code>。"
+          "半年后客户拿一份报告回来问，靠它证明我们归档的和他手上的是不是同一份：<br>"
+          "<code>cd &lt;报告目录&gt; &amp;&amp; sha256sum -c SHA256SUMS</code><br>"
+          "<b>这份清单不进客户报告</b> —— 客户手上没有 raw/，拿到哈希也校验不了什么，"
+          "印在交付报告上只会招来「你们是不是怕被改」的提问。</p>" % nfiles)
+
     bad_rows = [r for r in d.results if r.get("status") in ("FAIL", "WARN")]
     A("<h3>1.2 需要处理的项</h3>")
     if bad_rows:
@@ -1714,6 +1819,23 @@ def build_internal_html(d):
         A('<p class="sub">只有插着模块时才读得到。光口机器出问题时，'
           "收发光功率是最值钱的一份数据 —— 客户报告里没有它。</p>")
         A('<div class="dense">%s</div>' % table(optics))
+    breach = d.bmc_sensor_breach()
+    if breach:
+        got_any = True
+        A(S7("越过主板自身上下限的部件传感器"))
+        A('<p class="sub">「部件传感器复查」那一条判 WARN / FAIL 的**逐条依据**。'
+          "客户报告里只列前六条，这里是全部。</p>")
+        A('<div class="dense">%s</div>' % table(breach))
+    sensors = d.bmc_sensors()
+    if sensors:
+        got_any = True
+        A(S7("BMC 部件传感器逐条（读数 vs 主板自己写的上下限）"))
+        A('<p class="sub">后六列是<b>主板厂商烧进管理控制器的</b>上下限，不是我们定的 —— '
+          "这也是全项目唯一一处拿阈值去判的地方（判定在 <code>lib/verify.sh</code>，"
+          "这张表只做展示，不重新判一遍）。风扇转速、VRM 温度、各路电压都在这儿；"
+          "客户报告里只有一句结论，逐条明细只在这份。"
+          "离散量传感器（读数是事件位、没有上下限可言）不在表内，原文见原始文件索引。</p>")
+        A('<div class="dense">%s</div>' % table(sensors))
     inv = d.gpu_inventory()
     if inv:
         got_any = True

@@ -29,6 +29,9 @@ source "$LIB/core.sh"
 source "$LIB/conformance.sh"
 # shellcheck source=/dev/null
 source "$LIB/bench.sh"
+# shellcheck source=/dev/null
+source "$LIB/validate.sh"
+ROOT="$(cd "$LIB/../../../.." && pwd)"
 
 PASS=0; FAIL=0
 ok()   { printf '  \033[32mOK\033[0m   %s\n' "$1"; PASS=$((PASS+1)); }
@@ -468,14 +471,16 @@ echo
 echo "=== 性能基准：CPU 浮点算力（LINPACK）==="
 #
 # ⚠️ 这份日志里有两张表头几乎一样的表，第一张的第 4 列是**秒**、第二张才是
-#    GFlops。按固定列号取第 4 列的话，一台 3030 GFlops 的机器会被读成
-#    "141.7 GFlops"，配上 3600 的门槛就是当场判 FAIL —— 好机器被拦在出货前。
+#    GFlops。按固定列号取第 4 列的话，一台 3030 GFlops 的机器会在报告上
+#    印成 "141.7 GFlops" —— 差了二十几倍，而这是要发给客户的数。
+#    （这里**不会**因此判 FAIL：性能项只有 PASS/SKIP，没有合格线。
+#    正因为没有合格线，这个数错了也不会有任何判定去兜 —— 谁也拦不住它，
+#    它会原样印进交付报告。解析对不对，就是这一项唯一的防线。）
 # ⚠️ 这一份是 **xlinpack_xeon64（oneMKL 2025.3）真跑出来的原样输出**，
 #    喂给它的输入文件就是 linpack_problem_size() 那套格式生成的。
 #    它把这条判据要防的坑摆得明明白白：
 #      计时表  第 4 列 = Time(s) = 0.529   <- 按列位置取就会拿到这个
 #      汇总表  第 4 列 = Average = 79.1742 <- 这个才是算力
-#    再配上一个 3600 的门槛，取错列就是一台好机器当场判 FAIL。
 cat > "$TMP/linpack.log" <<'EOF'
 Current date/time: Sun Aug  9 12:33:10 2026
 
@@ -622,7 +627,10 @@ Memory Device
 EOF
 check "没有 Channel 时退回按 Locator 的字母数（单路）" "2" \
       "$(dmi_channel_count "$TMP/mem-ch-loc.txt")"
-check "两种写法都认不出来时给 0（调用方据此放弃自动算门槛）" "0" \
+# 0 的含义是「这台机器认不出通道数」，调用方据此**在报告里不写通道数**
+# ——**绝不猜一个**。（这句原来写的是"放弃自动算门槛"，那是 1.9.0 中途
+# 那套阈值留下的说法，阈值早就整个删了，这个返回值现在只影响一句文案。）
+check "两种写法都认不出来时给 0（调用方据此在报告里不写通道数，不猜）" "0" \
       "$(dmi_channel_count "$TMP/nope-mem.txt")"
 
 echo
@@ -641,10 +649,17 @@ time,index,name,temp_c,power_w,clock_sm_mhz,util_pct,mem_used_mb,fan_pct,temp_tl
 EOF
 read -r g_cmin g_cavg g_fan g_tl g_pow < <(gpu_load_stats "$TMP/gpumetrics.csv" 0)
 check "最低频率跳过头两个采样点（2650，不是 210）" "2650" "$g_cmin"
-check "平均频率按全部采样算"                       "2014" "$g_cavg"
+# ⚠️ 平均值也跳同样两个点（1.9.2 改的）。原来最低跳、平均不跳，两个数出自
+#    两个窗口，凑在同一句话里就会出现"平均 2686MHz（最低 2688MHz）"——
+#    最低的比平均的还高。客户不会去想那是两个口径，他想的是"这报告算错了"。
+check "平均频率跳同样两个点（2687，不是把空载那两点也算进来的 2014）" "2687" "$g_cavg"
 check "风扇取峰值"                                 "92"   "$g_fan"
 check "距降频阈值取最小余量"                       "8"    "$g_tl"
-check "功耗取平均"                                 "419"  "$g_pow"
+check "平均功耗也跳同样两个点（572，不是 419）"     "572"  "$g_pow"
+# **这一条才是真正要守的东西**：不管窗口怎么改，只要两个数出自同一组样本，
+# 最低 <= 平均就是结构上成立的。它红了说明有人又把窗口拆成了两个。
+check "最低频率不许高于平均频率（同一组样本，结构上就该成立）" "yes" \
+      "$(awk -v a="$g_cmin" -v b="$g_cavg" 'BEGIN{print (a+0<=b+0)?"yes":"no"}')"
 
 # 老驱动没有 fan/tlimit 两列：必须输出 "-"，不能当成 0，
 # 更不能少输出两个字段（少了会让后面的值整体左移一位）
@@ -656,9 +671,92 @@ time,index,name,temp_c,power_w,clock_sm_mhz,util_pct,mem_used_mb,fan_pct,temp_tl
 02:18:16,0,NVIDIA A100,73,400.0,1395,99,28935,,
 EOF
 check "读不到的列给 '-'，不是 0（'风扇 0%' 和 '没有风扇' 是两件事）" \
-      "1395 1076 - - 295" "$(gpu_load_stats "$TMP/gpumetrics-old.csv" 0)"
+      "1395 1398 - - 400" "$(gpu_load_stats "$TMP/gpumetrics-old.csv" 0)"
 check "五个字段一个都不能少（少一个会让后面的值整体左移）" "5" \
       "$(gpu_load_stats "$TMP/gpumetrics-old.csv" 0 | wc -w)"
+
+echo
+echo "=== 部件专项验证：结论由那个工具给（1.9.2）==="
+#
+# ⚠️ 这两条的判据都是"**非零退出不等于机器有问题**"。
+#    工具跑不起来、参数不对、驱动版本不匹配、被超时打断，全都会非零 ——
+#    要在日志里找到**明确的失败证据**才敢判 FAIL。分不清的东西不该去染
+#    客户的结论（一号红线）。
+printf 'ok 1 - test kernel\nok 2 - test cpuid\n' > "$TMP/sdc-ok.log"
+check "退出 0 且没有失败行 -> pass" "pass" "$(sdc_verdict 0 "$TMP/sdc-ok.log")"
+printf 'ok 1 - test kernel\nnot ok 2 - test avx512\n  - failed: thread 12 data miscompare\n' \
+  > "$TMP/sdc-bad.log"
+check "日志里有明确的失败证据 -> fail" "fail" "$(sdc_verdict 1 "$TMP/sdc-bad.log")"
+# ⚠️ 顺序不能反：既有失败行、又碰巧退出 0 的日志必须读成 fail
+check "有失败行时即使退出 0 也判 fail" "fail" "$(sdc_verdict 0 "$TMP/sdc-bad.log")"
+printf 'error: unknown CPU feature, cannot run\n' > "$TMP/sdc-env.log"
+check "非零退出但找不到失败证据 -> inconclusive（不是 fail）" "inconclusive" \
+      "$(sdc_verdict 2 "$TMP/sdc-env.log")"
+check "日志文件不存在 + 非零退出 -> inconclusive" "inconclusive" \
+      "$(sdc_verdict 1 "$TMP/nope-sdc.log")"
+
+printf 'Deployment| Blacklist                | Pass\nIntegration| PCIe                    | Pass\n' \
+  > "$TMP/dcgm-ok.log"
+check "显卡诊断全 Pass -> pass" "pass" "$(dcgm_verdict 0 "$TMP/dcgm-ok.log")"
+printf 'Hardware  | Memory                   | Fail\n' > "$TMP/dcgm-bad.log"
+check "有 Fail 行 -> fail" "fail" "$(dcgm_verdict 1 "$TMP/dcgm-bad.log")"
+printf 'Error: Unable to connect to nv-hostengine\n' > "$TMP/dcgm-env.log"
+check "连不上诊断服务 -> inconclusive（不是显卡坏了）" "inconclusive" \
+      "$(dcgm_verdict 255 "$TMP/dcgm-env.log")"
+
+# 两个可选件都必须挂在汇总入口上，而且 validate_all 要被 factory-test.sh 调用 ——
+# 少一句的后果是工具白放进 vendor/、判定从报告里消失
+for fn in validate_init validate_cpu_sdc validate_gpu_diag; do
+  check "validate_all 必须调用 $fn" "yes" \
+        "$(declare -f validate_all | grep -q "\b${fn}\b" && echo yes || echo no)"
+done
+FT_MAIN="$ROOT/rootfs/opt/klburn/factory-test.sh"
+check "factory-test.sh 必须调用 validate_all" "yes" \
+      "$(grep -qE '^[[:space:]]*validate_all( |$)' "$FT_MAIN" && echo yes || echo no)"
+# 和基准同一个阶段：都要机器空闲。排到压测里去的话，量到的和判到的都是别的东西。
+vl_pos="$(grep -n '^validate_all' "$FT_MAIN" | head -1 | cut -d: -f1)"
+st_pos="$(grep -n 'stress_cpu "\$CPU_SECS"' "$FT_MAIN" | head -1 | cut -d: -f1)"
+check "validate_all 必须排在并发压测之前（空闲时测）" "yes" \
+      "$( [[ -n "$vl_pos" && -n "$st_pos" && "$vl_pos" -lt "$st_pos" ]] && echo yes || echo no )"
+# ⚠️ 它**不能**放进 bench.sh：那个文件的出口只有 PASS/SKIP，
+#    而这两条是会判 FAIL 的（工具说部件坏了）。混在一起就会让
+#    "性能数字不判合格"那条守卫和事实打架。
+check "validate.sh 不许被写进 bench.sh（两者的出口性质不同）" "0" \
+      "$(grep -c 'validate_' "$ROOT/rootfs/opt/klburn/lib/bench.sh" || true)"
+
+echo
+echo "=== CPU 满载频率：最低和平均必须同一个窗口（phase_freq_stats）==="
+#
+# 和上面显卡那一组是同一条规矩、同一个理由。r08 那份真机报告上印过
+#     平均频率 2686MHz　　最低频率 2688MHz
+# 最低的比平均的还高 —— 两个函数各跳各的窗口跳出来的。
+RUN_DIR="$TMP"
+cat > "$TMP/sys_metrics.csv" <<'EOF'
+time,phase,cpu_temp_c,cpu_freq_mhz,load1,mem_used_mb,mem_total_mb,cpu_power_w
+10:00:00,cpu,45,1200,0.5,1000,65536,120
+10:00:05,cpu,55,1800,20.0,1200,65536,200
+10:00:10,cpu,68,2700,64.0,1400,65536,320
+10:00:15,cpu,70,2650,64.5,1400,65536,325
+10:00:20,cpu,71,2710,64.8,1400,65536,330
+EOF
+read -r p_min p_avg < <(phase_freq_stats cpu)
+check "最低频率跳过头两个采样点" "2650" "$p_min"
+check "平均频率跳同样两个点（2687，不是 2212）" "2687" "$p_avg"
+check "两个薄包装取的是同一组样本（min）" "2650" "$(phase_min_freq cpu)"
+check "两个薄包装取的是同一组样本（avg）" "2687" "$(phase_avg_freq cpu)"
+check "最低不许高于平均（结构上就该成立）" "yes" \
+      "$(awk -v a="$p_min" -v b="$p_avg" 'BEGIN{print (a+0<=b+0)?"yes":"no"}')"
+# 采样点不足 3 个的超短阶段：全都算，宁可粗糙也不要空值
+cat > "$TMP/sys_metrics.csv" <<'EOF'
+time,phase,cpu_temp_c,cpu_freq_mhz,load1,mem_used_mb,mem_total_mb,cpu_power_w
+10:00:00,cpu,45,1200,0.5,1000,65536,120
+10:00:05,cpu,55,1800,20.0,1200,65536,200
+EOF
+check "只有两个采样点时不跳（否则一个数都出不来）" "1200 1500" "$(phase_freq_stats cpu)"
+: > "$TMP/sys_metrics.csv"
+check "一行数据都没有时给 '- -'（调用方据此写「未知」）" "- -" "$(phase_freq_stats cpu)"
+check "没数据时薄包装给空串（不是 '-'）" "" "$(phase_min_freq cpu)"
+unset RUN_DIR
 
 # ================================================================
 echo

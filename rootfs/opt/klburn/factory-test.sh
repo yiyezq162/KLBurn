@@ -23,6 +23,7 @@ source "$KLB_ROOT/lib/network.sh"
 source "$KLB_ROOT/lib/gpu.sh"
 source "$KLB_ROOT/lib/conformance.sh"
 source "$KLB_ROOT/lib/bench.sh"
+source "$KLB_ROOT/lib/validate.sh"
 source "$KLB_ROOT/lib/stress.sh"
 source "$KLB_ROOT/lib/verify.sh"
 
@@ -240,9 +241,12 @@ info "Time budget: $burn_label concurrently for $(fmt_dur "$DURATION_SECONDS")$(
 #
 # 盘里没放对应的基准程序时，每一项都干净地判 SKIP，整段几秒钟就过去了 ——
 # 所以不需要额外的开关，也不影响不做性能核对的那些机器。
-section "PHASE 2/5  PERFORMANCE BASELINE (idle machine)"
+section "PHASE 2/5  BASELINE & DEVICE VALIDATION (idle machine)"
 BENCH_START_EPOCH="$(date +%s)"
 bench_all "$DISK_CONFIRMED"
+# 部件专项验证（可选件：opendcdiag / dcgmi）。和基准同一个阶段——都要机器空闲。
+# 一个都没放进 vendor/ 时整段几秒钟就过去了。
+validate_all
 BENCH_SECS=$(( $(date +%s) - BENCH_START_EPOCH ))
 
 # ---------------------------------------------------------------- 压测：CPU / 内存 / GPU 并发
@@ -408,6 +412,26 @@ render_pdf() {
 }
 render_pdf "$REPORT_HTML"   "${REPORT_HTML%.html}.pdf"   "Report"   || true
 render_pdf "$INTERNAL_HTML" "${INTERNAL_HTML%.html}.pdf" "Internal" || true
+
+# ---------------------------------------------------------------- 校验清单
+#
+# 一份要随机器交付、日后可能被拿出来争的验收报告，现在连一个校验和都没有 ——
+# 而我们给 ISO 都算了。用途很具体：**半年后客户拿着一份报告来问，
+# 我们能证明自己归档的那一份和他手上那一份是同一份**（或者证明不是）。
+#
+# ⚠️ **只落文件、不进客户报告。**客户手上没有 raw/，拿一个哈希也校验不了任何
+#    东西，印在报告上只会招来"你们是不是怕被改"的提问。它是给我们自己用的。
+#
+# 报告本身也在清单里 —— 所以清单必须在两份 HTML 和 PDF 都出完之后才生成。
+# 用相对路径记，整个目录搬走之后照样能 `sha256sum -c` 校验。
+write_checksums() {
+  local sums="$RUN_DIR/SHA256SUMS"
+  have sha256sum || { dbg "no sha256sum on this media"; return 1; }
+  ( cd "$RUN_DIR" && find . -type f ! -name 'SHA256SUMS' -print0 \
+      | sort -z | xargs -0 sha256sum ) > "$sums" 2>/dev/null || return 1
+  ok "Checksums: $sums ($(count_lines "$sums") files)"
+}
+write_checksums || warn "Checksum manifest failed (reports are unaffected)."
 
 sync
 
