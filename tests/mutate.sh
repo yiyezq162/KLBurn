@@ -108,6 +108,13 @@ MUTATIONS=(
 "result-tool-name${S}判定文案里重新写上 stress-ng（走源码那一路，由 FORBIDDEN 拦）${S}test-hw-checks${S}$RT/lib/stress.sh${S}mut_result_tool_name"
 "metric-group-raw${S}「其他实测指标」的分组列退回内部键（一份中文报告里夹着 mem / pcie / gpu0）${S}test-report-render${S}$RT/report/generate_report.py${S}mut_metric_group_raw"
 "bogus-prefix-drop${S}Python 那份占位符名单丢掉「to be filled」前缀兜底（三份名单又不一致了）${S}test-hw-checks${S}$RT/report/generate_report.py${S}mut_bogus_prefix_drop"
+"conform-bogus-uniq${S}一致性比对不再过滤占位符（BIOS 没填 PN 的机器被判成内存混插）${S}test-hw-checks${S}$RT/lib/conformance.sh${S}mut_conform_bogus_uniq"
+"gpu-ecc-na-as-zero${S}显存 ECC 把 [N/A] 当成 0（没有 ECC 的卡被报成「ECC 全部正常」）${S}test-hw-checks${S}$RT/lib/conformance.sh${S}mut_gpu_ecc_na_as_zero"
+"linpack-col-by-pos${S}算力按列位置取而不是按列名取（计时表第 4 列是秒，「跑了几次」也数不出来）${S}test-log-parsing${S}$RT/lib/bench.sh${S}mut_linpack_col_by_pos"
+"gpu-clkmin-noskip${S}满载最低频率不再跳过前两个采样点（每台机器都凭空多出一条严重降频）${S}test-log-parsing${S}$RT/lib/gpu.sh${S}mut_gpu_clkmin_noskip"
+"disk-tool-name${S}硬盘压测文案重新写上工具名（1.8.4 漏掉 fio 的那条，走源码那一路）${S}test-hw-checks${S}$RT/lib/stress.sh${S}mut_disk_tool_name"
+"accept-group-drop${S}报告分节时把压测那一段的判定漏掉（分组只该决定印在哪一节，不该吞判定）${S}test-report-render${S}$RT/report/generate_report.py${S}mut_accept_group_drop"
+"accept-metric-dup${S}已经有专属小节的指标又进「其他实测指标」（同一个数字印两遍）${S}test-report-render${S}$RT/report/generate_report.py${S}mut_accept_metric_dup"
 )
 
 # ================================================================
@@ -665,6 +672,71 @@ mut_bogus_prefix_drop() {
   replace_line "$RT/report/generate_report.py" \
     '    if not s or s.lower() in BOGUS or s.lower().startswith(_BOGUS_PREFIX):' \
     '    if not s or s.lower() in BOGUS:'
+}
+
+# ================================================================
+# 1.9.0：配置一致性核对与性能基准
+# ================================================================
+
+# 一致性比对不过滤占位符。后果不是"少报"，是**反过来误报**：
+# BIOS 没填 PN 的机器上，去重结果里会同时有真 PN 和 "Not Specified"，
+# 于是一台内存完全一致的机器被判成混插。
+mut_conform_bogus_uniq() {
+  replace_line "$RT/lib/conformance.sh" \
+    '    _serial_is_bogus "$line" && continue' \
+    '    [[ -z "$line" ]] && continue'
+}
+
+# 显存 ECC 把 "[N/A]" 当成 0。消费级卡本来就没有 ECC，
+# 这么一改，报告上会写"显存 ECC 错误计数均为 0"——一张压根没有 ECC 的卡
+# 被说成"ECC 没问题"。这是"没查过"和"查过没问题"被混为一谈的同款。
+mut_gpu_ecc_na_as_zero() {
+  replace_line "$RT/lib/conformance.sh" \
+    '      if (ce ~ /^[0-9]+$/ && ue ~ /^[0-9]+$/) { n++; c += ce; u += ue }' \
+    '      { n++; c += ce; u += ue }'
+}
+
+# 算力按列位置取而不是按列名取。LINPACK 的日志里有两张表头几乎一样的表，
+# 计时表的第 4 列是**秒**、汇总表的第 4 列才是 GFlops。
+# 顺带"跑了几次"也数不出来了（run_times 是验收单点名要看的）。
+mut_linpack_col_by_pos() {
+  replace_line "$RT/lib/bench.sh" \
+    '        if ($i == "Average") avgcol = i' \
+    '        if ($i == "Align.") avgcol = i + 1'
+}
+
+# 满载最低频率不再跳过前两个采样点。采样器和压测程序同一刻起来，
+# 头两个点采到的还是空载降频后的频率，于是每台机器的报告上都会
+# 凭空多出一条"满载最低频率 210MHz"，看着像严重降频。
+mut_gpu_clkmin_noskip() {
+  replace_line "$RT/lib/gpu.sh" \
+    '      start = (cn > 2 ? 3 : 1)' \
+    '      start = 1'
+}
+
+# 硬盘压测文案重新写上工具名。这正是 1.8.4 漏掉的那一条 ——
+# 当时禁词表按"咬过人的词"一个个加，fio 没人加，于是这两句一直进客户报告。
+mut_disk_tool_name() {
+  replace_line "$RT/lib/stress.sh" \
+    '      "硬盘读写测试报告 I/O 错误（错误计数 ${ioerr}）；$detail" "raw/fio-rand.json"' \
+    '      "fio 报告 I/O 错误（error=${ioerr}）；$detail" "raw/fio-rand.json"'
+}
+
+# 报告分节时把压测那一段的判定整段漏掉。
+# **分组只该决定"印在哪一节"，绝不能决定"印不印"** —— 这个改动最容易犯的错
+# 就是分完组之后某一类判定谁也不认领，于是从报告里凭空消失
+# （既不是 PASS 也不是 SKIP，看报告的人根本不知道那一项测没测）。
+mut_accept_group_drop() {
+  replace_line "$RT/report/generate_report.py" \
+    '                  if r.get("id") not in CONFORM_IDS' \
+    '                  if r.get("id") in CONFORM_IDS'
+}
+
+# 已经有专属小节的那三组指标又进「其他实测指标」，同一个数字印两遍。
+mut_accept_metric_dup() {
+  replace_line "$RT/report/generate_report.py" \
+    '                     and m.get("group") not in OWN_SECTION_GROUPS]' \
+    '                     ]'
 }
 
 # 把采样状态文件做成"每个进程一份"，等价于退回 1.8.2 用 shell 全局存 ——

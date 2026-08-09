@@ -709,12 +709,14 @@ has "$OUT" "未能通过网络自动校时" "时钟不准的提示（run-dir 里
 has "$OUT" "广州市鲲林科技有限公司" "公司名"
 
 echo
-echo "=== 二级编号不跳号（本例无 GPU、无 fio）==="
-has    "$OUT" "<h3>2.1 各项结论</h3>"       "第一节"
-has    "$OUT" "<h3>2.2 CPU 温度 / 频率 / 功耗曲线</h3>" "第二节"
-has    "$OUT" "<h3>2.3 其他实测指标</h3>"   "第三节紧接着，不能跳到 2.5"
-has_no "$OUT" "<h3>2.4"                     "没有第四节"
-has_no "$OUT" "<h3>2.5"                     "更不该有第五节"
+echo "=== 二级编号不跳号（本例无 GPU、无 fio、无性能基准）==="
+# 1.9.0 起一级编号也是动的：跑了性能基准时压测那一节是「四」，没跑就是「三」。
+# 本 fixture 没有任何 bench_* 判定，所以性能基准整节不出现，压测是第三节。
+has    "$OUT" "<h3>3.1 各项结论</h3>"       "第一节"
+has    "$OUT" "<h3>3.2 CPU 温度 / 频率 / 功耗曲线</h3>" "第二节"
+has    "$OUT" "<h3>3.3 其他实测指标</h3>"   "第三节紧接着，不能跳到 3.5"
+has_no "$OUT" "<h3>3.4"                     "没有第四节"
+has_no "$OUT" "<h3>3.5"                     "更不该有第五节"
 
 echo
 echo "=== 老 run-dir 没有 cpu_power_w 这一列，不能崩、也不该画功耗图 ==="
@@ -823,12 +825,57 @@ if python3 "$GEN" --run-dir "$RD3" --out "$OUT4" >/dev/null 2>"$TMP/err4"; then
   # 「mem / 测试工具 / stressapptest」就是走第二条路一路印到客户手上的。
   # 所以这一组必须查**生成物**。
   #
-  # 注意 <pre> 里嵌的原始日志是存证、不是结论，按 report-policy 允许原样保留；
-  # 这里查的是整份 HTML，所以工具名不能出现在嵌入日志的**正文**里——
-  # 采集失败标记那类已经在别处剔掉了。
-  for w in "stressapptest" "stress-ng" "gpu_burn" "nvidia-smi" "smartctl"; do
-    has_no "$OUT4" "$w" "工具名不进客户报告"
+  # ⚠️ **必须先把 `<pre>` 里嵌的原始日志剔掉再扫。**
+  #
+  #   `<pre>` 里的原始日志按 report-policy 二-6-2 是**存证、不是结论**，
+  #   允许原样保留 —— 而那些日志本来就是工具自己打的，`stress-ng: info:` 这种
+  #   前缀一份真报告里有十几处。所以"扫整份 HTML"这个做法有个隐蔽的毛病：
+  #
+  #     它只在**本测试的 fixture 里恰好没有原始日志**时才是绿的。
+  #
+  #   1.9.0 实测那份真报告：stress-ng 出现 17 次、dmidecode 3 次、
+  #   stressapptest 1 次，**全在 `<pre>` 里**。也就是说这条断言换成真报告
+  #   立刻就红，而红的原因和它想守的东西毫无关系 —— 一条只能在玩具输入上
+  #   为绿的守卫，和没写没有区别。
+  #
+  #   剔掉 `<pre>` 之后剩下的才是我们自己写的东西：判定文案、表格、小节标题。
+  #   那里面出现工具名才是真违规。剔干净了也就**不必再回避 fio 和几个基准程序**，
+  #   它们和别的工具判据完全一样（1.8.4 记的那条"禁词表是被咬过才会长的表"）。
+  BODY="$TMP/report-clean-nopre.html"
+  python3 - "$OUT4" "$BODY" <<'PYEOF'
+import re, sys
+src, dst = sys.argv[1], sys.argv[2]
+html = open(src, encoding="utf-8").read()
+# 非贪婪、跨行地摘掉每一个 <pre>...</pre>
+open(dst, "w", encoding="utf-8").write(re.sub(r"<pre\b.*?</pre>", "", html, flags=re.S))
+PYEOF
+  # 先自检：剔除这一步真的生效了没有。剔过头（整份被清空）或者没剔掉
+  # （正则写错）都会让下面那一串断言变成摆设，而两种都不会有任何报错。
+  check "剔掉 <pre> 之后正文还在（没剔过头）" "yes" \
+        "$(grep -q '一、硬件清单' "$BODY" && echo yes || echo no)"
+  check "剔掉 <pre> 之后原始日志真的没了（没剔漏）" "0" \
+        "$(grep -c '<pre' "$BODY" || true)"
+
+  for w in "stressapptest" "stress-ng" "gpu_burn" "nvidia-smi" "smartctl" \
+           "fio" "lspci" "lsblk" "turbostat" "mstflint" \
+           "bandwidthTest" "p2pBandwidth" "xlinpack" "mlc_avx512"; do
+    has_no "$BODY" "$w" "工具名不进客户报告（正文，不含 <pre> 存证）"
   done
+
+  # 这一组同样必须**有能力变红**。拿一份把工具名写进正文的 HTML 喂给同一条判据，
+  # 它必须抓住；同时确认同一个词躺在 <pre> 里时不会被误伤 —— 两个方向都要验，
+  # 只验一头的话，"剔过头"和"漏网"各自都能装成绿的。
+  printf '<h2>一、硬件清单</h2><p>fio 报告 I/O 错误</p>' > "$TMP/leak-body.html"
+  check "守卫抓得住写进正文的工具名" "1" \
+        "$(grep -c 'fio' "$TMP/leak-body.html" || true)"
+  printf '<h2>一、硬件清单</h2><pre>fio-3.36\nstress-ng: info: ok</pre>' > "$TMP/leak-pre.html"
+  python3 - "$TMP/leak-pre.html" "$TMP/leak-pre-stripped.html" <<'PYEOF'
+import re, sys
+open(sys.argv[2], "w", encoding="utf-8").write(
+    re.sub(r"<pre\b.*?</pre>", "", open(sys.argv[1], encoding="utf-8").read(), flags=re.S))
+PYEOF
+  check "<pre> 里的同一个词不许被误伤（存证允许原样保留）" "0" \
+        "$(grep -c 'fio' "$TMP/leak-pre-stripped.html" || true)"
 else
   bad "清洁性检查用的报告没能生成：$(cat "$TMP/err4")"
 fi
@@ -873,9 +920,14 @@ echo "=== 结构性快照：整块塌掉要能查出来 ==="
 
 cnt() { grep -oE "$2" "$1" | grep -c . ; }
 
-# ① 一级章节：三节，顺序固定。少一节 = 客户少看一整块
-check "一级章节必须是「硬件清单 / 压力测试结果 / 原始日志」三节，顺序固定" \
-      "一、硬件清单|二、压力测试结果|三、原始日志|" \
+# ① 一级章节：顺序固定，少一节 = 客户少看一整块。
+#
+# 1.9.0 起「性能基准」是**有条件的一节**：跑了才出现，没跑整节不显示
+# （一节全是 SKIP 的基准只会招来"你们是不是没测"的提问）。
+# 所以这里分两组断言：不带基准的那份是四节，带基准的那份是五节，
+# 而且编号要跟着往后顺延 —— 断号或者两节都叫「三、」是这一类改动最典型的翻车。
+check "一级章节（无性能基准时）必须是四节，顺序固定" \
+      "一、硬件清单|二、配置核对|三、压力测试结果|四、原始日志|" \
       "$(grep -oE '<h2>[^<]*' "$OUT" | sed 's/<h2>//' | tr '\n' '|')"
 
 # ② 硬件清单八个小节一个都不能少。
@@ -930,6 +982,87 @@ fi
 
 # ⑤ 整机结论大字有且只有一个（多一个 = 页面上自相矛盾）
 check "整机结论大字有且只有一个" "1" "$(cnt "$OUT" 'class="verdict v-[A-Z]+"')"
+
+# ================================================================
+echo
+echo "=== 报告分节：配置核对 + 性能基准两节（1.9.0）==="
+#
+# 分节是按"读者关心的三件事"来的：装的东西对不对 / 跑多快 / 扛不扛得住。
+# 这一组验的是**分组本身**：判定被分到哪一节、以及分错时会不会有判定凭空
+# 消失（"藏一条结论"是这个项目在报告侧最忌讳的事）。
+RDA="$TMP/run-accept"
+cp -r "$RD" "$RDA"
+cat >> "$RDA/results.jsonl" <<'EOF'
+{"id":"check_dimm_uniform","name":"内存条一致性","status":"WARN","detail":"本机装有 8 条内存，规格不完全一致：颗粒型号 2 种；建议出货前按订单要求确认。","ref":"","time":"t"}
+{"id":"check_sn_consistency","name":"序列号一致性","status":"PASS","detail":"主板 BIOS 与管理控制器记录的整机序列号一致（TESTSN0001）。机身物理标签请人工核对。","ref":"","time":"t"}
+{"id":"check_bios_profile","name":"平台关键设置","status":"PASS","detail":"已读取平台关键设置的实际状态：处理器 x2APIC 已关闭；IO 虚拟化 已关闭；每路 NUMA 节点 每路 1 个（未启用子 NUMA 划分）。","ref":"","time":"t"}
+{"id":"bench_cpu_flops","name":"CPU 浮点算力","status":"PASS","detail":"全核浮点矩阵运算（问题规模 40000 阶，重复 4 次取最好成绩）的平均算力实测 3010.0 GFlops。","ref":"","time":"t"}
+{"id":"bench_mem_bw","name":"内存读取带宽","status":"PASS","detail":"内存满负载读取带宽实测 245678.9 MB/s（本机内存运行频率 4800 MT/s，已装满 16 个通道）。","ref":"","time":"t"}
+EOF
+cat >> "$RDA/metrics.jsonl" <<'EOF'
+{"group":"platform","key":"处理器 x2APIC","value":"已关闭"}
+{"group":"conform","key":"内存条数","value":"8"}
+{"group":"bench","key":"CPU 浮点算力（GFlops）","value":"3010.0"}
+{"group":"bench","key":"内存读取带宽（MB/s）","value":"245678.9"}
+{"group":"bench","key":"算力测试问题规模（阶）","value":"40000"}
+{"group":"bench","key":"内存运行频率（MT/s）","value":"4800"}
+{"group":"bench","key":"内存通道数","value":"16"}
+EOF
+mkdir -p "$RDA/raw/bench"
+cat > "$RDA/raw/bench/fio-sda-read.json" <<'EOF'
+{"jobs":[{"jobname":"libaio_read_128k_32_1","read":{"bw":532480,"iops":4160},"write":{"bw":0,"iops":0},"error":0}]}
+EOF
+OUTA="$TMP/report-accept.html"
+"$GEN" --run-dir "$RDA" --out "$OUTA" >/dev/null 2>&1
+
+check "有性能基准时一级章节变成五节，编号跟着顺延" \
+      "一、硬件清单|二、配置核对|三、性能基准|四、压力测试结果|五、原始日志|" \
+      "$(grep -oE '<h2>[^<]*' "$OUTA" | sed 's/<h2>//' | tr '\n' '|')"
+has "$OUTA" "<h3>2.1 核对结论</h3>"        "配置核对的第一小节"
+has "$OUTA" "<h3>3.1 各项结论</h3>"        "性能基准的第一小节"
+has "$OUTA" "<h3>4.1 各项结论</h3>"        "压测那一节的编号要跟着一级编号走"
+has "$OUTA" "内存条一致性"                  "一致性判定要出现在配置核对那一节"
+has "$OUTA" "libaio_read_128k_32_1"        "硬盘带宽表要原样标出本次实际用的测试参数"
+has "$OUTA" "固件版本清单"                  "固件版本汇总表（同批次比对用）"
+# ⚠️ **同一个数字不许在一页上印两遍。**
+# 1.9.0 一度在结论列表之外又加了一张"实测数值汇总"表，六个数各印两次 ——
+# 那不是排版，是堆砌。逐盘带宽是另一组数（结论里给不出逐盘明细），留着；
+# 六个整机数字只在结论里出现一次。
+has_no "$OUTA" "实测数值汇总"  "不许再加回那张和结论重复的汇总表"
+has_no "$OUTA" "测试条件："     "不许再加回那行和结论重复的测试条件"
+check "CPU 算力那个数在整份报告里只出现一次" "1" \
+      "$(grep -o '3010.0 GFlops' "$OUTA" | grep -c . || true)"
+check "算力的问题规模也只出现一次" "1" \
+      "$(grep -o '40000 阶' "$OUTA" | grep -c . || true)"
+has "$OUTA" "<h3>3.2 硬盘顺序读写带宽</h3>" "逐盘带宽表（另一组数，该留）"
+
+# 平台设置那四个值同理：判定行里说"读到了几项"，值只在下面那张表里出现。
+check "平台设置的值不在判定行里重复" "1" \
+      "$(grep -o '每路 1 个（未启用子 NUMA 划分）' "$OUTA" | grep -c . || true)"
+
+# ⚠️ **性能那一节不许出现"参考值 / 是否达标"这类东西。**
+# 这张盘是无人值守跑的，没有任何地方能拿到"这台机器应该达到多少" ——
+# 凭空印一个数上去，等于我们替客户定了一个他没定过的标准。
+# 1.9.0 一度真做过阈值那一套，整个删掉了；这几条钉住，别再长回来。
+for w in "参考值" "验收标准" "未达标" "是否达标" "低于标准" "合格线"; do
+  has_no "$OUTA" "$w" "性能一节不许出现合格线概念"
+done
+has "$OUTA" "不做合格与否的判断" "要明写这一节不判合格"
+
+# **最要紧的一条**：分组只决定"印在哪一节"，绝不能让哪条判定漏印。
+# 分组表里漏登记一个 id 时，它应当落到"压测与复查"那一段，而不是消失。
+check "分成三节之后，判定总条数一条都不许少" \
+      "$(( $(grep -c . "$RDA/results.jsonl") - $(grep -cE "$INTERNAL_RE" "$RDA/results.jsonl" || true) - $(grep -cE "$HIDE_RE" "$RDA/results.jsonl" || true) ))" \
+      "$(cnt "$OUTA" '<div class="result-row r-[A-Z]+"')"
+# 性能数字**不参与**整机结论。这份 fixture 里唯一的 FAIL 来自 verify_ecc，
+# 基准项全是 PASS —— 真正要守的是"基准项永远不会是 FAIL/WARN"。
+check "性能基准那几条只能是 PASS 或 SKIP（性能数字不判合格）" "0" \
+      "$(grep -E '"id":"bench_' "$RDA/results.jsonl" | grep -cE '"status":"(FAIL|WARN)"' || true)"
+
+# 同一个数字不许印两遍：platform / conform / bench 三组有自己的小节，
+# 就不该再出现在「其他实测指标」那张大表里
+check "已经有专属小节的指标不再进「其他实测指标」" "0" \
+      "$(grep -oE '<td>平台设置</td>|<td>配置核对</td>|<td>性能基准</td>' "$OUTA" | grep -c . || true)"
 
 # ================================================================
 echo

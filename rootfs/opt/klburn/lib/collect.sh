@@ -1246,8 +1246,11 @@ check_pcie_link() {
 
   local rows; rows="$(pcie_link_scan)"
   if [[ -z "$rows" ]]; then
+    # ⚠️ 这句原来写的是"未能从 lspci -vv 解析到…"，把工具名印进了客户报告
+    # （§6-2）。1.9.0 把工具名成组补进禁词表之后当场跑红。
     result_add "check_pcie_link" "PCIe 链路" "$ST_SKIP" \
-      "未能从 lspci -vv 解析到任何端点设备的链路能力信息" "raw/lspci-vv.txt"
+      "本机未上报任何 PCIe 设备的链路能力信息，本项未做核对。此项不影响整机结论。" \
+      "raw/lspci-vv.txt"
     return
   fi
 
@@ -1610,7 +1613,7 @@ collect_sensors() {
 
 # ---------------------------------------------------------------- 汇总入口
 collect_all() {
-  section "PHASE 1/4  HARDWARE INVENTORY"
+  section "PHASE 1/5  HARDWARE INVENTORY"
   collect_system
   check_memory_capacity
   check_pcie_link     # 读的是 collect_system 落下的 lspci-vv.txt，必须排在它后面

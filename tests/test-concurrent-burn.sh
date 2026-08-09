@@ -191,7 +191,15 @@ echo "=== 盘内没带 gpu_burn 时，GPU 压测结论不能凭空消失 ==="
 source "$LIB/gpu.sh"
 
 LAST_ID=""; LAST_STATUS=""
-result_add() { LAST_ID="$1"; LAST_STATUS="$3"; }
+# ⚠️ 按 **id** 记，不能只留"最后一条"。
+# gpu_stress 收尾时会再记一条「显卡满载运行状态」（check_gpu_load），
+# 于是 LAST_STATUS 拿到的是那一条，而这一组要断言的是 stress_gpu ——
+# 1.9.0 加那条判定时，这里的三条断言全部变成"永远看着是 PASS"，
+# 也就是**掉卡判定的守卫整组失效**。按 id 取就不会再被后来的判定顶掉。
+declare -A ST_OF=()
+result_add() { LAST_ID="$1"; LAST_STATUS="$3"; ST_OF["$1"]="$3"; }
+st_of() { printf '%s' "${ST_OF[${1}]:-}"; }
+reset_results() { LAST_ID=""; LAST_STATUS=""; ST_OF=(); }
 metric_add() { :; }
 
 KLB_TOOLS="$TMP/tools-empty"; mkdir -p "$KLB_TOOLS"    # 故意不往里放 gpu_burn
@@ -258,16 +266,19 @@ GPU_USABLE=1
 
 # ---- 掉卡：三条证据同时成立 ----
 seed_gpu 3 715 109
-FAKE_CARDS=0 LAST_STATUS=""; export FAKE_CARDS
+reset_results; FAKE_CARDS=0; export FAKE_CARDS
 gpu_stress 3600 >/dev/null
-check "卡掉线（99% 采样读不到 + 进度停滞 + 测完认不到卡）-> FAIL" "FAIL" "$LAST_STATUS"
+check "卡掉线（99% 采样读不到 + 进度停滞 + 测完认不到卡）-> FAIL" "FAIL" "$(st_of stress_gpu)"
 
 # ---- 健康：一模一样的编排，结论必须是 PASS ----
 seed_gpu 125 0 81 940 5231 18877 29241
 FAKE_CARDS=1; export FAKE_CARDS
-LAST_STATUS=""
+reset_results
 gpu_stress 3600 >/dev/null
-check "好机器（采样齐、进度一直涨、卡还在）-> PASS" "PASS" "$LAST_STATUS"
+check "好机器（采样齐、进度一直涨、卡还在）-> PASS" "PASS" "$(st_of stress_gpu)"
+# 顺带把 1.9.0 那条新判定钉住：满载读数要单独出一条结论，而且
+# **没设阈值时绝不能判 FAIL** —— 不同型号的卡满载频率差一倍是常态。
+check "满载运行状态要单独记一条（不能混进 stress_gpu 里）" "PASS" "$(st_of check_gpu_load)"
 
 # ---- 红线：认不出 gpu_burn 的日志格式时，不许升级成 FAIL ----
 #
@@ -283,9 +294,27 @@ printf 'some other gpu tool\nno progress lines at all\n' > "$STRESS_LOG_DIR/gpu-
   for ((i=0; i<30; i++)); do echo "02:19:0$((i%10)),No devices were found"; done
 } > "$RUN_DIR/gpu_metrics.csv"
 FAKE_CARDS=1; export FAKE_CARDS
-LAST_STATUS=""
+reset_results
 gpu_stress 3600 >/dev/null
-check "读不出进度格式 + 30% 采样丢失 -> WARN，不许判 FAIL" "WARN" "$LAST_STATUS"
+check "读不出进度格式 + 30% 采样丢失 -> WARN，不许判 FAIL" "WARN" "$(st_of stress_gpu)"
+
+# ---- 满载读数**只报不判**：任何数字都不许把它变成 WARN/FAIL ----
+#
+# 这一条守的是这个项目的一条硬规矩：**性能数字不参与合格判定。**
+# 不同型号的卡满载频率从 1400MHz 到 2700MHz 都有，而这张盘是无人值守跑的，
+# 没有任何地方能拿到"这台机器应该跑到多少"。凭空定一个数去判，
+# 就是拿我们自己编的标准去卡客户的机器。
+#
+# 这里故意喂一组"看着很低"的频率（最低 940MHz），结论必须仍然是 PASS。
+seed_gpu 125 0 81 940 5231 18877 29241
+FAKE_CARDS=1; export FAKE_CARDS
+reset_results
+gpu_stress 3600 >/dev/null
+check "满载读数偏低也只报不判（性能数字不参与合格判定）" "PASS" "$(st_of check_gpu_load)"
+check "压测本身没出错，stress_gpu 也是 PASS" "PASS" "$(st_of stress_gpu)"
+# 反面：这一项**不许**产生 WARN 或 FAIL，任何状态都只能是 PASS 或 SKIP
+check "满载状态那一项只可能是 PASS 或 SKIP" "yes" \
+      "$(case "$(st_of check_gpu_load)" in PASS|SKIP) echo yes ;; *) echo no ;; esac)"
 
 # ================================================================
 echo

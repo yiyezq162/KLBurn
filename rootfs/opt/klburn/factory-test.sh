@@ -21,6 +21,8 @@ source "$KLB_ROOT/lib/storage.sh"
 source "$KLB_ROOT/lib/collect.sh"
 source "$KLB_ROOT/lib/network.sh"
 source "$KLB_ROOT/lib/gpu.sh"
+source "$KLB_ROOT/lib/conformance.sh"
+source "$KLB_ROOT/lib/bench.sh"
 source "$KLB_ROOT/lib/stress.sh"
 source "$KLB_ROOT/lib/verify.sh"
 
@@ -166,6 +168,10 @@ select_duration
 # ---------------------------------------------------------------- 采集
 scan_disks
 collect_all
+# 配置一致性核对：读的全是 collect_all 已经落盘的文件，自己不跑耗时命令，
+# 所以紧跟在它后面。放在配置核对面板**之前** —— 现场那一屏就能看到
+# "内存混插了""序列号对不上"，不用等三十分钟压测跑完。
+conformance_all
 
 # ---------------------------------------------------------------- 配置核对
 # 采集完、压测开始前，先让现场把"这台机器到底装了什么"过一遍。
@@ -216,10 +222,28 @@ fi
 TEST_START_TS="$(date '+%Y-%m-%d %H:%M:%S')"
 TEST_START_EPOCH="$(date +%s)"
 
+# 时间预算在这里就定下来并打出来。
+#
+# ⚠️ **这一行必须排在性能基准之前。**它是"这一轮打算怎么跑"的声明，
+# 不是某个阶段的结果 —— 现场操作员一进来就该看到，而不是等基准跑完几分钟
+# 才知道压测要多久。1.9.0 一度把它放在 bench 之后，于是
+# tests/e2e-qemu.sh 用它当锚点判档位时永远等超时（那边等 420 秒，
+# 而基准阶段本身就可能跑更久）。
 burn_label="CPU + MEMORY"
 (( gpu_will_run )) && burn_label="$burn_label + GPU"
 info "Time budget: $burn_label concurrently for $(fmt_dur "$DURATION_SECONDS")$(
   (( DISK_CONFIRMED == 1 )) && printf '; DISK separately for %s' "$(fmt_dur "$DSK_SECS")")"
+
+# ---------------------------------------------------------------- 性能基准
+# **必须排在老化压测之前。**基准量的是"这台机器跑得有多快"，要在机器空闲时测；
+# 和满载压测同时跑出来的带宽/算力数字没有任何参考价值（见 lib/bench.sh 顶部）。
+#
+# 盘里没放对应的基准程序时，每一项都干净地判 SKIP，整段几秒钟就过去了 ——
+# 所以不需要额外的开关，也不影响不做性能核对的那些机器。
+section "PHASE 2/5  PERFORMANCE BASELINE (idle machine)"
+BENCH_START_EPOCH="$(date +%s)"
+bench_all "$DISK_CONFIRMED"
+BENCH_SECS=$(( $(date +%s) - BENCH_START_EPOCH ))
 
 # ---------------------------------------------------------------- 压测：CPU / 内存 / GPU 并发
 stress_init
@@ -234,7 +258,7 @@ console_quiet_on
 # 逐核频率/温度/功耗的采样。只留档不判定，起不来就当没有（见 stress.sh）。
 turbostat_start
 
-section "PHASE 2/4  BURN-IN: $burn_label CONCURRENTLY  ($(fmt_dur "$DURATION_SECONDS"))"
+section "PHASE 3/5  BURN-IN: $burn_label CONCURRENTLY  ($(fmt_dur "$DURATION_SECONDS"))"
 
 BURN_PIDS=()
 ( stress_cpu "$CPU_SECS" ) & BURN_PIDS+=("$!")
@@ -311,7 +335,8 @@ cat > "$RUN_DIR/meta.json" <<EOF
   "kernel":         "$(uname -r)",
   "budget": {
     "cpu_secs": ${CPU_SECS}, "mem_secs": ${MEM_SECS},
-    "disk_secs": ${DSK_SECS}, "gpu_secs": ${GPU_SECS}
+    "disk_secs": ${DSK_SECS}, "gpu_secs": ${GPU_SECS},
+    "bench_secs": ${BENCH_SECS:-0}
   },
   "disk_tested":    "${DISK_TESTED_LIST}",
   "disk_confirmed": ${DISK_CONFIRMED},
@@ -319,6 +344,13 @@ cat > "$RUN_DIR/meta.json" <<EOF
     "cpu_temp_warn":  ${CPU_TEMP_WARN},  "cpu_temp_fail":  ${CPU_TEMP_FAIL},
     "gpu_temp_warn":  ${GPU_TEMP_WARN},  "gpu_temp_fail":  ${GPU_TEMP_FAIL},
     "disk_temp_warn": ${DISK_TEMP_WARN}, "disk_temp_fail": ${DISK_TEMP_FAIL}
+  },
+  "bench_params": {
+    "linpack_runs":  "${BENCH_LINPACK_RUNS:-4}",
+    "linpack_n":     "${BENCH_LINPACK_N:-}",
+    "disk_qd_sata":  "${BENCH_DISK_QD_SATA:-32}",
+    "disk_qd_nvme":  "${BENCH_DISK_QD_NVME:-128}",
+    "disk_secs":     "${BENCH_DISK_SECS:-20}"
   },
   "data_partition": "${DATA_DEV:-none}",
   "clock_synced":   ${CLOCK_SYNCED},

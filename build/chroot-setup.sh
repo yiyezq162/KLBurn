@@ -272,6 +272,27 @@ NVIDIA_VERSION="${NVIDIA_VERSION:-}"
 # 源码的 git commit（由 build-iso.sh 追加进暂存的 config.sh 后传到这里）。
 # 版本号靠人记得 bump，commit hash 是构建脚本自己取的，骗不了人。
 GIT_COMMIT="${GIT_COMMIT:-unknown}"
+
+# ================================================================
+# 性能基准的**测试参数**（不是合格线）
+# ================================================================
+# ⚠️ 这里**没有、也不会有"阈值 / 门槛 / 参考值 / 预期值"这类东西**。
+#
+# 这张盘是插上就跑、无人值守的：现场没有人、也没有地方去填"这台机器的带宽
+# 应该是多少"。凭空写一个数进来，等于我们替客户定了一个他没定过的标准，
+# 再拿它去判一台机器合不合格 —— 那个数字从哪来的谁也说不清。
+#
+# **报告里只有实测值。**谁做验收，谁拿自己那份要求去对。
+#
+# 下面这几个是"怎么测"的参数（跑多久、用多大队列深度），不是"该达到多少"。
+BENCH_LINPACK_RUNS="${BENCH_LINPACK_RUNS:-4}"
+# 算力测试的矩阵规模。留空 = 按内存容量自动推算（上限 40000 阶，四次约一分钟）
+BENCH_LINPACK_N="${BENCH_LINPACK_N:-}"
+# 硬盘带宽的队列深度与每个方向跑多少秒。
+# 32 / 128 是 SATA / NVMe 上通行的取法，不是某一家的要求。
+BENCH_DISK_QD_SATA="${BENCH_DISK_QD_SATA:-32}"
+BENCH_DISK_QD_NVME="${BENCH_DISK_QD_NVME:-128}"
+BENCH_DISK_SECS="${BENCH_DISK_SECS:-20}"
 EOF
 
 # ---------------------------------------------------------------- vendor: 阵列卡管理工具
@@ -473,6 +494,58 @@ if [[ "${INCLUDE_NVIDIA:-0}" == "1" ]]; then
   # headers / 编译器只在构建期需要，装完就删
   apt-get purge -y -qq "linux-headers-${KVER}" >/dev/null 2>&1 || true
   apt-get autoremove -y -qq >/dev/null 2>&1 || true
+fi
+
+# ---------------------------------------------------------------- vendor: 性能基准程序
+# 验收单点名的那几个基准程序都不在 Ubuntu 源里，也都不能重新分发到我们的仓库里：
+#
+#   bandwidthTest / p2pBandwidthLatencyTest   NVIDIA cuda-samples，BSD-3，需自行编译
+#   xlinpack_xeon64                           Intel Optimized LINPACK Benchmark
+#   mlc / mlc_avx512                          Intel Memory Latency Checker
+#
+# 所以走和阵列卡工具一样的路子：**放进 vendor/bench/ 就带上，不放就不带**，
+# 不放时每一项干净地判 SKIP（lib/bench.sh），绝不判 FAIL。
+#
+# ⚠️ 和阵列卡工具不同的是**整个子目录原样铺进去**，不是只捞一个可执行文件：
+#    xlinpack_xeon64 要同目录的 libiomp5.so 才跑得起来，只捞二进制的话
+#    现场是一行 "error while loading shared libraries"，
+#    而那行报错落在日志里看着像"这台机器有问题"。
+#    lib/bench.sh 的 bench_run() 会把程序自己那个目录加进 LD_LIBRARY_PATH。
+if [[ -d "$STAGE/vendor/bench" ]]; then
+  bench_n=0
+  for bdir in "$STAGE/vendor/bench"/*/; do
+    [[ -d "$bdir" ]] || continue
+    bname="$(basename "$bdir")"
+    mkdir -p "/opt/klburn/tools/bench/$bname"
+    cp -a "$bdir." "/opt/klburn/tools/bench/$bname/"
+    find "/opt/klburn/tools/bench/$bname" -type f \
+         ! -name '*.so' ! -name '*.so.*' ! -name '*.txt' ! -name '*.md' \
+         -exec chmod 0755 {} + 2>/dev/null || true
+    bench_n=$(( bench_n + 1 ))
+    say "性能基准程序已安装: bench/$bname"
+  done
+  if (( bench_n == 0 )); then
+    say "vendor/bench/ 是空的，性能基准项会全部记为 SKIP"
+  else
+    # 动态依赖自检，和阵列卡工具那边同一个道理：缺一个 .so 的表现是
+    # 现场跑起来什么都不输出，判定只看到"没测出结果"，没人知道真正的原因。
+    # 这里只警告不中断 —— 基准程序是可选件，缺了不该让整张盘出不来。
+    while IFS= read -r bexe; do
+      [[ -x "$bexe" ]] || continue
+      readelf -d "$bexe" 2>/dev/null | grep -q NEEDED || continue
+      miss=""
+      ldcache="$(ldconfig -p 2>/dev/null | awk 'NR>1{print $1}')"
+      while IFS= read -r lib; do
+        [[ -n "$lib" ]] || continue
+        # 程序自己目录里带的 .so 也算数（运行时会加进 LD_LIBRARY_PATH）
+        [[ -e "$(dirname "$bexe")/$lib" ]] && continue
+        printf '%s\n' "$ldcache" | grep -qxF "$lib" || miss="$miss $lib"
+      done < <(readelf -d "$bexe" 2>/dev/null | sed -nE 's/.*NEEDED.*\[(.+)\]/\1/p')
+      [[ -n "$miss" ]] && say "WARN: ${bexe#/opt/klburn/tools/} 缺少依赖库:$miss（该基准项在现场会跑不出结果）"
+    done < <(find /opt/klburn/tools/bench -type f -perm -u+x 2>/dev/null)
+  fi
+else
+  say "vendor/bench/ 不存在，性能基准项会全部记为 SKIP（不影响整机结论）"
 fi
 
 # ---------------------------------------------------------------- 清理多余内核

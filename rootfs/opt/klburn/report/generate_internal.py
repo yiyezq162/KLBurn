@@ -125,6 +125,20 @@ TOOL_PROVIDES = {
     "sg_ses":     ("机框 / 背板（SES）的槽位与风扇状态", "sg3-utils"),
     "cpuid":      ("CPU 的特性位与步进信息", "cpuid"),
     "rdmsr":      ("CPU 的功耗 / 温度 / 降频寄存器读数", "msr-tools"),
+    # 性能基准（1.9.0 新增）。这几个都不在 Ubuntu 源里、也不能重新分发，
+    # 走 vendor/bench/ 放进去才带上；没放时对应的判定是 SKIP，不影响整机结论。
+    "bandwidthTest": ("主机与显存之间、以及显存内部的数据传输带宽实测值",
+                      "NVIDIA cuda-samples 里的 bandwidthTest（需放进构建期的 vendor/bench/）"),
+    "p2pBandwidthLatencyTest":
+                     ("显卡两两之间的双向互联带宽矩阵",
+                      "NVIDIA cuda-samples 里的 p2pBandwidthLatencyTest（需放进构建期的 vendor/bench/）"),
+    "xlinpack_xeon64": ("CPU 全核浮点算力（GFlops）",
+                        "Intel Optimized LINPACK Benchmark（需放进构建期的 vendor/bench/）"),
+    "mlc":        ("内存峰值读带宽（MB/s）",
+                   "Intel Memory Latency Checker（需放进构建期的 vendor/bench/）"),
+    "mlc_avx512": ("内存峰值读带宽（MB/s）",
+                   "Intel Memory Latency Checker 的 AVX-512 版本（需放进构建期的 vendor/bench/）"),
+    "fio":        ("硬盘的顺序 / 随机读写带宽与 IOPS", "fio"),
 }
 
 
@@ -420,6 +434,55 @@ RAW_INDEX = (
      "想知道 fio 到底按什么参数跑的时候", "job 文件里是完整的参数"),
     (r"^stress/.*$", "压测日志", "压测过程的其它日志",
      "上面几类都不是的时候", "按文件名对应到具体的压测项"),
+
+    # ---------------- 配置一致性核对（1.9.0 新增）----------------
+    (r"^gpu-uniform\.txt$", "GPU", "逐卡一行的「型号, 显示 BIOS 版本」",
+     "显卡一致性判 WARN 时", "两列各自去重，多于一种就是不一致"),
+    (r"^gpu-ecc\.csv$", "GPU",
+     "逐卡的显存 ECC 计数（本次上电以来 / 出厂累计，各含可纠正与不可纠正）",
+     "显存 ECC 判 WARN/FAIL 时",
+     "列是 index,volatile_ce,volatile_ue,aggregate_ce,aggregate_ue；"
+     "`[N/A]` 表示该型号不支持 ECC，**不是 0**"),
+    (r"^gpu-remapped-rows\.csv$", "GPU",
+     "逐卡的显存行重映射状态（可纠正 / 不可纠正 / 待生效 / 是否失败）",
+     "显存行重映射判 WARN/FAIL 时",
+     "failure=Yes 是备用行用尽（按 NVIDIA 口径要返修）；pending=Yes 只是需要重启"),
+    (r"^net-pci-addresses\.txt$", "网络",
+     "系统里当前存在的网口对应的 PCI 总线地址",
+     "核对板载网口是不是在 BIOS 里被禁用了时",
+     "和 deep/dmidecode-onboard.txt 里的 Bus Address 对照，能对上就说明这个口是活的"),
+    (r"^nic-drivers\.txt$", "网络", "每个网口用的是哪个驱动（口名|驱动名）",
+     "虚拟设备核对判 WARN 时", "virtio_net / vmxnet3 / hv_netvsc 这几个是虚拟网卡"),
+    (r"^deep/dmidecode-onboard\.txt$", "网络",
+     "主板上焊死的板载设备清单及其 PCI 地址（DMI type 41）",
+     "核对板载网口 / 板载阵列卡是否被禁用时",
+     "Type: Ethernet 的那几块就是板载网口；Bus Address 拿去和上面那份对照"),
+    (r"^dmesg-boot-for-profile\.txt$", "内核日志",
+     "为读平台设置临时补采的一份开机内核日志",
+     "平台关键设置那一项判 SKIP、想知道为什么读不到时",
+     "搜 x2apic / DMAR / AMD-Vi —— 内核会明说这几项是开是关"),
+
+    # ---------------- 性能基准（1.9.0 新增）----------------
+    (r"^bench/gpu-bandwidth.*\.log$", "性能基准",
+     "显卡与主机之间、以及显存内部的数据传输带宽实测输出",
+     "显卡数据传输带宽判 FAIL 时",
+     "三段各取自己的表头单位（有的版本是 MB/s、有的是 GB/s），别直接比数字"),
+    (r"^bench/gpu-p2p\.log$", "性能基准", "显卡两两之间的双向互联带宽矩阵",
+     "显卡间互联带宽判 FAIL 时",
+     "看 Bidirectional P2P=Enabled 那张矩阵，对角线是卡自己不算"),
+    (r"^bench/cpu-linpack\.log$", "性能基准", "CPU 浮点算力测试的完整输出",
+     "CPU 浮点算力判 FAIL 时",
+     "**看 Performance Summary 那张表的 Average 列**；上面那张表第 4 列是秒不是算力"),
+    (r"^bench/linpack-input\.txt$", "性能基准", "本次算力测试用的问题规模等参数",
+     "想复现或调整算力测试时", "问题规模是按内存容量自动推算的，可在配置里写死"),
+    (r"^bench/mem-bandwidth\.log$", "性能基准", "内存峰值读带宽的实测输出",
+     "内存读取带宽判 FAIL 时", "看 ALL Reads 那一行，单位 MB/s"),
+    (r"^bench/fio-.*\.json$", "性能基准",
+     "逐盘 128KB 顺序读 / 顺序写的带宽结果（客户验收单的口径）",
+     "硬盘读写带宽判 FAIL 时",
+     "job 名就是验收单上的写法（libaio_read_128k_32_1），bw 字段单位是 KiB/s"),
+    (r"^bench/.*$", "性能基准", "性能基准的其它日志与作业文件",
+     "上面几类都不是的时候", "按文件名对应到具体的基准项"),
 )
 
 _RAW_INDEX_RE = tuple((re.compile(p), g, w, wh, h) for p, g, w, wh, h in RAW_INDEX)
@@ -435,7 +498,7 @@ def classify_raw(rel):
 
 
 RAW_GROUP_ORDER = ("本次运行", "系统", "CPU 与内存", "存储", "网络", "GPU",
-                   "BMC", "内核日志", "压测日志", "未分类")
+                   "BMC", "内核日志", "性能基准", "压测日志", "未分类")
 
 
 # ============================================================ 数据层
@@ -1293,6 +1356,24 @@ def findings_html(items):
     return "".join(out)
 
 
+def sub_numberer(sec):
+    """<h3> 的二级编号器。**别再写死编号了。**
+
+    五、七两节里的小节全是"有数据才画"的：没显卡就没有 GPU 那一段、
+    没跑硬盘压测就没有硬盘那一段。编号写死的话，缺一段就断一个号 ——
+    读的人第一反应是"报告是不是漏了一节"。
+    交付报告那边早就是动态编号（见 generate_report.py 的 SUB），
+    内部这份一直没跟上，1.9.0 补齐。
+    """
+    n = [0]
+
+    def sub(title):
+        n[0] += 1
+        return "<h3>%d.%d %s</h3>" % (sec, n[0], title)
+
+    return sub
+
+
 def nav_html():
     return '<nav class="toc">%s</nav>' % "".join(
         '<a href="#%s">%s</a>' % (sid, E(title)) for sid, title, _lead in SECTIONS)
@@ -1470,26 +1551,27 @@ def build_internal_html(d):
 
     # ================================================ 五、压测过程
     SEC("s5")
+    S5 = sub_numberer(5)
     temps, freqs, powers = d.sys_series()
     pkg = d.cpu_pkg_series()
     if pkg:
-        A("<h3>5.1 逐颗 CPU 封装温度</h3>")
+        A(S5("逐颗 CPU 封装温度"))
         A('<p class="sub">客户报告只画一条整机最高温。逐颗分开画，才看得出'
           "是不是某一颗的散热器没装好 —— 这是双路机最常见的隐性问题。</p>")
         A(svg_line_chart([("CPU%d" % i, pkg[i]) for i in sorted(pkg)],
                          y_label="°C", y_suffix="°C"))
     if temps:
-        A("<h3>5.2 整机最高 CPU 温度</h3>")
+        A(S5("整机最高 CPU 温度"))
         A(svg_line_chart([("CPU 最高温", temps)], y_label="°C", y_suffix="°C"))
     if freqs:
-        A("<h3>5.3 全核平均频率</h3>")
+        A(S5("全核平均频率"))
         A(svg_line_chart([("平均频率", freqs)], y_label="MHz", y_suffix="MHz"))
     if powers:
-        A("<h3>5.4 CPU 封装功耗</h3>")
+        A(S5("CPU 封装功耗"))
         A(svg_line_chart([("封装功耗", powers)], y_label="W", y_suffix="W"))
     load, memused, memtotal = d.sys_extra_series()
     if load or memused:
-        A("<h3>5.5 系统负载与内存占用</h3>")
+        A(S5("系统负载与内存占用"))
         A('<p class="sub">用来核对压测强度：负载没上去 = 压测没真跑满；'
           "内存占用曲线能看出内存压测吃到了多少、离 OOM 还有多远。</p>")
         if load:
@@ -1503,7 +1585,7 @@ def build_internal_html(d):
 
     ecc_ce, ecc_ue = d.ecc_series()
     if ecc_ce or ecc_ue:
-        A("<h3>5.6 内存 ECC 计数随时间的变化</h3>")
+        A(S5("内存 ECC 计数随时间的变化"))
         A('<p class="sub">第六节那张表给的是压测前后的<b>差值</b>，只能回答"涨了多少"。'
           "这条曲线回答的是<b>什么时候开始涨</b> —— 而这两件事的含义完全不同："
           "一上来就涨多半是这条内存本身，烤热十几分钟之后才开始涨则更像散热或供电压不住。"
@@ -1517,7 +1599,7 @@ def build_internal_html(d):
 
     gfull = d.gpu_full_series()
     if gfull:
-        A("<h3>5.7 GPU 频率 / 利用率 / 显存占用</h3>")
+        A(S5("GPU 频率 / 利用率 / 显存占用"))
         A('<p class="sub">利用率没到 100% 说明压测没喂满，出来的温度功耗数字要打折看。</p>')
         for key, label, suf in (("clock", "SM 频率", "MHz"), ("util", "利用率", "%"),
                                 ("mem", "显存占用", "MB")):
@@ -1529,10 +1611,10 @@ def build_internal_html(d):
 
     fio = d.fio_results()
     if fio:
-        A("<h3>5.8 硬盘性能数据</h3>")
+        A(S5("硬盘性能数据"))
         A('<div class="dense">%s</div>' % table(fio))
 
-    A("<h3>5.9 压测日志原文</h3>")
+    A(S5("压测日志原文"))
     for title, rel in (("CPU 压测", "stress/cpu-stress-ng.log"),
                        ("内存压测", "stress/mem-stressapptest.log"),
                        ("内存压测（退到 stress-ng --vm）", "stress/mem-stress-ng.log"),
@@ -1582,6 +1664,7 @@ def build_internal_html(d):
         A('<p class="muted">压测前后没有筛出任何硬件错误行，BMC 也没有新增事件。</p>')
 
     # ================================================ 七、深度硬件数据
+    S7 = sub_numberer(7)
     SEC("s7")
     got_any = False
 
@@ -1589,7 +1672,7 @@ def build_internal_html(d):
     deltas = d.counter_deltas()
     if deltas is not None:
         got_any = True
-        A("<h3>7.1 计数器：压测前 → 压测后</h3>")
+        A(S7("计数器：压测前 → 压测后"))
         A('<p class="sub">这三样都是内核自带的计数器，判定看的是<b>差值</b>而不是绝对值 ——'
           "一台用过的机器带着历史计数是正常的，我们要回答的是「这一轮压测把什么逼出来了」。"
           "<b>热节流</b>那一行尤其值得看：散热不行但温度没到告警线的机器，"
@@ -1602,7 +1685,7 @@ def build_internal_html(d):
     ecc_rows = d.ecc_table()
     if ecc_rows:
         got_any = True
-        A("<h3>7.2 逐条 DIMM 的 ECC 计数</h3>")
+        A(S7("逐条 DIMM 的 ECC 计数"))
         A('<p class="sub">按 BIOS 给的插槽标签归位，可以直接对到主板丝印上。'
           "可纠正错误持续增长是内存条早期退化最直接的信号 ——"
           "机器现在照样能跑，但装到客户机房里会越来越频繁。</p>")
@@ -1611,7 +1694,7 @@ def build_internal_html(d):
     fw_rows = d.fwupd_devices()
     if fw_rows:
         got_any = True
-        A("<h3>7.3 全机固件版本一览</h3>")
+        A(S7("全机固件版本一览"))
         A('<p class="sub">核对一批机器的固件版本齐不齐时用这张表。'
           "离线也读得到本机现有版本，只有「有没有新版」需要联网。</p>")
         A('<div class="dense">%s</div>' % table(fw_rows))
@@ -1619,7 +1702,7 @@ def build_internal_html(d):
     lldp_rows = d.lldp_neighbors()
     if lldp_rows:
         got_any = True
-        A("<h3>7.4 网口对端（LLDP 邻居）</h3>")
+        A(S7("网口对端（LLDP 邻居）"))
         A('<p class="sub">这个口接在哪台交换机的哪个口 —— 现场排线错误一眼就看出来。'
           "采集用的是<b>接收模式</b>，我们不往对端发任何通告。</p>")
         A('<div class="dense">%s</div>' % table(lldp_rows))
@@ -1627,14 +1710,14 @@ def build_internal_html(d):
     optics = d.nic_optics()
     if optics:
         got_any = True
-        A("<h3>7.5 光模块</h3>")
+        A(S7("光模块"))
         A('<p class="sub">只有插着模块时才读得到。光口机器出问题时，'
           "收发光功率是最值钱的一份数据 —— 客户报告里没有它。</p>")
         A('<div class="dense">%s</div>' % table(optics))
     inv = d.gpu_inventory()
     if inv:
         got_any = True
-        A("<h3>7.6 显卡逐卡清单（压测后读的 PCIe 链路）</h3>")
+        A(S7("显卡逐卡清单（压测后读的 PCIe 链路）"))
         A('<div class="dense">%s</div>' % table(
             [OrderedDict((k, v) for k, v in row.items()) for row in inv]))
     for title, rel in (("PCIe 链路详情", "lspci-vv.txt"),

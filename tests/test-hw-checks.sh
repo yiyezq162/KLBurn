@@ -27,6 +27,8 @@ source "$LIB/collect.sh"
 source "$LIB/network.sh"
 # shellcheck source=/dev/null
 source "$LIB/verify.sh"
+# shellcheck source=/dev/null
+source "$LIB/conformance.sh"
 
 PASS=0; FAIL=0
 ok()   { printf '  \033[32mOK\033[0m   %s\n' "$1"; PASS=$((PASS+1)); }
@@ -2156,7 +2158,14 @@ RT="$(cd "$LIB/.." && pwd)"
 # 工具名（因为只有它咬过人），于是「stressapptest 测试 246632MB」「或 ethtool
 # 读不到速率」这类文案一路印到客户手上 —— 判据和 storcli 那条一模一样，
 # 只是没人把词加进来。工具名一律按 §2-1「盘里带了什么工具」处理。
-FORBIDDEN='测试盘|盘内|精简版|构建目录|重新出盘|vendor/|storcli|README|源码|commit|ISO 里|打包进|未正确安装|stressapptest|stress-ng|gpu_burn|nvidia-smi|dmidecode|ethtool|smartctl|ipmitool'
+# ⚠️ 工具名这一组**要成组维护，不要只加"咬过人的那个"**。
+#
+# 1.8.4 把工具名加进来时是一个一个凭印象加的，于是 `fio` 漏了 ——
+# 而 stress_disk 里两句「fio 报告 I/O 错误」「fio 异常退出」就这么一直
+# 大摇大摆地进客户报告，直到 1.9.0 才被发现。判据对每个工具名都一样：
+# **盘里带的是哪个工具，客户不需要知道**（docs/report-policy.md §6-2）。
+# 加新工具（尤其是 vendor/ 里的闭源件）时，同一批就把名字加到这里。
+FORBIDDEN='测试盘|盘内|精简版|构建目录|重新出盘|vendor/|storcli|README|源码|commit|ISO 里|打包进|未正确安装|stressapptest|stress-ng|gpu_burn|nvidia-smi|dmidecode|ethtool|smartctl|ipmitool|fio|lspci|lsblk|numactl|turbostat|weasyprint|mstflint|lldpctl|rasdaemon|edac-util|bandwidthTest|p2pBandwidth|xlinpack|mlc_avx512'
 
 join_continuations() {
   awk '{
@@ -2425,6 +2434,49 @@ for fn in collect_system check_memory_capacity check_pcie_link collect_sensors c
         "yes" "$(declare -f collect_all | grep -q "\b${fn}\b" && echo yes || echo no)"
 done
 
+# 上面那两组必须**有能力变红**：这个项目栽过"从没红过的测试等于没写"。
+# 拿一个真不存在的函数名喂给同一条判据，它必须给出 no。
+check "调用链守卫本身抓得住漏掉的函数（否则上面几十条都是摆设）" "no" \
+      "$(declare -f collect_all | grep -q '\bcheck_this_never_exists\b' && echo yes || echo no)"
+
+# 1.9.0 新增的两个汇总入口，同一条道理。
+# ⚠️ 这两组比上面那两组还容易漏：它们各是一整个新文件，加一条判定时很自然
+#    只顾着写函数，忘了它得先被调用一次才会产生结论。
+# bench.sh / gpu.sh 在这里才 source：本套件前面几百条断言不需要它们，
+# 提前引入反而可能顶掉某些用例自己搭的桩。
+# shellcheck source=/dev/null
+source "$LIB/bench.sh"
+# shellcheck source=/dev/null
+source "$LIB/gpu.sh"
+for fn in check_dimm_uniform check_nic_uniform check_disk_uniform check_gpu_uniform \
+          check_gpu_ecc check_gpu_remap check_bios_profile check_virtual_dev \
+          check_sn_consistency; do
+  check "conformance_all 必须调用 $fn" \
+        "yes" "$(declare -f conformance_all | grep -q "\b${fn}\b" && echo yes || echo no)"
+done
+for fn in bench_init bench_gpu_bandwidth bench_gpu_p2p bench_cpu_linpack \
+          bench_mem_bandwidth bench_disk_bandwidth; do
+  check "bench_all 必须调用 $fn" \
+        "yes" "$(declare -f bench_all | grep -q "\b${fn}\b" && echo yes || echo no)"
+done
+# 满载运行状态那条挂在 gpu_stress 收尾处，不在任何汇总入口里 —— 单独钉一下，
+# 否则它掉出去了没有任何测试会红（stress_gpu 自己的断言只看 stress_gpu）。
+check "gpu_stress 必须在收尾时调用 check_gpu_load_profile" \
+      "yes" "$(declare -f gpu_stress | grep -q '\bcheck_gpu_load_profile\b' && echo yes || echo no)"
+
+# factory-test.sh 是脚本不是函数，declare -f 看不到它 —— 直接扫源码，
+# 确认这两个汇总入口真的被调用过（少一个 = 整块判定从报告里消失）。
+FT="$(cd "$LIB/.." && pwd)/factory-test.sh"
+for fn in conformance_all bench_all; do
+  check "factory-test.sh 必须调用 $fn" "yes" \
+        "$(grep -qE "^[[:space:]]*${fn}( |\$)" "$FT" && echo yes || echo no)"
+done
+# 基准要在压测之前跑：和满载压测同时跑出来的带宽/算力数字没有任何参考价值
+check "bench_all 必须排在并发压测之前（空闲时测才有意义）" "yes" \
+      "$(if [[ "$(grep -n '^[[:space:]]*bench_all' "$FT" | head -1 | cut -d: -f1)" \
+               -lt "$(grep -n 'stress_cpu "\$CPU_SECS"' "$FT" | head -1 | cut -d: -f1)" ]]; \
+         then echo yes; else echo no; fi)"
+
 # 顺序也有讲究，写死几条最容易被改坏的：
 chain="$(declare -f collect_all)"
 check "net_link_up_all 必须排在 collect_nic 之前（口是 down 的时候 ethtool 报的链路状态是假的）" \
@@ -2574,6 +2626,242 @@ check "results.jsonl 压根不存在 -> 不许判 PASS" \
 printf '%s\n' '{"id":"a","status":"PASS"' > "$TMP/v-broken.jsonl"   # 少个右括号
 check "results.jsonl 解析不了 -> 不许判 PASS（写到一半断电就是这样）" \
       "FAIL" "$(verdict_of "$TMP/v-broken.jsonl")"
+
+# ================================================================
+echo
+echo "=== 配置一致性：内存条字段与占位符 ==="
+cat > "$TMP/conf-mem.txt" <<'EOF'
+Handle 0x0001, DMI type 17, 92 bytes
+Memory Device
+	Size: 32 GB
+	Locator: CPU0_DIMMA0
+	Manufacturer: Hynix
+	Part Number: HMCG88AGBRA123N
+	Configured Memory Speed: 4800 MT/s
+	Volatile Size: 32 GB
+
+Handle 0x0002, DMI type 17, 92 bytes
+Memory Device
+	Size: 32 GB
+	Locator: CPU0_DIMMB0
+	Manufacturer: Hynix
+	Part Number: HMCG88AGBRA123N
+	Configured Memory Speed: 4800 MT/s
+	Volatile Size: 32 GB
+
+Handle 0x0003, DMI type 17, 92 bytes
+Memory Device
+	Size: No Module Installed
+	Locator: CPU0_DIMMC0
+	Manufacturer: NO DIMM
+	Part Number: NO DIMM
+EOF
+check "只数装了条的槽位（空槽的 Part Number 不算一种型号）" "1" \
+      "$(dmi_dimm_field "$TMP/conf-mem.txt" "Part Number" | count_uniq)"
+check "字段名带空格也要取得对（Configured Memory Speed）" "1" \
+      "$(dmi_dimm_field "$TMP/conf-mem.txt" "Configured Memory Speed" | count_uniq)"
+check "Volatile Size 那行不能被当成 Size" "2" \
+      "$(dmi_dimm_field "$TMP/conf-mem.txt" "Locator" | grep -c .)"
+
+# 占位符必须先过滤再去重：不过滤的话，BIOS 没填 PN 的机器会被判成"混插"
+cat > "$TMP/conf-mem-bogus.txt" <<'EOF'
+Handle 0x0001, DMI type 17, 92 bytes
+Memory Device
+	Size: 32 GB
+	Locator: A1
+	Part Number: HMCG88AGBRA123N
+
+Handle 0x0002, DMI type 17, 92 bytes
+Memory Device
+	Size: 32 GB
+	Locator: A2
+	Part Number: Not Specified
+EOF
+check "占位符要先过滤掉，否则一台内存一致的机器会被判成混插" "1" \
+      "$(dmi_dimm_field "$TMP/conf-mem-bogus.txt" "Part Number" | count_uniq)"
+
+echo
+echo "=== 平台设置：x2APIC / VT-d / 子 NUMA 划分 ==="
+printf 'x2apic: enabled by BIOS, switching to x2apic ops\nSetting APIC routing to cluster x2apic.\n' \
+  > "$TMP/dmesg-x2-on.txt"
+printf 'x2apic disabled by BIOS\nAPIC: Switch to symmetric I/O mode setup\n' \
+  > "$TMP/dmesg-x2-off.txt"
+printf 'Linux version 6.8.0\nnothing about apic here\n' > "$TMP/dmesg-x2-none.txt"
+check "内核说开了 -> enabled"        "enabled"  "$(bios_x2apic_state "$TMP/dmesg-x2-on.txt")"
+check "内核说被 BIOS 关了 -> disabled" "disabled" "$(bios_x2apic_state "$TMP/dmesg-x2-off.txt")"
+check "内核什么都没说 -> unknown，不许猜" "unknown" "$(bios_x2apic_state "$TMP/dmesg-x2-none.txt")"
+check "日志文件不存在 -> unknown"     "unknown"  "$(bios_x2apic_state "$TMP/nope-dmesg.txt")"
+
+# VT-d：sysfs 是第一判据（有设备就是真在工作），dmesg 只在 sysfs 读不到时兜底
+mkdir -p "$TMP/iommu-on/dmar0" "$TMP/iommu-empty"
+printf 'DMAR: IOMMU enabled\n' > "$TMP/dmesg-vtd-on.txt"
+printf 'DMAR: No DMAR devices found\n' > "$TMP/dmesg-vtd-off.txt"
+check "sysfs 里有 IOMMU 设备 -> enabled" "enabled" \
+      "$(bios_vtd_state "$TMP/dmesg-vtd-off.txt" "$TMP/iommu-on")"
+check "sysfs 目录在但是空的 -> disabled" "disabled" \
+      "$(bios_vtd_state "$TMP/dmesg-vtd-off.txt" "$TMP/iommu-empty")"
+check "没有 sysfs 时退回读内核日志" "enabled" \
+      "$(bios_vtd_state "$TMP/dmesg-vtd-on.txt" "$TMP/no-such-dir")"
+check "两边都读不到 -> unknown" "unknown" \
+      "$(bios_vtd_state "$TMP/dmesg-x2-none.txt" "$TMP/no-such-dir")"
+
+check "2 路 2 节点 = 每路 1 个"  "1" "$(numa_per_socket 2 2)"
+check "2 路 8 节点 = 每路 4 个"  "4" "$(numa_per_socket 8 2)"
+check "除不尽时给 0（不许四舍五入出一个假答案）" "0" "$(numa_per_socket 3 2)"
+check "读不到插槽数时给 0"       "0" "$(numa_per_socket 4 0)"
+check "每路 1 个 = 未启用子 NUMA 划分" "disabled" "$(snc_state 1)"
+check "每路 2 个 = SNC2"               "SNC2"     "$(snc_state 2)"
+check "每路 4 个 = SNC4"               "SNC4"     "$(snc_state 4)"
+check "算不出来时 unknown"             "unknown"  "$(snc_state 0)"
+
+echo
+echo "=== 板载网口是不是在 BIOS 里被禁用了 ==="
+cat > "$TMP/type41.txt" <<'EOF'
+Handle 0x0030, DMI type 41, 11 bytes
+Onboard Device
+	Reference Designation: Onboard LAN 1
+	Type: Ethernet
+	Status: Enabled
+	Type Instance: 1
+	Bus Address: 0000:19:00.0
+
+Handle 0x0031, DMI type 41, 11 bytes
+Onboard Device
+	Reference Designation: Onboard LAN 2
+	Type: Ethernet
+	Status: Enabled
+	Type Instance: 2
+	Bus Address: 0000:19:00.1
+
+Handle 0x0032, DMI type 41, 11 bytes
+Onboard Device
+	Reference Designation: Onboard VGA
+	Type: Video
+	Status: Enabled
+	Bus Address: 0000:03:00.0
+EOF
+printf '0000:19:00.0\n0000:65:00.0\n' > "$TMP/netaddrs.txt"
+check "板载网口只认 Type: Ethernet（显卡那条不算）" "2" \
+      "$(onboard_nic_scan "$TMP/type41.txt" "$TMP/netaddrs.txt" | grep -c .)"
+check "系统里能找到的那个口是 active" "1" \
+      "$(onboard_nic_scan "$TMP/type41.txt" "$TMP/netaddrs.txt" | grep -c ' active$')"
+check "找不到的那个口是 inactive（= BIOS 里禁用了）" "1" \
+      "$(onboard_nic_scan "$TMP/type41.txt" "$TMP/netaddrs.txt" | grep -c ' inactive$')"
+: > "$TMP/netaddrs-empty.txt"
+check "一个网口都没有时，板载口全部算 inactive" "2" \
+      "$(onboard_nic_scan "$TMP/type41.txt" "$TMP/netaddrs-empty.txt" | grep -c ' inactive$')"
+check "主板不提供 type 41 时输出空（不是判成禁用）" "0" \
+      "$(onboard_nic_scan "$TMP/nope-41.txt" "$TMP/netaddrs.txt" | grep -c .)"
+
+echo
+echo "=== 虚拟设备核对 ==="
+printf 'flags\t\t: fpu vme de pse tsc msr pae mce cx8 apic hypervisor\n' > "$TMP/cpuinfo-vm.txt"
+printf 'flags\t\t: fpu vme de pse tsc msr pae mce cx8 apic sep mtrr\n'   > "$TMP/cpuinfo-bare.txt"
+cat > "$TMP/dmisys-vm.txt" <<'EOF'
+System Information
+	Manufacturer: QEMU
+	Product Name: Standard PC (Q35 + ICH9, 2009)
+EOF
+cat > "$TMP/dmisys-bare.txt" <<'EOF'
+System Information
+	Manufacturer: Supermicro
+	Product Name: SYS-4029GP-TRT
+EOF
+printf '{"blockdevices":[{"name":"vda","type":"disk"}]}\n' > "$TMP/lsblk-vm.json"
+printf '{"blockdevices":[{"name":"sda","type":"disk"}]}\n' > "$TMP/lsblk-bare.json"
+printf 'ens3|virtio_net\n' > "$TMP/nicdrv-vm.txt"
+printf 'eno1|i40e\neno2|i40e\n' > "$TMP/nicdrv-bare.txt"
+
+check "物理机：一条都不该报" "0" \
+      "$(virtual_device_scan "$TMP/cpuinfo-bare.txt" "$TMP/dmisys-bare.txt" \
+                             "$TMP/lsblk-bare.json"  "$TMP/nicdrv-bare.txt" | grep -c .)"
+check "虚拟机：整机 / 主板 / 硬盘 / 网卡四条都要报出来" "4" \
+      "$(virtual_device_scan "$TMP/cpuinfo-vm.txt" "$TMP/dmisys-vm.txt" \
+                             "$TMP/lsblk-vm.json"  "$TMP/nicdrv-vm.txt" | grep -c .)"
+check "文件全都不存在时也不能崩、也不报虚拟设备" "0" \
+      "$(virtual_device_scan "$TMP/nope1" "$TMP/nope2" "$TMP/nope3" "$TMP/nope4" | grep -c .)"
+
+echo
+echo "=== 序列号一致性：BMC 那一头 ==="
+cat > "$TMP/fru.txt" <<'EOF'
+FRU Device Description : Builtin FRU Device (ID 0)
+ Chassis Type          : Other
+ Chassis Serial        : CHASSIS-0001
+ Board Mfg             : Supermicro
+ Board Serial          : BOARD-0002
+ Product Manufacturer  : Supermicro
+ Product Name          : SYS-4029GP-TRT
+ Product Serial        : SYS-XYZ-0003
+EOF
+check "优先取 Product Serial（那才是贴在机器上那个 SN）" "SYS-XYZ-0003" \
+      "$(fru_serial "$TMP/fru.txt")"
+# 只有主板序列号时要退到主板，不能因为没有 Product Serial 就说读不到
+printf ' Board Serial          : BOARD-0002\n' > "$TMP/fru-board.txt"
+check "只有主板序列号时退到它" "BOARD-0002" "$(fru_serial "$TMP/fru-board.txt")"
+printf ' Product Serial        : To be filled by O.E.M.\n Board Serial : 0123456789\n' \
+  > "$TMP/fru-bogus.txt"
+check "全是占位符时输出空（不能把 'To be filled by O.E.M.' 当序列号）" "" \
+      "$(fru_serial "$TMP/fru-bogus.txt")"
+check "没有 BMC 时输出空" "" "$(fru_serial "$TMP/nope-fru.txt")"
+
+echo
+echo "=== 显卡一致性 / ECC / 行重映射 ==="
+printf 'NVIDIA H100 80GB HBM3,96.00.89.00.01\nNVIDIA H100 80GB HBM3,96.00.89.00.01\n' \
+  > "$TMP/gpu-uni-ok.txt"
+check "型号和 VBIOS 都一致 -> 各 1 种" "1 1" "$(gpu_uniform_scan "$TMP/gpu-uni-ok.txt")"
+printf 'NVIDIA H100 80GB HBM3,96.00.89.00.01\nNVIDIA H100 80GB HBM3,96.00.74.00.01\n' \
+  > "$TMP/gpu-uni-bad.txt"
+check "VBIOS 两种要认出来" "1 2" "$(gpu_uniform_scan "$TMP/gpu-uni-bad.txt")"
+check "文件不存在时给 0 0（-> SKIP，不是「不一致」）" "0 0" \
+      "$(gpu_uniform_scan "$TMP/nope-gpu.txt")"
+
+# ECC：不支持 ECC 的卡给的是 [N/A]，**那不是 0**。
+# 当成 0 加起来的话，报告会写"ECC 全部正常"——一张压根没有 ECC 的卡被说成没问题。
+printf '0, 0, 0, 12, 0\n1, 0, 0, 8, 0\n' > "$TMP/ecc-ok.csv"
+check "两张卡都读到数字 -> 有效卡数 2，本次上电计数全 0" "2 0 0" \
+      "$(gpu_ecc_scan "$TMP/ecc-ok.csv")"
+printf '0, [N/A], [N/A], [N/A], [N/A]\n1, [N/A], [N/A], [N/A], [N/A]\n' > "$TMP/ecc-na.csv"
+check "全是 [N/A] -> 有效卡数 0（判 SKIP，不能报成「ECC 正常」）" "0 0 0" \
+      "$(gpu_ecc_scan "$TMP/ecc-na.csv")"
+printf '0, 3, 0, 3, 0\n1, 0, 2, 0, 2\n' > "$TMP/ecc-bad.csv"
+check "可纠正和不可纠正要分开求和" "2 3 2" "$(gpu_ecc_scan "$TMP/ecc-bad.csv")"
+
+printf '0, 0, 0, No, No\n1, 0, 0, No, No\n' > "$TMP/remap-ok.csv"
+check "两张卡都干净" "2 0 0 0" "$(gpu_remap_scan "$TMP/remap-ok.csv")"
+printf '0, 4, 2, No, No\n1, 0, 0, Yes, No\n' > "$TMP/remap-warn.csv"
+check "不可纠正行数求和、待生效按卡数算" "2 2 1 0" "$(gpu_remap_scan "$TMP/remap-warn.csv")"
+printf '0, 0, 0, No, Yes\n' > "$TMP/remap-fail.csv"
+check "重映射失败要单独数出来（那一条判 FAIL）" "1 0 0 1" "$(gpu_remap_scan "$TMP/remap-fail.csv")"
+printf '0, [N/A], [N/A], [N/A], [N/A]\n' > "$TMP/remap-na.csv"
+check "不支持行重映射的卡 -> 有效卡数 0（判 SKIP）" "0 0 0 0" \
+      "$(gpu_remap_scan "$TMP/remap-na.csv")"
+
+echo
+echo "=== 硬盘型号一致性的分组键 ==="
+cat > "$TMP/lsblk-disks.json" <<'EOF'
+{"blockdevices":[
+ {"name":"sda","type":"disk","tran":"sata","size":960197124096,"model":"INTEL SSDSC2KB960G8","rm":false},
+ {"name":"sdb","type":"disk","tran":"sata","size":960197124096,"model":"SAMSUNG MZ7L3960HCJR","rm":false},
+ {"name":"nvme0n1","type":"disk","tran":"nvme","size":1920383410176,"model":"SAMSUNG MZQL21T9HCJR","rm":false},
+ {"name":"sdc","type":"disk","tran":"usb","size":31000000000,"model":"SanDisk Ultra","rm":true}
+]}
+EOF
+check "按接口+容量分组，U 盘排掉" "3" "$(disk_spec_model "$TMP/lsblk-disks.json" | grep -c .)"
+check "同接口同容量的两块盘落在同一组（分组数 1，不是盘数 2）" "1" \
+      "$(disk_spec_model "$TMP/lsblk-disks.json" | cut -d'|' -f1 | grep 'sata_960197124096' | sort -u | grep -c .)"
+check "那一组里有两种型号（要判 WARN）" "2" \
+      "$(disk_spec_model "$TMP/lsblk-disks.json" | awk -F'|' '$1=="sata_960197124096"{print $2}' | count_uniq)"
+
+# 老版本 lsblk 的 rm 是字符串 "1"/"0"，不是布尔。
+# 只判 != true 的话 U 盘会混进来，被当成"同规格硬盘型号不一致"
+cat > "$TMP/lsblk-oldrm.json" <<'EOF'
+{"blockdevices":[
+ {"name":"sda","type":"disk","tran":"sata","size":960197124096,"model":"INTEL SSDSC2KB960G8","rm":"0"},
+ {"name":"sdc","type":"disk","tran":"usb","size":31000000000,"model":"SanDisk Ultra","rm":"1"}
+]}
+EOF
+check "老 lsblk 把 rm 写成字符串 \"1\" 时也要排掉 U 盘" "1" \
+      "$(disk_spec_model "$TMP/lsblk-oldrm.json" | grep -c .)"
 
 # ================================================================
 # 收尾自检：这个脚本会 source 被测的 lib，而 lib 里也有 ok()。

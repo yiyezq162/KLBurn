@@ -145,6 +145,10 @@ def dmi_status_cn(v):
 METRIC_GROUP_CN = {
     "cpu": "处理器", "mem": "内存", "gpu": "显卡", "disk": "硬盘",
     "nic": "网卡", "pcie": "PCIe", "psu": "电源", "sys": "整机",
+    # 1.9.0 起这三组在报告里有各自的小节（配置核对 / 平台设置 / 性能基准），
+    # 不再混进「其他实测指标」那张大表。留在这里是为了两件事：
+    # 认得出老 run-dir 的数据，以及内部报告仍然按分组列它们。
+    "conform": "配置核对", "platform": "平台设置", "bench": "性能基准",
 }
 
 
@@ -1194,6 +1198,84 @@ class Data(object):
                 ]))
         return out
 
+    # ---------- 性能基准：逐盘顺序读写带宽 ----------
+    def bench_disk_rows(self):
+        """raw/bench/fio-<盘>-<read|write>.json -> 每块盘一行。
+
+        文件名里带着盘符和方向，job 名带着测试口径（libaio_read_128k_32_1）——
+        **job 名按业界通行的写法保留**（引擎_方向_块大小_队列深度_线程数），
+        客户拿自己那份验收表来对照时省得再翻译一遍。
+        """
+        d = self.rawpath("bench")
+        if not os.path.isdir(d):
+            return []
+        rows = OrderedDict()
+        for fn in sorted(os.listdir(d)):
+            m = re.match(r"^fio-(.+)-(read|write)\.json$", fn)
+            if not m:
+                continue
+            dev, rw = m.group(1), m.group(2)
+            for job in (read_json(os.path.join(d, fn), {}).get("jobs") or []):
+                bw = (job.get(rw) or {}).get("bw")
+                if not bw:
+                    continue
+                row = rows.setdefault(dev, OrderedDict([
+                    ("硬盘", "/dev/%s" % dev), ("测试口径", job.get("jobname")),
+                    ("顺序读带宽", None), ("顺序写带宽", None),
+                ]))
+                row["测试口径"] = job.get("jobname")
+                row["顺序读带宽" if rw == "read" else "顺序写带宽"] = \
+                    "%.1f MB/s" % (bw / 1024.0)
+        out = list(rows.values())
+        # 现场没确认破坏性写入时根本没跑写带宽，整列都是空的。
+        # 留一列破折号等于在报告上写"我们没测"，而那是客户自己选的
+        # （和 §11-26 硬盘压测那几项整个不进报告是同一把尺子）。
+        if out and not any(r.get("顺序写带宽") for r in out):
+            for r in out:
+                r.pop("顺序写带宽", None)
+        return out
+
+    # ---------- 固件版本清单 ----------
+    def firmware_rows(self):
+        """一张表把这台机器上所有能读到的固件版本汇总起来。
+
+        "同批次机器固件版本要一致"是很多出厂验收都有的一条，而它是**批次之间**
+        比对的项，单台机器判不了。所以这里不判定，只把散在各处（BIOS 在 1.1、
+        网卡在 1.6、硬盘在 1.4、显卡在 1.7）的版本号汇到一处 —— 拿两份报告
+        并排一看就能对完，不用在报告里翻五个小节。
+        """
+        rows = []
+
+        def add(part, where, ver):
+            v = clean(ver)
+            if v:
+                rows.append(OrderedDict([("部件", part), ("位置 / 型号", clean(where) or "—"),
+                                         ("版本", v)]))
+
+        sysinfo = self.system()
+        add("主板 BIOS", sysinfo.get("主板型号") or sysinfo.get("整机型号"),
+            sysinfo.get("BIOS 版本"))
+
+        # BMC 固件版本只有 `ipmitool mc info` 那一份，前面没有任何地方解析过
+        mc = read_text(self.rawpath("ipmi-mcinfo.txt"))
+        m = re.search(r"^\s*Firmware Revision\s*:\s*(.+)$", mc, re.M)
+        if m:
+            add("管理控制器（BMC）", "板载", m.group(1))
+
+        for c in self.raid():
+            add("阵列卡 / HBA", c.get("型号"), c.get("固件版本"))
+        for n in self.nics():
+            add("网卡", "%s（%s）" % (n.get("型号") or "—", n.get("接口名")),
+                n.get("固件版本"))
+        for dk in self.disks(show_stress_col=False):
+            add("硬盘", "%s %s" % (dk.get("设备") or "", dk.get("型号") or ""),
+                dk.get("固件"))
+        # ⚠️ 只列显卡自己的显示 BIOS，**不列驱动版本**：驱动是我们这套测试环境
+        #    带的，不是这台机器上的东西，混进"这台机器的固件清单"里会误导批次比对。
+        for i, g in enumerate(self.gpus()):
+            add("显卡显示 BIOS", "显卡%d %s" % (i, g.get("型号") or ""), g.get("BIOS版本"))
+        return rows
+
 
 # ============================================================ HTML 渲染
 
@@ -1405,6 +1487,28 @@ def build_html(data):
     INTERNAL_ONLY_ROWS = ("collect_deep",)
     shown = [r for r in shown if r.get("id") not in INTERNAL_ONLY_ROWS]
 
+    # ---------------- 判定按"读者关心的三件事"分组 ----------------
+    #
+    # 出厂验收表大多是分段写的：配置检查一段、性能数值一段、老化一段。
+    # 以前报告把二十几条判定平铺成一张长列表，客户要自己在里面找哪条对应
+    # 他单子上的哪一行。分成三段之后，报告的结构就和他手里那张表对得上。
+    #
+    # ⚠️ **分组只影响"印在哪一节"，不影响任何判定。**整机结论仍然只看
+    # 全部判定里有没有 FAIL（上面那行 overall 已经算完了，在分组之前）。
+    # 认不出来的 id 一律落到"压测与复查"那一段 —— 新加判定忘了登记的话，
+    # 后果是它出现在一个不太贴切的小节里，而**不是从报告里消失**。
+    CONFORM_IDS = (
+        "check_dimm_uniform", "check_nic_uniform", "check_disk_uniform",
+        "check_gpu_uniform", "check_gpu_ecc", "check_gpu_remap",
+        "check_bios_profile", "check_virtual_dev", "check_sn_consistency",
+        "check_mem_cap", "check_pcie_link", "check_nic_speed",
+    )
+    conform_rows = [r for r in shown if r.get("id") in CONFORM_IDS]
+    bench_rows = [r for r in shown if str(r.get("id", "")).startswith("bench_")]
+    other_rows = [r for r in shown
+                  if r.get("id") not in CONFORM_IDS
+                  and not str(r.get("id", "")).startswith("bench_")]
+
     # 计数按**客户实际看得到的那些**算，否则抬头写着"跳过 4 项"、
     # 下面只列得出 2 条，客户第一眼就会问剩下两条哪儿去了。
     # 「SMART 复查」这一项到底还在不在报告里 —— 上面 1.4 那句"详见下方…"
@@ -1569,8 +1673,126 @@ def build_html(data):
           "表中显示为「—」。这几项由主板 BIOS 提供，读不到不代表电源有问题 —— "
           "电源是否在位、是否进电，以第二节「电源」那一项的结论为准。</p>")
 
+    # 判定行的渲染，三个小节共用一份
+    def result_list(rows):
+        for r in rows:
+            st = r.get("status", "SKIP")
+            A('<div class="result-row r-%s">' % st)
+            A('<span class="badge b-%s">%s</span>' % (st, st))
+            A('<span class="rn">%s</span>' % E(r.get("name")))
+            A('<span class="rd">%s</span>' % E_rich(r.get("detail")))
+            A("</div>")
+
+    def metrics_of(group):
+        return [m for m in data.metrics if m.get("group") == group]
+
+    def metric_kv(group):
+        return kv_block(OrderedDict(
+            (metric_key_cn(m.get("key")), m.get("value")) for m in metrics_of(group)))
+
+    def metric_table(group, col="项目"):
+        """把一组零散数值排成两列表格。
+
+        值长的时候（内存两种颗粒型号并排、网卡型号加一长串固件版本）
+        kv_block 那个网格会折得很难看 —— 表格反而稳。
+        """
+        return table([OrderedDict([(col, metric_key_cn(m.get("key"))),
+                                   ("实测值", m.get("value"))])
+                      for m in metrics_of(group)])
+
+    def metric_value(key):
+        for m in data.metrics:
+            if m.get("group") == "bench" and m.get("key") == key:
+                return m.get("value")
+        return None
+
+    # ⚠️ **性能基准这一节里没有"参考值 / 是否达标"这种东西，也不要再加回来。**
+    #    这张盘是插上就跑、无人值守的，没有任何地方能拿到"这台机器应该达到多少"——
+    #    凭空印一个数上去，等于我们替客户定了一个他没定过的标准，再拿它去说
+    #    这台机器行不行。**报告里只有实测值**，谁做验收谁拿自己那份要求来对。
+    #    tests/test-report-render.sh 里有一组断言钉着这一点。
+
     # ================================================================
-    A("<h2>二、压力测试结果</h2>")
+    A("<h2>二、配置核对</h2>")
+    A('<p class="sub">这一节回答的是「这台机器装的东西对不对、齐不齐、一不一致」。'
+      "同规格的部件在同一台机器里应当型号一致、固件版本一致；"
+      "整机序列号在主板与管理控制器两处应当对得上。</p>")
+
+    conf_no = [0]
+
+    def CSUB(title):
+        conf_no[0] += 1
+        return "<h3>2.%d %s</h3>" % (conf_no[0], title)
+
+    A(CSUB("核对结论"))
+    if conform_rows:
+        result_list(conform_rows)
+    else:
+        A('<p class="muted">本次未产生配置核对结论。</p>')
+
+    plat = metrics_of("platform")
+    if plat:
+        A(CSUB("平台关键设置"))
+        A('<p class="sub">以下为操作系统读到的实际状态，可与订单要求逐项比对。'
+          "这些是主板设置项，与硬件好坏无关。</p>")
+        A(metric_kv("platform"))
+
+    conf_m = metrics_of("conform")
+    if conf_m:
+        A(CSUB("核对依据的实测值"))
+        A('<p class="sub">上面每一条结论所依据的原始读数，逐项列在这里。</p>')
+        A(metric_table("conform"))
+
+    fwrows = data.firmware_rows()
+    if fwrows:
+        A(CSUB("固件版本清单"))
+        A('<p class="sub">同一批次的机器，这张表应当逐行一致。'
+          "本表只汇总本机实测到的版本号，不做批次间比对。</p>")
+        A(table(fwrows))
+
+    # ================================================================
+    # 性能基准：整段只在真的测了才出现。
+    # 一台不做性能验收的机器，报告里多出一节全是 SKIP 的"基准"只会招来提问。
+    bench_m = metrics_of("bench")
+    bench_disk = data.bench_disk_rows()
+    if bench_rows or bench_m or bench_disk:
+        A("<h2>三、性能基准</h2>")
+        A('<p class="sub">以下数值在机器空闲时测得（不与老化压测同时进行，'
+          "否则数值会被互相干扰）。<b>本节只如实报出实测数值，不做合格与否的判断，"
+          "也不影响整机结论</b> —— 不同用途对性能的要求各不相同，"
+          "请对照贵方的验收要求核对这些数值。</p>")
+        bench_no = [0]
+
+        def BSUB(title):
+            bench_no[0] += 1
+            return "<h3>3.%d %s</h3>" % (bench_no[0], title)
+
+        if bench_rows:
+            A(BSUB("各项结论"))
+            result_list(bench_rows)
+
+        # ⚠️ **这一节不要再加"实测数值汇总"表或"测试条件"那一行。**
+        # 1.9.0 两样都加过，然后都删了 —— 上面每条结论里已经写着那个数字、
+        # 也写着它是怎么测的（问题规模多少阶、内存跑多少 MT/s 几个通道），
+        # 底下再印一遍就是同一页上同一个数出现两次。那不是排版，是堆砌。
+        #
+        # 逐盘带宽是**另一组数**（结论那一行给不出逐盘明细），所以下面那张表留着。
+        if bench_disk:
+            A(BSUB("硬盘顺序读写带宽"))
+            A('<p class="sub">128KB 大块顺序读写，逐块单独测量。'
+              "「测试口径」一列是本次实际使用的参数，格式为"
+              "「引擎_方向_块大小_队列深度_线程数」。</p>")
+            A(table(bench_disk))
+        stress_h2 = "四、压力测试结果"
+        raw_h2 = "五、原始日志"
+        sub_prefix = 4
+    else:
+        stress_h2 = "三、压力测试结果"
+        raw_h2 = "四、原始日志"
+        sub_prefix = 3
+
+    # ================================================================
+    A("<h2>%s</h2>" % stress_h2)
 
     budget = meta.get("budget") or {}
     dur = OrderedDict([
@@ -1584,6 +1806,13 @@ def build_html(data):
     if disk_ran:
         dur["硬盘压测时长"] = fmt_dur(budget.get("disk_secs"))
     dur["GPU 压测时长"] = fmt_dur(budget.get("gpu_secs"))
+    # 性能基准跑在压测之前，占的是"实际总耗时"里的一段。不写出来的话，
+    # 各项压测时长加起来对不上总耗时，客户会以为报告算错了。
+    try:
+        if int(budget.get("bench_secs") or 0) > 0:
+            dur["性能基准耗时"] = fmt_dur(budget.get("bench_secs"))
+    except (TypeError, ValueError):
+        pass
     A(kv_block(dur))
     A('<p class="sub">CPU / 内存 / GPU 三项并发压测（互不占用彼此的时间，选多长测多长）。%s</p>'
       % ("硬盘单独测试，不与前三项同时进行，所以以上时长不能直接相加算总耗时。"
@@ -1591,20 +1820,15 @@ def build_html(data):
 
     # 二级编号动态生成：硬盘、GPU 没测的时候它们的小节整个不出现，
     # 写死编号就会出现 2.2 后面直接跳到 2.5 这种断号。
+    # 一级编号也是动的（没跑性能基准时这一节是"三"不是"四"），所以用 sub_prefix。
     sub_no = [0]
 
     def SUB(title):
         sub_no[0] += 1
-        return "<h3>2.%d %s</h3>" % (sub_no[0], title)
+        return "<h3>%d.%d %s</h3>" % (sub_prefix, sub_no[0], title)
 
     A(SUB("各项结论"))
-    for r in shown:
-        st = r.get("status", "SKIP")
-        A('<div class="result-row r-%s">' % st)
-        A('<span class="badge b-%s">%s</span>' % (st, st))
-        A('<span class="rn">%s</span>' % E(r.get("name")))
-        A('<span class="rd">%s</span>' % E_rich(r.get("detail")))
-        A("</div>")
+    result_list(other_rows)
 
     # 判定阈值从 meta.json 取实际生效的值——现场可以在 klburn.conf 里覆盖，
     # 报告里写死一份就会和实际判定对不上。老的 run-dir 没有这一段，用默认值兜底。
@@ -1676,8 +1900,12 @@ def build_html(data):
     # stressapptest 还是 stress-ng —— 那是内部实现（§2-1「盘里带了什么工具」），
     # 而且这一格失败与否也不由它决定。metrics.jsonl 和内部报告里一个字段都没少。
     INTERNAL_ONLY_METRICS = {("cpu", "失败压测项"), ("mem", "测试工具")}
+    # 这三组在上面已经有各自的小节了，再进这张大表就是同一个数字印两遍。
+    # **这是"挪位置"，不是"藏"** —— 它们一个不少地出现在第二/第三节里。
+    OWN_SECTION_GROUPS = {"platform", "conform", "bench"}
     shown_metrics = [m for m in data.metrics
-                     if (m.get("group"), m.get("key")) not in INTERNAL_ONLY_METRICS]
+                     if (m.get("group"), m.get("key")) not in INTERNAL_ONLY_METRICS
+                     and m.get("group") not in OWN_SECTION_GROUPS]
     if shown_metrics:
         A(SUB("其他实测指标"))
         groups = OrderedDict()
@@ -1694,7 +1922,7 @@ def build_html(data):
         A(table(rows))
 
     # ================================================================
-    A("<h2>三、原始日志</h2>")
+    A("<h2>%s</h2>" % raw_h2)
     A('<p class="sub">以下为采集到的原始输出，完整文件保存在报告目录的 raw/ 子目录下。</p>')
 
     # 这里不嵌 smartctl 的原始输出（raw/smart-pre|post/ 里完整保留）：
@@ -1720,6 +1948,10 @@ def build_html(data):
         ("内存压测日志", "stress/mem-stressapptest.log"),
         ("硬盘压测日志（随机）", "stress/fio-rand.log"),
         ("GPU 压测日志", "stress/gpu-burn.log"),
+        ("显卡数据传输带宽测试", "bench/gpu-bandwidth.log"),
+        ("显卡间互联带宽测试", "bench/gpu-p2p.log"),
+        ("CPU 浮点算力测试", "bench/cpu-linpack.log"),
+        ("内存带宽测试", "bench/mem-bandwidth.log"),
         ("内核日志中的硬件错误", "dmesg-errors.txt"),
         ("内核日志（压测期间新增）", "dmesg-delta.txt"),
     ]:

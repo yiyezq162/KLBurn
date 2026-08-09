@@ -377,7 +377,7 @@ stress_mem() {
 # ---------------------------------------------------------------- 硬盘
 stress_disk() {
   local secs="$1"
-  section "PHASE 3/4  DISK STRESS (separate, not concurrent)  ($(fmt_dur "$secs"))"
+  section "PHASE 4/5  DISK STRESS (separate, not concurrent)  ($(fmt_dur "$secs"))"
 
   if (( ${#DISK_CAND[@]} == 0 )); then
     result_add "stress_disk" "硬盘压力测试" "$ST_SKIP" "未发现可测试的本机硬盘" ""
@@ -438,12 +438,15 @@ stress_disk() {
   local ndisk="${#DISK_CAND[@]}"
   local detail="${ndisk} 块盘并发裸盘读写：顺序 $(fmt_dur "$seq_secs") + 4K随机 $(fmt_dur "$rnd_secs")"
 
+  # ⚠️ 这两句进客户报告，**不许出现工具名**（§6-2：盘里带的是哪个工具是内部实现）。
+  # 1.8.4 把工具名成组加进禁词表时漏了 fio —— 因为当时只按"咬过人的词"加，
+  # 而这两句从来没红过。现在 FORBIDDEN 里有 fio 了，改坏会当场跑红。
   if (( ioerr != 0 )); then
     result_add "stress_disk" "硬盘压力测试" "$ST_FAIL" \
-      "fio 报告 I/O 错误（error=${ioerr}）；$detail" "raw/fio-rand.json"
+      "硬盘读写测试报告 I/O 错误（错误计数 ${ioerr}）；$detail" "raw/fio-rand.json"
   elif (( rc_total != 0 )); then
     result_add "stress_disk" "硬盘压力测试" "$ST_FAIL" \
-      "fio 异常退出（退出码 $rc_total）；$detail" "raw/stress/fio-rand.log"
+      "硬盘读写测试程序异常退出（退出码 $rc_total）；$detail" "raw/stress/fio-rand.log"
   else
     result_add "stress_disk" "硬盘压力测试" "$ST_PASS" "无 I/O 错误；$detail" "raw/fio-rand.json"
   fi
@@ -452,7 +455,7 @@ stress_disk() {
 # 现场没确认 / 没有盘时调用
 stress_disk_skipped() {
   local reason="$1"
-  section "PHASE 3/4  DISK STRESS  (SKIPPED)"
+  section "PHASE 4/5  DISK STRESS  (SKIPPED)"
   warn "Disk stress test skipped."
   result_add "stress_disk" "硬盘压力测试" "$ST_SKIP" "$reason" ""
 }

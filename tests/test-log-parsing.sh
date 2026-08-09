@@ -23,6 +23,12 @@ RAW_DIR="$TMP"; RUN_DIR="$TMP"
 source "$LIB/stress.sh"
 # shellcheck source=/dev/null
 source "$LIB/gpu.sh"
+# shellcheck source=/dev/null
+source "$LIB/core.sh"
+# shellcheck source=/dev/null
+source "$LIB/conformance.sh"
+# shellcheck source=/dev/null
+source "$LIB/bench.sh"
 
 PASS=0; FAIL=0
 ok()   { printf '  \033[32mOK\033[0m   %s\n' "$1"; PASS=$((PASS+1)); }
@@ -384,6 +390,275 @@ check "日志不存在时也返回 0" "0" "$(gpu_burn_progress_steps "$TMP/nope.
 # core.sh 里 count_lines 那段注释记的就是这个坑，这里钉一条防止退回去。
 check "返回值必须是干净的单个整数（不能是 '00'）" "1" \
       "$(printf '%s' "$(gpu_burn_progress_steps "$TMP/nope.log")" | grep -c '^0$')"
+
+# ================================================================
+echo
+echo "=== 性能基准：显卡数据传输带宽（bandwidthTest）==="
+#
+# 单位随版本变：CUDA 11 的表头是 Bandwidth(MB/s)，CUDA 12 起是 Bandwidth(GB/s)。
+# 照数字抄的话，同一台机器会时而"55 GB/s 达标"、时而"55000 GB/s"。
+
+cat > "$TMP/bw-gb.log" <<'EOF'
+[CUDA Bandwidth Test] - Starting...
+Running on...
+
+ Device 0: NVIDIA GeForce RTX 5090
+ Quick Mode
+
+ Host to Device Bandwidth, 1 Device(s)
+ PINNED Memory Transfers
+   Transfer Size (Bytes)	Bandwidth(GB/s)
+   32000000			55.6
+
+ Device to Host Bandwidth, 1 Device(s)
+ PINNED Memory Transfers
+   Transfer Size (Bytes)	Bandwidth(GB/s)
+   32000000			57.1
+
+ Device to Device Bandwidth, 1 Device(s)
+ PINNED Memory Transfers
+   Transfer Size (Bytes)	Bandwidth(GB/s)
+   32000000			4380.2
+
+Result = PASS
+EOF
+check "GB/s 表头：三个方向都取到" "55.60 57.10 4380.20" \
+      "$(bw_parse_bandwidthtest "$TMP/bw-gb.log")"
+
+# 同一份数据换成老版本的 MB/s 表头，解析结果必须完全一样
+sed 's|Bandwidth(GB/s)|Bandwidth(MB/s)|; s|55\.6|55600|; s|57\.1|57100|; s|4380\.2|4380200|' \
+  "$TMP/bw-gb.log" > "$TMP/bw-mb.log"
+check "MB/s 表头要换算成 GB/s（否则同一台机器两个数量级）" "55.60 57.10 4380.20" \
+      "$(bw_parse_bandwidthtest "$TMP/bw-mb.log")"
+
+check "日志不存在时给 0，不能报错" "0.00 0.00 0.00" \
+      "$(bw_parse_bandwidthtest "$TMP/nope-bw.log")"
+
+echo
+echo "=== 性能基准：显卡间互联带宽（P2P 矩阵）==="
+cat > "$TMP/p2p.log" <<'EOF'
+Device: 0, NVIDIA H100, pciBusID: 1b, pciDeviceID: 0, pciDomainID:0
+Device: 1, NVIDIA H100, pciBusID: 3d, pciDeviceID: 0, pciDomainID:0
+
+Unidirectional P2P=Enabled Bandwidth Matrix (GB/s)
+   D\D     0      1
+     0 1284.61  24.10
+     1  24.11 1281.02
+
+Bidirectional P2P=Enabled Bandwidth Matrix (GB/s)
+   D\D     0      1
+     0 1330.20  51.86
+     1  51.42 1329.77
+
+P2P=Enabled Latency Matrix (us)
+   GPU     0      1
+     0   2.10   1.90
+EOF
+# 对角线（1330 / 1329）是显存内部带宽，必须排掉；取的是 51.42 而不是 51.86
+check "取双向矩阵里的最小值，且排掉对角线" "51.42" "$(p2p_parse_min_bw "$TMP/p2p.log")"
+
+cat > "$TMP/p2p-1.log" <<'EOF'
+Bidirectional P2P=Enabled Bandwidth Matrix (GB/s)
+   D\D     0
+     0 1330.20
+EOF
+check "只有一张卡时没有卡间带宽可言，输出空" "" "$(p2p_parse_min_bw "$TMP/p2p-1.log")"
+
+echo
+echo "=== 性能基准：CPU 浮点算力（LINPACK）==="
+#
+# ⚠️ 这份日志里有两张表头几乎一样的表，第一张的第 4 列是**秒**、第二张才是
+#    GFlops。按固定列号取第 4 列的话，一台 3030 GFlops 的机器会被读成
+#    "141.7 GFlops"，配上 3600 的门槛就是当场判 FAIL —— 好机器被拦在出货前。
+# ⚠️ 这一份是 **xlinpack_xeon64（oneMKL 2025.3）真跑出来的原样输出**，
+#    喂给它的输入文件就是 linpack_problem_size() 那套格式生成的。
+#    它把这条判据要防的坑摆得明明白白：
+#      计时表  第 4 列 = Time(s) = 0.529   <- 按列位置取就会拿到这个
+#      汇总表  第 4 列 = Average = 79.1742 <- 这个才是算力
+#    再配上一个 3600 的门槛，取错列就是一台好机器当场判 FAIL。
+cat > "$TMP/linpack.log" <<'EOF'
+Current date/time: Sun Aug  9 12:33:10 2026
+
+CPU frequency:    5.389 GHz
+Number of CPUs: 1
+Number of cores: 24
+Number of threads: 24
+
+Parameters are set to:
+
+Number of tests: 1
+Number of equations to solve (problem size) : 4000
+Leading dimension of array                  : 4000
+Number of trials to run                     : 2
+Data alignment value (in Kbytes)            : 4
+
+Maximum memory requested that can be used=128084096, at the size=4000
+
+=================== Timing linear equation system solver ===================
+
+Size   LDA    Align. Time(s)    GFlops   Residual     Residual(norm) Check
+4000   4000   4      0.529      80.7297  1.917971e-11 3.892786e-02   pass
+4000   4000   4      0.550      77.6187  1.704567e-11 3.459653e-02   pass
+
+Performance Summary (GFlops)
+
+Size   LDA    Align.  Average  Maximal
+4000   4000   4       79.1742  80.7297
+
+Residual checks PASSED
+
+End of tests
+EOF
+check "取的必须是 Average 列（不是计时表的 Time(s)，也不是 Maximal）" "79.1742 2" \
+      "$(linpack_parse "$TMP/linpack.log")"
+# 单独钉一下"没拿成那两个错值"，免得哪天改成取 Maximal 还以为是对的
+check "取到的不是 Maximal（80.7297）" "0" \
+      "$(linpack_parse "$TMP/linpack.log" | grep -c '^80\.7297' || true)"
+check "取到的不是计时表的秒数（0.529）" "0" \
+      "$(linpack_parse "$TMP/linpack.log" | grep -c '^0\.529' || true)"
+check "日志不存在时给 0 0" "0 0" "$(linpack_parse "$TMP/nope-lp.log")"
+
+echo
+echo "=== 性能基准：内存读带宽（MLC）==="
+# ⚠️ 这一份是 **v3.12 真跑出来的原样输出**（制表符、行尾多余的制表符、
+#    那两行 `***` 提示，全都照抄），不是照着记忆编的。
+#    两个容易被编错、而真输出里确实存在的地方：
+#      1. 标签和数值之间是**制表符**，不是空格
+#      2. `1:1 Reads-Writes` 这类标签**自己带冒号** —— 解析用的是 `-F:`，
+#         这些行会被切成三段，只有"行首是 ALL Reads"这条判据才躲得开
+cat > "$TMP/mlc.log" <<'EOF'
+Intel(R) Memory Latency Checker - v3.12
+Command line parameters: --peak_injection_bandwidth
+
+Using buffer size of 122.070MiB/thread for reads and an additional 122.070MiB/thread for writes
+*** Unable to modify prefetchers (try executing 'modprobe msr')
+*** So, enabling random access for latency measurements
+
+Measuring Peak Injection Memory Bandwidths for the system
+Bandwidths are in MB/sec (1 MB/sec = 1,000,000 Bytes/sec)
+Using all the threads from each core if Hyper-threading is enabled
+Using traffic with the following read-write ratios
+ALL Reads        :	 32848.9
+3:1 Reads-Writes :	 31786.3
+2:1 Reads-Writes :	 34752.3
+1:1 Reads-Writes :	 34231.7
+Stream-triad like:	 35711.5
+All NT writes    :	 33775.0
+1:1 Read-NT write:	 34325.9
+EOF
+check "只取 ALL Reads 那一行（样本是 v3.12 真输出）" "32848.9" \
+      "$(mlc_parse_all_reads "$TMP/mlc.log")"
+check "标签自带冒号的那几行不能被误取" "1" \
+      "$(printf '%s\n' "$(mlc_parse_all_reads "$TMP/mlc.log")" | grep -c '^32848\.9$')"
+
+echo
+echo "=== 内存带宽：缓冲区大小必须自己定，不能让 MLC 自己挑 ==="
+#
+# 1.9.0 实测翻车：一台 4GB 内存、4 线程的机器上，MLC 自己挑了
+#     Using buffer size of 732.422MiB/thread ... and an additional 732.422MiB/thread
+# 也就是 732 × 4 × 2 ≈ 5.8GB，而整机只有 4GB —— 打完第一行 ALL Reads 就开始抖，
+# 整轮测试卡在那儿再也出不来报告。它挑多大是按缓存/平台推的，
+# **和这台机器还剩多少内存没关系**，所以只能我们来定。
+#
+# 参数是 (可用内存 KB, 线程数)，只为脱机测用。
+check "4GB / 4 线程：压在可用内存的 1/4 以内" "100000" \
+      "$(mlc_buffer_kib 3200000 4)"
+check "512GB / 128 线程：按 1/4 算出来是 507812" "507812" \
+      "$(mlc_buffer_kib 520000000 128)"
+check "2TB / 256 线程：顶到上限 512MiB（再大对结果没帮助，只是白占内存）" "524288" \
+      "$(mlc_buffer_kib 2000000000 256)"
+check "内存极小时顶到下限 64MiB（低于最后一级缓存就量不出内存带宽了）" "65536" \
+      "$(mlc_buffer_kib 700000 2)"
+check "读不到内存信息时也要给出一个安全值，不能给空" "65536" \
+      "$(mlc_buffer_kib abc xyz | grep -oE '^[0-9]+$' >/dev/null && mlc_buffer_kib 700000 2)"
+# 最要紧的一条：**算出来的总占用绝不能超过可用内存**
+check "总占用（线程 x 2 x 每线程）不许超过可用内存" "yes" \
+      "$(awk -v b="$(mlc_buffer_kib 3200000 4)" -v t=4 -v a=3200000 \
+           'BEGIN{ print (b*t*2 <= a) ? "yes" : "no" }')"
+
+echo
+# ⚠️ **这里故意没有"理论带宽应该是多少"那种断言。**
+# 一度写过一个 `mem_expected_read_mbs`（频率 × 通道数 × 8 × 系数）拿来当合格线，
+# 1.9.0 整个删掉了：那个数是我们自己算出来的，客户从没定过它，
+# 拿它去判一台机器合不合格没有任何依据。报告里只出现实测值。
+# 频率和通道数仍然采集，但只作为**事实**写进报告（读者要知道这两个前提）。
+
+echo
+echo "=== 性能基准：内存通道数（两种 DMI 写法）==="
+cat > "$TMP/mem-ch-bank.txt" <<'EOF'
+Handle 0x0001, DMI type 17, 92 bytes
+Memory Device
+	Size: 32 GB
+	Locator: CPU0_DIMM_A1
+	Bank Locator: P0_Node0_Channel0_Dimm0
+
+Handle 0x0002, DMI type 17, 92 bytes
+Memory Device
+	Size: 32 GB
+	Locator: CPU0_DIMM_B1
+	Bank Locator: P0_Node0_Channel1_Dimm0
+
+Handle 0x0003, DMI type 17, 92 bytes
+Memory Device
+	Size: No Module Installed
+	Locator: CPU0_DIMM_C1
+	Bank Locator: P0_Node0_Channel2_Dimm0
+EOF
+check "Bank Locator 带 Channel 时直接数通道（空槽不算）" "2" \
+      "$(dmi_channel_count "$TMP/mem-ch-bank.txt")"
+
+cat > "$TMP/mem-ch-loc.txt" <<'EOF'
+Handle 0x0001, DMI type 17, 92 bytes
+Memory Device
+	Size: 16 GB
+	Locator: CPU0_DIMMA0
+	Bank Locator: NODE 0
+
+Handle 0x0002, DMI type 17, 92 bytes
+Memory Device
+	Size: 16 GB
+	Locator: CPU0_DIMMB0
+	Bank Locator: NODE 0
+EOF
+check "没有 Channel 时退回按 Locator 的字母数（单路）" "2" \
+      "$(dmi_channel_count "$TMP/mem-ch-loc.txt")"
+check "两种写法都认不出来时给 0（调用方据此放弃自动算门槛）" "0" \
+      "$(dmi_channel_count "$TMP/nope-mem.txt")"
+
+echo
+echo "=== 显卡满载读数（gpu_load_stats）==="
+#
+# 最低频率要跳过前两个采样点：采样器和 gpu_burn 同一刻起来，
+# 头两个点采到的还是空载降频后的频率。不跳的话报告上会凭空多出
+# "满载最低频率 210MHz"，看着像严重降频。
+cat > "$TMP/gpumetrics.csv" <<'EOF'
+time,index,name,temp_c,power_w,clock_sm_mhz,util_pct,mem_used_mb,fan_pct,temp_tlimit_c
+02:18:01,0,NVIDIA RTX 5090,42,80.0,210,3,512,30,45
+02:18:06,0,NVIDIA RTX 5090,55,300.0,1800,60,20000,50,30
+02:18:11,0,NVIDIA RTX 5090,71,560.0,2700,99,28935,88,12
+02:18:16,0,NVIDIA RTX 5090,73,575.0,2650,99,28935,92,9
+02:18:21,0,NVIDIA RTX 5090,74,580.0,2710,99,28935,90,8
+EOF
+read -r g_cmin g_cavg g_fan g_tl g_pow < <(gpu_load_stats "$TMP/gpumetrics.csv" 0)
+check "最低频率跳过头两个采样点（2650，不是 210）" "2650" "$g_cmin"
+check "平均频率按全部采样算"                       "2014" "$g_cavg"
+check "风扇取峰值"                                 "92"   "$g_fan"
+check "距降频阈值取最小余量"                       "8"    "$g_tl"
+check "功耗取平均"                                 "419"  "$g_pow"
+
+# 老驱动没有 fan/tlimit 两列：必须输出 "-"，不能当成 0，
+# 更不能少输出两个字段（少了会让后面的值整体左移一位）
+cat > "$TMP/gpumetrics-old.csv" <<'EOF'
+time,index,name,temp_c,power_w,clock_sm_mhz,util_pct,mem_used_mb,fan_pct,temp_tlimit_c
+02:18:01,0,NVIDIA A100,42,80.0,210,3,512,,
+02:18:06,0,NVIDIA A100,55,300.0,1300,60,20000,,
+02:18:11,0,NVIDIA A100,71,400.0,1400,99,28935,,
+02:18:16,0,NVIDIA A100,73,400.0,1395,99,28935,,
+EOF
+check "读不到的列给 '-'，不是 0（'风扇 0%' 和 '没有风扇' 是两件事）" \
+      "1395 1076 - - 295" "$(gpu_load_stats "$TMP/gpumetrics-old.csv" 0)"
+check "五个字段一个都不能少（少一个会让后面的值整体左移）" "5" \
+      "$(gpu_load_stats "$TMP/gpumetrics-old.csv" 0 | wc -w)"
 
 # ================================================================
 echo

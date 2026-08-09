@@ -20,6 +20,10 @@ vendor/
 ├── gpu_burn/
 │   ├── gpu_burn                       # 编译好的 gpu_burn（./build/build-gpu-burn.sh 产出）
 │   └── compare.fatbin
+├── bench/                             # 可选：性能基准程序，整个子目录原样铺进盘里
+│   ├── cuda-samples/                  #   bandwidthTest / p2pBandwidthLatencyTest
+│   ├── linpack/                       #   xlinpack_xeon64 + libiomp5.so
+│   └── mlc/                           #   mlc 或 mlc_avx512
 └── logo.png                           # 可选：报告抬头 logo（PNG，建议高度 100px 内）
 ```
 
@@ -31,6 +35,7 @@ vendor/
 | `gpu_burn/` | 显卡型号/显存/驱动版本照常进报告，但不做满载压测，也就没有温度功耗曲线 |
 | `storcli/storcli64` | 阵列卡只能报 PCI 反查到的型号，读不到固件版本和逻辑盘状态（见下方说明：**卡后面物理盘的 SMART 不依赖它**） |
 | `perccli/` `ssacli/` `sas3ircu/` | 同上，只是对应的是 Dell PERC / HPE Smart Array / IT 模式 HBA。一个都不放也正常，那一项判 SKIP 不判 FAIL |
+| `bench/` | 性能基准那几项（显卡传输带宽、显卡间互联、CPU 算力、内存带宽）判 SKIP。硬盘带宽不受影响（`fio` 在盘里） |
 | `logo.png` | 报告抬头不显示 logo |
 
 ---
@@ -245,3 +250,114 @@ vendor/logo.png
 ```
 
 同时记得改 `build/config.sh` 里的「品牌抬头」一块（`COMPANY_NAME` 等）。
+
+---
+
+## 5. bench/ —— 性能基准程序（可选，1.9.0 新增）
+
+**作用**：量出验收单上那些**预期值**（GB/s、GFlops、MB/s）。
+
+这四个程序都不在 Ubuntu 源里，也都不能重新分发到本仓库，所以要手工放进来。
+**一个都不放完全正常** —— 对应的判定会干净地记 SKIP（「本次测试环境未包含…
+基准测试程序，此项不影响整机结论」），绝不判 FAIL。
+
+### 目录结构：整个子目录原样铺进盘里
+
+```
+vendor/bench/
+├── cuda-samples/
+│   ├── bandwidthTest                 # 主机↔显存、显存内部的传输带宽
+│   └── p2pBandwidthLatencyTest       # 显卡两两之间的互联带宽
+├── linpack/
+│   ├── xlinpack_xeon64               # CPU 浮点算力
+│   ├── help.lpk  xhelp.lpk           # 它自己要读的帮助文件，一起放
+│   └── （老版本还要 libiomp5.so，见下）
+└── mlc/
+    └── mlc                           # 内存峰值读带宽
+```
+
+⚠️ **和阵列卡工具不一样：这里是把整个子目录原样铺进 `/opt/klburn/tools/bench/<子目录>/`，
+不是只捞一个可执行文件出来。** 有的程序要带自己的运行库和数据文件，
+只捞二进制的话现场跑起来是一行 `error while loading shared libraries`，
+而那行报错落在日志里看着像"这台机器有问题"。运行时 `bench_run()` 会把程序
+自己那个目录加进 `LD_LIBRARY_PATH`；构建期还会用 `readelf` 逐个自检依赖库
+在不在盘里，缺了会打 WARN（不中断构建 —— 基准程序是可选件）。
+
+> **关于 `libiomp5.so`：新版本不需要了。** oneMKL 2025.3 里的 `xlinpack_xeon64`
+> 是静态链接的，`readelf` 只报 libpthread / libm / libdl / libc（实测确认）。
+> 老一些的分发版确实要它，所以上面那条"整个目录铺进去"的规矩仍然有效 ——
+> 换版本时用 `readelf -d xlinpack_xeon64 | grep NEEDED` 自己看一眼，
+> 要的话把 `libiomp5.so` 一并放进同一个子目录就行。
+
+### 各自从哪来
+
+**cuda-samples**（BSD-3，NVIDIA 官方开源）—— **有现成脚本，直接跑**：
+
+```bash
+./build/build-bench.sh
+```
+
+它做的事：克隆 NVIDIA/cuda-samples、切到 `v12.8`、用 nvcc 把两个样例
+**静态链接** 编出来、`ldd` 自检、放进 `vendor/bench/cuda-samples/`。
+需要机器上装了 CUDA（和 `build-gpu-burn.sh` 同一套），**不需要有 N 卡**。
+
+⚠️ 两件不能改的事，都写在那个脚本顶部：
+
+- **必须 `-cudart static`**（和 gpu_burn 同一个道理）：盘里没有 `libcudart.so`，
+  动态链接的二进制一跑就是 "error while loading shared libraries"，
+  而那行报错落在日志里看着像"这台机器有问题"。脚本编完会 `ldd` 查一遍，
+  查出动态依赖直接让构建失败。
+- **tag 钉在 `v12.8`**：上游从 **13.0 起把 `bandwidthTest` 整个删掉了**
+  （换成了 `nvbandwidth`，输出格式完全不同），而验收单上写的就是
+  `bandwidthTest`，报告的解析函数也是按它的表头写的。
+
+**Intel Optimized LINPACK Benchmark**（`xlinpack_xeon64`）。
+它**不再单独发布**了，现在跟着 oneMKL 走。两条路：
+
+```bash
+# 路子一（本项目实际用的）：直接从 Intel 的 apt 仓库取那个 deb 解开，
+#   不动系统的 apt 配置，只当成一个 tar 包用
+curl -LO https://apt.repos.intel.com/oneapi/pool/main/intel-oneapi-mkl-core-devel-2025.3-2025.3.1-8_amd64.deb
+dpkg-deb -x intel-oneapi-mkl-core-devel-*.deb x
+cp x/opt/intel/oneapi/mkl/*/share/mkl/benchmarks/linpack/{xlinpack_xeon64,help.lpk,xhelp.lpk} \
+   vendor/bench/linpack/
+
+# 路子二：装了 oneAPI 的机器上直接拷
+#   ${MKLROOT}/share/mkl/benchmarks/linpack/
+```
+
+**不用拷它自带的 `lininput_xeon64`** —— 那份样例是一串从 1000 到 45000 的
+15 个规模，跑一轮要很久。运行时会按内存容量自动生成一份只跑一个规模的
+（上限 40000 阶，四次约一分钟），也可以在 `klburn.conf` 里用 `BENCH_LINPACK_N` 写死。
+
+**Intel Memory Latency Checker**（Intel 官网免费下载）：
+
+```bash
+curl -LO https://downloadmirror.intel.com/866182/mlc_v3.12.tgz
+tar xzf mlc_v3.12.tgz && cp Linux/mlc Linux/redist.txt vendor/bench/mlc/
+```
+
+> **v3.12 起不再有单独的 `mlc_avx512`**，包里只有一个 `mlc`，
+> AVX-512 变成了开关 `-Z`。验收单上写的 `mlc_avx512` 对应的就是它 ——
+> 要严格按那个口径测，在 `klburn.conf` 里写 `BENCH_MLC_AVX512=1`。
+> 默认不加：不是每颗 CPU 都有 AVX-512，加了在没有的平台上直接跑不出结果。
+> 它同目录的 `redist.txt` 明确把 `mlc` 列为 Redistributable。
+
+### 没有"阈值"这回事
+
+⚠️ **这几项只报实测值，报告里不会有"参考值 / 是否达标"这种东西，
+也不要去加。**
+
+理由很直接：这张盘是**插上就跑、无人值守**的。现场没有人、也没有地方去填
+"这台机器的带宽应该是多少"。凭空写一个数进来，等于我们替客户定了一个
+他没定过的标准，再拿它去说这台机器行不行 —— 那个数字从哪来的谁也说不清。
+
+**各家的验收要求不一样，同一个数字换个机型可能高得离谱也可能低得可笑。**
+我们的责任到"把数量准、写清楚"为止；谁做验收，谁拿自己那份要求来对。
+
+所以基准项的状态只有两种：**量到了 → PASS（文案里就是那个实测值）**、
+**量不到 → SKIP**（没放程序 / 没有显卡 / 程序没返回有效结果）。
+不会是 WARN，也不会是 FAIL，更不会影响整机结论。
+
+能配的只有"怎么测"的参数（跑几次、多大矩阵、队列深度、每个方向跑多少秒），
+见 `build/chroot-setup.sh` 里生成 `klburn.conf` 的那一段。

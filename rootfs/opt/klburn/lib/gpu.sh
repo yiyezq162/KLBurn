@@ -19,6 +19,9 @@ GPU_PRESENT=0        # lspci 看到的 NVIDIA 显卡数量
 GPU_USABLE=0         # nvidia-smi 能正常读到的数量
 GPU_PCI_LIST=""
 GPU_MISMATCH=0       # 驱动版本与显卡不匹配（内部报告要用）
+# 逐卡的满载运行读数，压测过程中攒起来，收尾时统一出一条结论。
+# 每项 "卡号|最低频率|平均频率|峰值风扇%|距降频阈值余量|平均功耗W"，读不到的位置是 "-"。
+GPU_LOAD_ROWS=()
 
 # ---------------------------------------------------------------- 日志判读
 # gpu_burn 日志 -> "<FAULTY卡数> <累计计算错误数>"
@@ -99,6 +102,49 @@ gpu_burn_progress_steps() {
   [[ "$n" =~ ^[0-9]+$ ]] || n=0
   printf '%s' "$n"
 }
+
+# ---------------------------------------------------------------- 满载运行读数
+# gpu_load_stats <gpu_metrics.csv> <卡号>
+#   -> "<最低SM频率> <平均SM频率> <峰值风扇%> <距降频阈值最小余量> <平均功耗W>"
+#
+# 列序（表头在 gpu_monitor_start）：
+#   1 time  2 index  3 name  4 temp_c  5 power_w  6 clock_sm_mhz
+#   7 util_pct  8 mem_used_mb  9 fan_pct  10 temp_tlimit_c
+#
+# ⚠️ **最低频率要跳过每张卡的前两个采样点。**采样器和 gpu_burn 是同一刻起来的，
+#    头一两个点采到的还是空载降频后的频率（实测几百 MHz），算进去的话
+#    报告上会凭空多出一条"满载最低频率 210MHz"，看着像严重降频。
+#    这和 stress.sh 里 phase_min_freq 是同一个坑，同一个解法。
+#
+# ⚠️ 读不到的列（老驱动没有 tlimit、被动散热的卡没有风扇）输出 **`-`**，
+#    绝不能当成 0 —— "风扇转速 0%" 和 "这张卡没有风扇" 是两件事。
+#    也不能输出空串：五个值是靠 `read -r a b c d e` 按位取的，
+#    空串会让后面的值整体左移一位（"风扇转速" 那一格显示出功耗）。
+gpu_load_stats() {
+  local csv="${1:-}" idx="${2:-}"
+  [[ -f "$csv" ]] || { printf -- '- - - - -'; return; }
+  awk -F, -v i="$idx" '
+    NR > 1 && $2 == i {
+      n++
+      if ($6 ~ /^[0-9]+$/) { c[++cn] = $6 + 0; csum += $6 + 0 }
+      if ($9  ~ /^[0-9]+$/ && ($9 + 0 > fan || fanseen == 0)) { fan = $9 + 0; fanseen = 1 }
+      if ($10 ~ /^-?[0-9]+$/ && (tlseen == 0 || $10 + 0 < tl)) { tl = $10 + 0; tlseen = 1 }
+      if ($5 ~ /^[0-9.]+$/) { psum += $5 + 0; pn++ }
+    }
+    END {
+      cmin = ""; cavg = ""
+      start = (cn > 2 ? 3 : 1)
+      for (k = start; k <= cn; k++) if (cmin == "" || c[k] < cmin) cmin = c[k]
+      if (cn > 0) cavg = int(csum / cn + 0.5)
+      printf "%s %s %s %s %s",
+             (cmin == "" ? "-" : cmin), (cavg == "" ? "-" : cavg),
+             (fanseen ? fan : "-"), (tlseen ? tl : "-"),
+             (pn > 0 ? int(psum / pn + 0.5) : "-")
+    }' "$csv" 2>/dev/null
+}
+
+# 上面那五个值里，哪些是真读到了。**别把 "-" 当成 0 写进报告。**
+gpu_stat_ok() { [[ -n "${1:-}" && "$1" != "-" ]]; }
 
 # ---------------------------------------------------------------- 驱动/显卡不匹配
 # 驱动装了、模块也加载了，但这张卡它不认 —— NVRM 会在内核日志里明说。
@@ -254,20 +300,52 @@ ${rest}此项不影响整机结论。" \
 }
 
 # ---------------------------------------------------------------- GPU 采样
+#
+# 采哪几列：**先探一次再定**。
+#
+# `temperature.gpu.tlimit`（离降温阈值还差几度）和 `fan.speed` 不是每个驱动
+# 每张卡都有：老驱动不认 tlimit，被动散热的数据中心卡没有风扇。
+# 而 nvidia-smi 的行为是"**只要有一个字段不认，整条查询直接报错退出**" ——
+# 也就是说，为了多采两列而写死一个长查询，代价是在老驱动上**一行采样都拿不到**，
+# 然后报告里显卡温度/功耗曲线整个消失。所以按"全 -> 少 -> 最少"探三档，
+# 第一档能跑通就用第一档。
+#
+# CSV 的表头是固定的（列只增不改，见 stress.sh 里 monitor_start 的说明），
+# 探到的字段少于表头时，采样行在末尾补空列 —— 报告生成器按列名取值，
+# 补空只会让那一列没有数据，绝不会让别的列错位。
+GPU_QUERY_BASE="index,name,temperature.gpu,power.draw,clocks.sm,utilization.gpu,memory.used"
+GPU_CSV_COLS=9      # time + 上面 7 列 + fan_pct + temp_tlimit_c
+
+gpu_query_fields() {
+  local q
+  for q in "$GPU_QUERY_BASE,fan.speed,temperature.gpu.tlimit" \
+           "$GPU_QUERY_BASE,fan.speed" \
+           "$GPU_QUERY_BASE"; do
+    if timeout 20 nvidia-smi --query-gpu="$q" --format=csv,noheader,nounits \
+         >/dev/null 2>&1; then
+      printf '%s' "$q"; return 0
+    fi
+  done
+  printf '%s' "$GPU_QUERY_BASE"
+}
+
 GPU_MONITOR_PID=""
 gpu_monitor_start() {
   local csv="$RUN_DIR/gpu_metrics.csv"
-  echo "time,index,name,temp_c,power_w,clock_sm_mhz,util_pct,mem_used_mb" > "$csv"
+  local q; q="$(gpu_query_fields)"
+  dbg "gpu sampler fields: $q"
+  echo "time,index,name,temp_c,power_w,clock_sm_mhz,util_pct,mem_used_mb,fan_pct,temp_tlimit_c" > "$csv"
   (
     while :; do
       local now; now="$(date '+%H:%M:%S')"
-      nvidia-smi --query-gpu=index,name,temperature.gpu,power.draw,clocks.sm,utilization.gpu,memory.used \
-                 --format=csv,noheader,nounits 2>/dev/null \
+      nvidia-smi --query-gpu="$q" --format=csv,noheader,nounits 2>/dev/null \
         | while IFS= read -r line; do
             # 只压掉逗号周围的空格，不能用 tr -d ' '——那会把显卡型号里的
             # 空格也吃掉，报告图例会变成 NVIDIAGeForceRTX4090
             printf '%s,%s\n' "$now" "$(printf '%s' "$line" | sed 's/[[:space:]]*,[[:space:]]*/,/g')"
-          done >> "$csv"
+          done \
+        | awk -F, -v OFS=, -v n="$GPU_CSV_COLS" '{ while (NF < n) $(NF+1) = ""; print }' \
+        >> "$csv"
       sleep 5
     done
   ) &
@@ -317,6 +395,7 @@ gpu_stress() {
   local csv="$RUN_DIR/gpu_metrics.csv"
   local idx tmax pmax
   local overheat=0 hot=0
+  local clk_min clk_avg fan_max tl_min pow_avg
   # ⚠️ 卡号一定要先过滤成纯数字再排序。卡掉线之后这一列里是
   # "No devices were found" 这样的整句错误文案，而 `sort -un` 会把它当成 0 ——
   # 于是它和真正的 0 号卡撞在一起被去重，留下哪一个纯看运气。
@@ -325,6 +404,16 @@ gpu_stress() {
     pmax="$(awk -F, -v i="$idx" 'NR>1 && $2==i && $5!="" {if($5+0>m) m=$5+0} END{printf "%d", m}' "$csv")"
     metric_add "gpu${idx}" "峰值温度" "${tmax}"
     metric_add "gpu${idx}" "峰值功耗W" "${pmax}"
+    # 满载运行的另外四个读数。它们回答的是"这张卡有没有被压到该有的状态"——
+    # 温度好看未必是好事：频率掉下来了、功耗上不去，温度当然低。
+    read -r clk_min clk_avg fan_max tl_min pow_avg < <(gpu_load_stats "$csv" "$idx")
+    gpu_stat_ok "$clk_min" && metric_add "gpu${idx}" "满载最低频率MHz" "$clk_min"
+    gpu_stat_ok "$clk_avg" && metric_add "gpu${idx}" "满载平均频率MHz" "$clk_avg"
+    gpu_stat_ok "$pow_avg" && metric_add "gpu${idx}" "满载平均功耗W"   "$pow_avg"
+    gpu_stat_ok "$fan_max" && metric_add "gpu${idx}" "峰值风扇转速%"   "$fan_max"
+    gpu_stat_ok "$tl_min"  && metric_add "gpu${idx}" "距降频阈值最小余量" "$tl_min"
+    # 逐卡攒起来，压测判定完之后统一出一条"满载运行状态"的结论
+    GPU_LOAD_ROWS+=("${idx}|${clk_min}|${clk_avg}|${fan_max}|${tl_min}|${pow_avg}")
     (( tmax >= GPU_TEMP_FAIL )) && overheat=$(( overheat + 1 ))
     (( tmax >= GPU_TEMP_WARN && tmax < GPU_TEMP_FAIL )) && hot=$(( hot + 1 ))
   done
@@ -403,4 +492,48 @@ gpu_stress() {
   else
     result_add "stress_gpu" "GPU 压力测试" "$ST_PASS" "无计算错误，温度正常；$detail" "raw/stress/gpu-burn.log"
   fi
+
+  check_gpu_load_profile
+}
+
+# ---------------------------------------------------------------- 满载运行状态
+# 「温度没超标」和「这张卡真的被压到该有的状态」是两回事。
+#
+# 一张散热不行的卡会自己把频率降下来保护，于是**温度曲线反而好看** ——
+# 只看温度什么都发现不了。验收单点名要看的四个读数（频率 / 功耗 / 风扇 /
+# 距降频阈值的余量）正是为了堵这个口子，所以单独出一条结论。
+#
+# ⚠️ **这一项只报读数，不判达标与否。**不同型号的卡满载频率从 1400MHz 到
+# 2700MHz 都有，凭空写死一个数就是替客户定了一个他没定过的标准；而且这张盘
+# 是无人值守跑的，现场也没有地方去填这种数。
+# 真正的显卡故障由 stress_gpu 去抓（计算错误 / 掉卡 / 超温），那几条才有资格
+# 影响整机结论。
+check_gpu_load_profile() {
+  (( ${#GPU_LOAD_ROWS[@]} > 0 )) || return 0
+
+  local row idx clk_min clk_avg fan_max tl_min pow_avg
+  local shown="" nclk=0
+  for row in "${GPU_LOAD_ROWS[@]}"; do
+    IFS='|' read -r idx clk_min clk_avg fan_max tl_min pow_avg <<< "$row"
+    local one="显卡${idx}："
+    if gpu_stat_ok "$clk_avg"; then
+      one="${one}平均频率 ${clk_avg}MHz"
+      gpu_stat_ok "$clk_min" && one="${one}（最低 ${clk_min}MHz）"
+      nclk=$(( nclk + 1 ))
+    fi
+    gpu_stat_ok "$pow_avg" && one="${one}，平均功耗 ${pow_avg}W"
+    gpu_stat_ok "$fan_max" && one="${one}，风扇最高 ${fan_max}%"
+    gpu_stat_ok "$tl_min"  && one="${one}，距降频阈值最少还有 ${tl_min}°C"
+    shown="${shown}${one}；"
+  done
+
+  if (( nclk == 0 )); then
+    # 一张卡的频率都没采到 —— 采样器没起来或者驱动不给这一列，不是机器的问题
+    result_add "check_gpu_load" "显卡满载运行状态" "$ST_SKIP" \
+      "本次未能采集到显卡满载期间的频率读数，本项未做核对。此项不影响整机结论。" ""
+    return 0
+  fi
+
+  result_add "check_gpu_load" "显卡满载运行状态" "$ST_PASS" \
+    "满载期间各卡的实测运行读数：${shown%；}。" "raw/stress/gpu-burn.log"
 }

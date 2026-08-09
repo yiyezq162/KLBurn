@@ -613,7 +613,7 @@ verify_sel() {
 
 # ---------------------------------------------------------------- 汇总入口
 verify_all() {
-  section "PHASE 4/4  POST-TEST VERIFICATION"
+  section "PHASE 5/5  POST-TEST VERIFICATION"
   collect_smart "post"
   verify_smart
   verify_disk_temp
