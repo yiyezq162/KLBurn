@@ -1228,6 +1228,257 @@ print("、".join(t for t in re.findall(r"见下方「([^」]+)」", h) if t not 
 PYEOF
 )"
 
+# ================================================================
+echo
+echo "=== 测试范围（单项专测，1.9.5）==="
+#
+# 这一组守的是这个功能**唯一不能犯的错**：
+#
+#   ⚠️⚠️ 范围模式的报告绝不能看起来像"这台机器全测过了"。
+#
+# 一台只测了 CPU 的机器，报告上打一个和全量测试一模一样的绿色 PASS，
+# 半年后没人分得清它到底测过什么 —— 那比不做这个功能还糟。
+# 所以每个范围都要验四件事：抬头写明范围、没测的部件不出结论行、
+# 编号不断号、指路句不指空；info 那一档另外验"不许出 PASS 大字"。
+
+# 报告里的编号自检：一级章节按「一二三四五」顺序、二级编号在每一节里
+# 从 1 连续数上去。**裁掉小节最典型的翻车就是断号**（3.1 之后直接 3.3），
+# 而那是纯人眼才看得出来的东西，所以在这里算给它看。
+numbering_bad() {
+  python3 - "$1" <<'PYEOF'
+import re, sys
+h = open(sys.argv[1], encoding="utf-8").read()
+CN = "一二三四五六七八九十"
+bad = []
+h2 = re.findall(r"<h2>([^<]+)</h2>", h)
+for i, t in enumerate(h2):
+    if not t.startswith(CN[i] + "、"):
+        bad.append("一级章节第 %d 个应以「%s、」开头，实际是「%s」" % (i + 1, CN[i], t))
+# 二级编号：按出现顺序分组，每组内必须是 N.1 N.2 N.3 …
+subs = re.findall(r"<h3>(\d+)\.(\d+) ", h)
+seen = {}
+for major, minor in subs:
+    want = seen.get(major, 0) + 1
+    if int(minor) != want:
+        bad.append("小节 %s.%s 断号（应为 %s.%d）" % (major, minor, major, want))
+    seen[major] = int(minor)
+# 一级章节的序号和它下面二级编号的前缀要对得上
+for i, t in enumerate(h2):
+    m = [k for k in seen if int(k) == i + 1]
+    if t.startswith(CN[i] + "、") and not m and i + 1 in [int(k) for k in seen]:
+        bad.append("章节「%s」下的小节前缀不是 %d" % (t, i + 1))
+print("；".join(bad))
+PYEOF
+}
+# 先证明这个自检**抓得住**断号，否则它和一条永远为真的断言没区别
+check "编号自检抓得住断号" "小节 3.3 断号（应为 3.2）" \
+      "$(printf '<h2>一、a</h2><h2>二、b</h2><h2>三、c</h2><h3>3.1 x</h3><h3>3.3 y</h3>' \
+         > "$TMP/nb.html"; numbering_bad "$TMP/nb.html")"
+
+# 每个范围各造一份 run-dir：**只放这个范围真的会产生的结论行**。
+# 这正是产品的行为（范围之外整项不跑、不出结论行），fixture 要照着它造，
+# 不能"全都放进去再指望报告去藏"——那是另一种实现，而我们没有实现它。
+COMMON_ROWS='{"id":"collect_system","name":"硬件信息采集","status":"PASS","detail":"采集完成","ref":"","time":"t"}
+{"id":"check_mem_cap","name":"内存容量核对","status":"PASS","detail":"装机容量与系统识别容量一致","ref":"","time":"t"}
+{"id":"check_dimm_uniform","name":"内存条一致性","status":"PASS","detail":"8 条内存规格一致","ref":"","time":"t"}
+{"id":"check_bios_profile","name":"平台关键设置","status":"PASS","detail":"已读取平台关键设置的实际状态。","ref":"","time":"t"}
+{"id":"test_nic","name":"网卡连通性","status":"PASS","detail":"1 个口 ping 通网关","ref":"","time":"t"}
+{"id":"check_psu","name":"电源","status":"PASS","detail":"2 个电源模块均在位且进电","ref":"","time":"t"}'
+
+scope_rows() {
+  printf '%s\n' "$COMMON_ROWS"
+  case "$1" in
+    cpu)  cat <<'EOF'
+{"id":"bench_cpu_flops","name":"CPU 浮点算力","status":"PASS","detail":"全核浮点矩阵运算（问题规模 40000 阶，重复 4 次取最好成绩）的平均算力实测 3010.0 GFlops。","ref":"","time":"t"}
+{"id":"validate_cpu_sdc","name":"CPU 计算正确性","status":"PASS","detail":"全核运行 120 秒的计算正确性诊断，未发现计算结果错误","ref":"","time":"t"}
+{"id":"stress_cpu","name":"CPU 压力测试","status":"PASS","detail":"全核满载 10 分钟，未出现错误","ref":"","time":"t"}
+{"id":"verify_ecc","name":"内存 ECC 复查","status":"PASS","detail":"压测前后未新增 ECC 错误","ref":"","time":"t"}
+{"id":"verify_throttle","name":"CPU 热节流复查","status":"PASS","detail":"压测期间未触发热节流","ref":"","time":"t"}
+{"id":"verify_dmesg","name":"内核日志复查","status":"PASS","detail":"压测期间内核日志无硬件错误","ref":"","time":"t"}
+EOF
+          ;;
+    mem)  cat <<'EOF'
+{"id":"bench_mem_bw","name":"内存读取带宽","status":"PASS","detail":"内存满负载读取带宽实测 245678.9 MB/s。","ref":"","time":"t"}
+{"id":"stress_mem","name":"内存压力测试","status":"PASS","detail":"内存满载 10 分钟，未出现错误","ref":"","time":"t"}
+{"id":"verify_ecc","name":"内存 ECC 复查","status":"PASS","detail":"压测前后未新增 ECC 错误","ref":"","time":"t"}
+{"id":"verify_dmesg","name":"内核日志复查","status":"PASS","detail":"压测期间内核日志无硬件错误","ref":"","time":"t"}
+EOF
+          ;;
+    gpu)  cat <<'EOF'
+{"id":"bench_gpu_bw","name":"显卡数据传输带宽","status":"PASS","detail":"主机与显卡之间的数据传输带宽实测 24.5 GB/s。","ref":"","time":"t"}
+{"id":"check_gpu_ecc","name":"显存 ECC","status":"PASS","detail":"未出现显存 ECC 错误","ref":"","time":"t"}
+{"id":"stress_gpu","name":"GPU 压力测试","status":"PASS","detail":"2 张显卡满载 10 分钟，未出现计算错误","ref":"","time":"t"}
+{"id":"check_gpu_load","name":"显卡满载运行状态","status":"PASS","detail":"满载期间各卡的实测运行读数：显卡0：平均频率 2500MHz。","ref":"","time":"t"}
+{"id":"verify_dmesg","name":"内核日志复查","status":"PASS","detail":"压测期间内核日志无硬件错误","ref":"","time":"t"}
+EOF
+          ;;
+    disk) cat <<'EOF'
+{"id":"bench_disk_bw","name":"硬盘读写带宽","status":"PASS","detail":"对 1 块硬盘逐块测量 128KB 大块顺序读带宽（每块每个方向各 20 秒），逐盘数值见下方「硬盘顺序读带宽」。本次未进行破坏性写入测试，因此只测量了读带宽。","ref":"raw/bench/","time":"t"}
+{"id":"stress_disk","name":"硬盘压力测试","status":"PASS","detail":"对 1 块硬盘进行了 10 分钟读写压力测试","ref":"","time":"t"}
+{"id":"verify_smart","name":"硬盘 SMART 复查","status":"PASS","detail":"1 块盘压测前后无新增坏道/错误计数","ref":"raw/smart-post/","time":"t"}
+{"id":"verify_disk_temp","name":"硬盘温度","status":"PASS","detail":"压测后各盘温度均在正常范围","ref":"","time":"t"}
+{"id":"verify_dmesg","name":"内核日志复查","status":"PASS","detail":"压测期间内核日志无硬件错误","ref":"","time":"t"}
+EOF
+          ;;
+    info) cat <<'EOF'
+{"id":"bench_cpu_flops","name":"CPU 浮点算力","status":"PASS","detail":"全核浮点矩阵运算（问题规模 40000 阶，重复 4 次取最好成绩）的平均算力实测 3010.0 GFlops。","ref":"","time":"t"}
+{"id":"bench_mem_bw","name":"内存读取带宽","status":"PASS","detail":"内存满负载读取带宽实测 245678.9 MB/s。","ref":"","time":"t"}
+EOF
+          ;;
+  esac
+}
+
+declare -A SCOPE_BUDGET=(
+  [cpu]='{"cpu_secs":600,"mem_secs":0,"disk_secs":0,"gpu_secs":0,"bench_secs":90}'
+  [mem]='{"cpu_secs":0,"mem_secs":600,"disk_secs":0,"gpu_secs":0,"bench_secs":90}'
+  [gpu]='{"cpu_secs":0,"mem_secs":0,"disk_secs":0,"gpu_secs":600,"bench_secs":90}'
+  [disk]='{"cpu_secs":0,"mem_secs":0,"disk_secs":600,"gpu_secs":0,"bench_secs":90}'
+  [info]='{"cpu_secs":0,"mem_secs":0,"disk_secs":0,"gpu_secs":0,"bench_secs":90}'
+)
+declare -A SCOPE_NAME=(
+  [cpu]="CPU 专项测试" [mem]="内存专项测试" [gpu]="显卡专项测试"
+  [disk]="硬盘专项测试" [info]="仅导出硬件信息"
+)
+
+for sc in cpu mem gpu disk info; do
+  RS="$TMP/run-scope-$sc"
+  mkdir -p "$RS/raw"
+  cp -r "$RD/raw/." "$RS/raw/" 2>/dev/null || true
+  scope_rows "$sc" > "$RS/results.jsonl"
+  printf '{"group":"platform","key":"处理器 x2APIC","value":"已关闭"}\n' > "$RS/metrics.jsonl"
+  python3 - "$RS/meta.json" "$sc" "${SCOPE_BUDGET[$sc]}" <<'PYEOF'
+import json, sys
+path, scope, budget = sys.argv[1], sys.argv[2], sys.argv[3]
+m = {
+    "klburn_version": "1.9.5", "company_name": "广州市鲲林科技有限公司",
+    "base_os": "Ubuntu Server 24.04.4", "build_date": "2026-08-10 10:00:00",
+    "serial": "TESTSN0001", "scope": scope,
+    "profile": "INVENTORY" if scope == "info" else "QUICK",
+    "planned_secs": 0 if scope == "info" else 600, "elapsed_secs": 700,
+    "start_time": "2026-08-10 10:00:00", "end_time": "2026-08-10 10:11:40",
+    "budget": json.loads(budget),
+    "disk_confirmed": 1 if scope == "disk" else 0,
+    "data_partition": "/dev/sdb1", "clock_synced": 1, "clock_suspect": 0,
+}
+json.dump(m, open(path, "w", encoding="utf-8"), ensure_ascii=False)
+PYEOF
+  # 硬盘专测那份要有逐盘带宽表，否则那句「见下方「硬盘顺序读带宽」」指空
+  if [[ "$sc" == "disk" ]]; then
+    mkdir -p "$RS/raw/bench"
+    cat > "$RS/raw/bench/fio-sda-read.json" <<'EOF'
+{"jobs":[{"jobname":"libaio_read_128k_32_1","read":{"bw":532480,"iops":4160},"write":{"bw":0,"iops":0},"error":0}]}
+EOF
+    # 逐盘 SMART 对比要有**坏道类**属性才画得出来。基础 fixture 那块盘一条
+    # 都没有（真实存在的情况：某些盘不上报这些属性），所以这里单独造一块。
+    # 顺便把寿命类字段也塞进去 —— 下面有一组断言钉着它们**不许**被印出来。
+    cat > "$RS/raw/smart-pre/sda.norm.json" <<'EOF'
+{"model":"ST1000NM000A-2J3100","serial":"WS20SNM6","firmware":"TN03",
+ "realloc_sectors":0,"pending_sectors":0,"uncorrectable":0,"crc_errors":0,
+ "power_on_hours":1512,"power_cycles":325,"percentage_used":3,
+ "temperature_c":29,"smart_passed":true}
+EOF
+    cat > "$RS/raw/smart-post/sda.norm.json" <<'EOF'
+{"model":"ST1000NM000A-2J3100","serial":"WS20SNM6","firmware":"TN03",
+ "realloc_sectors":0,"pending_sectors":0,"uncorrectable":0,"crc_errors":0,
+ "power_on_hours":1512,"power_cycles":325,"percentage_used":3,
+ "temperature_c":31,"smart_passed":true}
+EOF
+  fi
+  # CPU 专测那份要有逐颗封装温度，才画得出「逐颗 CPU 满载温度」
+  if [[ "$sc" == "cpu" ]]; then
+    cat > "$RS/sys_metrics.csv" <<'EOF'
+time,phase,cpu_temp_c,cpu_freq_mhz,load1,mem_used_mb,mem_total_mb,cpu_power_w,cpu_pkg_temps,ecc_ce,ecc_ue
+10:00:05,cpu,45,1156,8.28,2305,31763,95,44;45,0,0
+10:00:10,cpu,71,2699,17.87,2764,31763,281,52;71,0,0
+10:00:15,cpu,78,2681,64.20,2795,31763,347,55;78,0,0
+EOF
+  fi
+  # 内存专测那份要有前后 ECC 快照，才画得出逐条对比表
+  if [[ "$sc" == "mem" ]]; then
+    printf '# snap\nECC CPU0_DIMM_A1 0 0\nECC CPU0_DIMM_B1 0 0\n' > "$RS/raw/counters-pre.txt"
+    printf '# snap\nECC CPU0_DIMM_A1 3 0\nECC CPU0_DIMM_B1 0 0\n' > "$RS/raw/counters-post.txt"
+  fi
+  # 显卡专测那份要有逐卡频率/风扇采样
+  if [[ "$sc" == "gpu" ]]; then
+    cat > "$RS/gpu_metrics.csv" <<'EOF'
+time,index,name,temp_c,power_w,clock_sm_mhz,util_pct,mem_used_mb,fan_pct,temp_tlimit_c
+10:00:05,0,NVIDIA RTX 4090,42,58,420,0,12,30,42
+10:00:10,0,NVIDIA RTX 4090,71,431,2520,100,21504,62,13
+10:00:15,0,NVIDIA RTX 4090,79,449,2490,100,21504,71,5
+EOF
+  fi
+
+  OUTS="$TMP/report-scope-$sc.html"
+  "$GEN" --run-dir "$RS" --out "$OUTS" >/dev/null 2>&1
+  check "$sc：报告生成成功" "0" "$?"
+
+  # ① 抬头必须写明范围 —— 这是整组里最要紧的一条
+  has "$OUTS" "本轮范围 <b>${SCOPE_NAME[$sc]}</b>" "$sc：抬头写明本轮范围"
+  # ② 结论块下面紧跟一句"范围以外的部件这一轮没有测过"。
+  #    单项专测和 info 的措辞不一样：前者说"这几项不作结论"，
+  #    后者要直说"这份报告不能当验收依据"。
+  if [[ "$sc" == "info" ]]; then
+    has "$OUTS" "不能作为出厂验收依据" "$sc：明说这份报告不能当验收依据"
+  else
+    has "$OUTS" "本报告不对这几项的可靠性作出结论" "$sc：说明范围外的部件这一轮没测"
+  fi
+  # ③ 编号不断号
+  check "$sc：一级/二级编号都不断号" "" "$(numbering_bad "$OUTS")"
+  # ④ 指路句不指空
+  check "$sc：每一句「见下方「X」」都能找到对应的标题" "" \
+        "$(python3 - "$OUTS" <<'PYEOF'
+import re, sys
+h = open(sys.argv[1], encoding="utf-8").read()
+heads = set(re.findall(r"<h[23]>(?:[\d.]+\s*)?([^<]+)</h[23]>", h))
+names = set(re.findall(r'<span class="rn">([^<]+)</span>', h))
+print("、".join(sorted({t for t in re.findall(r"见下方「([^」]+)」", h)
+                       if t not in heads and t not in names})))
+PYEOF
+)"
+  # ⑤ 硬件清单八节在任何范围下都保留（"有啥列啥、没有的标未安装"这条不变量
+  #    不因为范围而松动 —— 那八节正是单项专测的人也要核对的"平台参数"）
+  check "$sc：硬件清单仍然是 8 个小节" "8" "$(cnt "$OUTS" '<h3>1\.[0-9]+ ')"
+  # ⑥ 范围外的压测时长不许印一行 0 秒（读的人会以为那一项失败了）
+  case "$sc" in
+    cpu)  has_no "$OUTS" "内存压测时长" "$sc：范围外的压测时长不出现"
+          has_no "$OUTS" "GPU 压测时长"  "$sc：同上" ;;
+    mem)  has_no "$OUTS" "CPU 压测时长"  "$sc：范围外的压测时长不出现" ;;
+    disk) has_no "$OUTS" "CPU 压测时长"  "$sc：范围外的压测时长不出现" ;;
+  esac
+done
+
+# ---------------------------------------------------------------- info 那一档
+#
+# ⚠️⚠️ **这是整个功能的安全项。**一台只导出了配置清单的机器，报告上打一个
+#    绿色 PASS 大字，读的人得到的信息是"这台机器合格" —— 而报告里没有任何
+#    东西支持这个结论。tests/mutate.sh 里有一条变异专门守着它。
+OUTI="$TMP/report-scope-info.html"
+check "info：不许出现 PASS 大字" "0" "$(cnt "$OUTI" 'class="verdict v-PASS"')"
+has "$OUTI" 'class="verdict v-INFO"' "info：换成中性的结论块"
+has "$OUTI" "仅硬件信息 · 未做测试"   "info：结论块上写明这不是一次测试"
+has "$OUTI" "不能作为出厂验收依据"     "info：明说这份报告不能当验收依据"
+has "$OUTI" "四、其他检查结论"         "info：那一节不许顶着「压力测试结果」的标题"
+has_no "$OUTI" "压力测试结果"          "info：一个压测都没跑，不许出现这个标题"
+has_no "$OUTI" "压测时长"              "info：没有压测就没有压测时长表"
+# 但配置核对和硬件清单一个字都不能少 —— 那正是这一档的全部价值
+has "$OUTI" "一、硬件清单" "info：硬件清单照常"
+has "$OUTI" "二、配置核对" "info：配置核对照常"
+has "$OUTI" "三、性能基准" "info：性能基准照跑（几十秒的事，而且不写盘）"
+
+# ---------------------------------------------------------------- 单项专测写得更细
+has "$TMP/report-scope-cpu.html"  "逐颗 CPU 满载温度"          "cpu：给出逐颗温度"
+has "$TMP/report-scope-mem.html"  "逐条内存 ECC 计数"          "mem：给出逐条 ECC 对比"
+has "$TMP/report-scope-gpu.html"  "逐卡满载频率 / 风扇曲线"     "gpu：给出频率/风扇曲线"
+has "$TMP/report-scope-disk.html" "逐盘 SMART 关键项"          "disk：给出逐盘 SMART 对比"
+# ⚠️ 加细不等于放宽红线：寿命类字段在**任何**范围下都不进交付报告。
+for f in 通电时间 通电次数 已用寿命 percentage_used power_on_hours; do
+  has_no "$TMP/report-scope-disk.html" "$f" "disk：寿命类字段照样不进交付报告"
+done
+# 全量报告里一格都不多（它本来就够长了）
+for f in "逐颗 CPU 满载温度" "逐条内存 ECC 计数" "逐盘 SMART 关键项"; do
+  has_no "$OUTA" "$f" "全量报告里不加这些专项明细"
+done
+
 # ---------------------------------------------------------------- 不许出空章节
 #
 # 「性能基准」整节是有条件的。判据必须是**这一节真的画得出东西**，

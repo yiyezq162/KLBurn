@@ -40,14 +40,25 @@ command_not_found_handle() {
 
 command -v python3 >/dev/null 2>&1 || { echo "需要 python3"; exit 1; }
 
-mkrun() {          # mkrun <目录> <results.jsonl 内容>
+mkrun() {          # mkrun <目录> <results.jsonl 内容> [scope]
   local d="$TMP/$1"; shift
+  local rows="$1"; shift
+  local scope="${1:-}"
   mkdir -p "$d/raw"
+  # scope 留空 = **老 run-dir 的形状**（1.9.4 及以前根本没有这个字段）。
+  # 它们确实都是全量跑出来的，所以工具那边必须默认成 full。
+  #
+  # ⚠️ 这一段先拼成变量再进 heredoc。写成 `${scope:+,"scope":"$scope"}` 是不行的：
+  #    `${x:+word}` 里的 word 会走一遍**引号移除**，双引号原地消失，
+  #    落到文件里是 `,scope:cpu` —— 不是合法 JSON，读出来整份 meta 都是空的，
+  #    而报错只会表现为"范围列写着全量"，指向一个完全不相干的地方。
+  local sfrag=""
+  [[ -n "$scope" ]] && sfrag=",\"scope\":\"$scope\""
   cat > "$d/meta.json" <<EOF
 {"klburn_version":"1.9.2","serial":"SN-$(basename "$d")","profile":"QUICK",
- "start_time":"2026-08-10 10:00:00","elapsed_secs":600}
+ "start_time":"2026-08-10 10:00:00","elapsed_secs":600$sfrag}
 EOF
-  printf '%s\n' "$1" > "$d/results.jsonl"
+  printf '%s\n' "$rows" > "$d/results.jsonl"
   printf '%s' "$d"
 }
 
@@ -81,6 +92,40 @@ mkrun "20260810_101500_2x-Intel_64GB_备注 带空格" \
   '{"id":"collect_system","name":"硬件信息采集","status":"PASS","detail":"d","ref":"","time":"t"}' >/dev/null
 python3 "$SUM" "$TMP" -o "$OUT" >/dev/null 2>&1
 check "目录名带中文备注和空格照样认" "4" "$(( $(grep -c . "$OUT") - 1 ))"
+
+echo
+echo "=== 汇总：单项专测不许和全量混成同一个「已通过」（1.9.5）==="
+#
+# ⚠️⚠️ 这一组守的是这个功能在批次侧**唯一致命的**失效方式：
+#
+#   一台只跑了 CPU 专测的机器，results.jsonl 里当然没有 FAIL，
+#   汇总表就把它列成 PASS。可它的内存、硬盘、显卡**根本没测过**。
+#   而这张表正是拿来做"这一批能不能出货"这个决定的 ——
+#   一列全是 PASS 的表格里混进这么一台，没有任何人会发现。
+#
+# 所以非全量的结论列自带范围后缀（PASS(CPU)），排序筛选时和 PASS 不是同一个值。
+mkrun "20260810_120000_2x-Intel_64GB_CPU" \
+  '{"id":"collect_system","name":"硬件信息采集","status":"PASS","detail":"d","ref":"","time":"t"}
+{"id":"stress_cpu","name":"CPU 压力测试","status":"PASS","detail":"d","ref":"","time":"t"}' cpu >/dev/null
+mkrun "20260810_130000_2x-Intel_64GB_INFO" \
+  '{"id":"collect_system","name":"硬件信息采集","status":"PASS","detail":"d","ref":"","time":"t"}' info >/dev/null
+OUTS="$TMP/summary-scope.csv"
+python3 "$SUM" "$TMP" -o "$OUTS" > "$TMP/sum-scope.log" 2>&1
+check "带范围后缀的目录名照样认得出来" "0" "$?"
+check "CPU 专测的结论不许是光秃秃的 PASS" "PASS(CPU)" \
+      "$(awk -F, '$1=="20260810_120000_2x-Intel_64GB_CPU"{print $2}' "$OUTS")"
+check "仅导出信息那一档同理" "PASS(INFO)" \
+      "$(awk -F, '$1=="20260810_130000_2x-Intel_64GB_INFO"{print $2}' "$OUTS")"
+check "范围单独占一列" "CPU 专项测试" \
+      "$(awk -F, '$1=="20260810_120000_2x-Intel_64GB_CPU"{print $3}' "$OUTS")"
+# 老 run-dir（meta.json 里根本没有 scope 字段）必须默认成全量 ——
+# 默认成别的值会把历史上所有报告重新解释一遍。
+check "老 run-dir 没有 scope 字段时按全量算" "PASS" \
+      "$(awk -F, '$1=="good"{print $2}' "$OUTS")"
+check "老 run-dir 的范围列写「全量老化测试」" "全量老化测试" \
+      "$(awk -F, '$1=="good"{print $3}' "$OUTS")"
+has "$TMP/sum-scope.log" "非全量 2 台" "屏幕上要直接报出有几台不是全量测的"
+has "$TMP/sum-scope.log" "不能和全量测试的 PASS 一起算作" "并且当场说清楚这意味着什么"
 
 echo
 echo "=== 汇总：CSV 要能在 Windows 上直接双击打开 ==="

@@ -930,8 +930,14 @@ conformance_all() {
   check_nic_uniform
   check_disk_uniform
   check_gpu_uniform
-  check_gpu_ecc
-  check_gpu_remap
+  # 显存 ECC 和行重映射跟着**显卡范围**走：它们问的是"这几张卡的显存健不健康"，
+  # 只测 CPU / 内存 / 硬盘的那几轮里不该出现这两条结论。
+  # 其余各项在任何范围下都跑 —— 它们回答的是"这台机器装了什么、装得对不对"，
+  # 那是任何一份报告的底座，也正是「仅导出报告」那一档要的东西。
+  if scope_runs gpu_health; then
+    check_gpu_ecc
+    check_gpu_remap
+  fi
   check_bios_profile
   check_virtual_dev
   check_sn_consistency

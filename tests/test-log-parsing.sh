@@ -615,6 +615,66 @@ check "取到的不是计时表的秒数（0.529）" "0" \
 check "日志不存在时给 0 0" "0 0" "$(linpack_parse "$TMP/nope-lp.log")"
 
 echo
+echo "=== 性能基准：CPU 浮点算力（自研程序，1.9.5）==="
+# ⚠️ 这一份是 **vendor/bench/cpuflops/klburn_flops 真跑出来的原样输出**
+#    （本机 24 线程、N=3000、跑三次），不是照着源码编的。
+#
+# 换掉 xlinpack_xeon64 的理由见 CHANGELOG 1.9.5 第三节：那个是 Intel 发布的
+# 二进制，在海光 / AMD 上第一行就罢工，非 Intel 机器这一项永远测不出来。
+cat > "$TMP/flops.log" <<'EOF'
+KLBurn CPU floating-point throughput
+Method        : LU factorization (LAPACK dgesv), double precision
+Problem size  : 3000
+Threads       : 24
+Matrix memory : 0.07 GiB
+Runs          : 3
+
+Run    Time(s)       GFlops     MaxResidual
+  1     0.3595       50.114       4.219e-15
+  2     0.3576       50.385       4.219e-15
+  3     0.3461       52.063       4.219e-15
+
+Best GFlops   : 52.063
+Average GFlops: 50.854
+Max residual  : 4.219e-15
+EOF
+check "取最好成绩，并数出真的跑成了几次" "52.0630 3" "$(flops_parse "$TMP/flops.log")"
+# 别取成平均值（50.854）或最后一次（52.063 恰好也是最好的，所以单独钉平均值）
+check "取到的不是平均值（50.854）" "0" \
+      "$(flops_parse "$TMP/flops.log" | grep -c '^50\.854' || true)"
+# 也别把"问题规模 3000"或"线程数 24"当成算力
+check "取到的不是问题规模或线程数" "0" \
+      "$(flops_parse "$TMP/flops.log" | grep -cE '^(3000|24)\.' || true)"
+
+# ⚠️ **被超时打断的那份必须仍然出数。**bench_run 的超时是硬的（无人值守的工具
+#    里任何外部程序都得短得住），被 kill 时末尾那三行汇总根本没打出来 ——
+#    只认 `Best GFlops` 的话，已经量到的三次成绩就白扔了，还平白判一个 SKIP。
+grep -v '^Best GFlops\|^Average GFlops\|^Max residual' "$TMP/flops.log" > "$TMP/flops-cut.log"
+check "被超时打断（没有 Best GFlops 那一行）仍要从逐次表里捞出成绩" "52.0630 3" \
+      "$(flops_parse "$TMP/flops-cut.log")"
+
+# 求解失败的那几次不算进"跑成了几次"
+cat > "$TMP/flops-partial.log" <<'EOF'
+KLBurn CPU floating-point throughput
+Problem size  : 3000
+
+Run    Time(s)       GFlops     MaxResidual
+  1     0.3595       50.114       4.219e-15
+  2          -            -               -   (dgesv info=3)
+EOF
+check "求解失败的那一次不计入次数" "50.1140 1" "$(flops_parse "$TMP/flops-partial.log")"
+
+# 一次都没跑成（内存要不起 / 残差过大 / 参数不合法）-> 0，调用方会干净地 SKIP
+cat > "$TMP/flops-none.log" <<'EOF'
+KLBurn CPU floating-point throughput
+Problem size  : 40000
+内存不足：需要约 298.0 GiB
+EOF
+check "一次都没跑成时给 0 0（-> SKIP，不是 FAIL）" "0.0000 0" \
+      "$(flops_parse "$TMP/flops-none.log")"
+check "日志不存在时给 0 0" "0 0" "$(flops_parse "$TMP/nope-flops.log")"
+
+echo
 echo "=== 性能基准：内存读带宽（MLC）==="
 # ⚠️ 这一份是 **v3.12 真跑出来的原样输出**（制表符、行尾多余的制表符、
 #    那两行 `***` 提示，全都照抄），不是照着记忆编的。

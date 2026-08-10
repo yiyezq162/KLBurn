@@ -611,6 +611,98 @@ fmt_hms() {
   printf '%02d:%02d:%02d' $((s/3600)) $((s%3600/60)) $((s%60))
 }
 
+# ================================================================
+# 测试范围（单项专测）
+# ================================================================
+#
+# 现场经常只想验一个部件（或者只想导一份配置清单），跑一遍全量既费时间又费电。
+# 所以开机后先选**范围**，再选时长。范围写在 KLB_SCOPE 里，取值就下面这六个。
+#
+# ⚠️ **默认必须是 full。**这份 lib 会被脱机测试和老 run-dir 的工具直接 source，
+#    不设默认值的话它们全都会在 `set -u` 下炸；而"没人选"的语义就是全量测试
+#    （菜单超时也是回落到 full）。
+: "${KLB_SCOPE:=full}"
+
+# ---------------------------------------------------------------- 范围本身
+# scope_valid <范围> —— 认不认识这个值
+scope_valid() {
+  case "${1:-}" in full|cpu|mem|gpu|disk|info) return 0 ;; *) return 1 ;; esac
+}
+
+# scope_tag <范围> -> 目录名/报告文件名的后缀
+#
+# ⚠️ **只能是 ASCII。**这个串会打在 Linux 文本控制台上（显示不了中文，
+#    1.7.2 栽过一屏 ◆），还要当 exFAT 目录名和报告文件名。
+#    中文范围名只出现在 HTML 报告里（那边没这个问题），由报告生成器自己映射。
+scope_tag() {
+  case "${1:-full}" in
+    cpu)  printf 'CPU'  ;; mem)  printf 'MEM'  ;; gpu) printf 'GPU'  ;;
+    disk) printf 'DISK' ;; info) printf 'INFO' ;; *)   printf 'Full' ;;
+  esac
+}
+
+# scope_label <范围> -> 屏幕上那句话（纯 ASCII，同上）
+scope_label() {
+  case "${1:-full}" in
+    cpu)  printf 'CPU ONLY'       ;; mem)  printf 'MEMORY ONLY' ;;
+    gpu)  printf 'GPU ONLY'       ;; disk) printf 'DISK ONLY'   ;;
+    info) printf 'INVENTORY ONLY' ;; *)    printf 'FULL BURN-IN' ;;
+  esac
+}
+
+# ---------------------------------------------------------------- 范围 -> 跑不跑
+#
+# scope_runs <判定组> [范围] —— 返回 0 = 这一轮要跑；返回 1 = **整项不跑**
+#
+# ⚠️ "不跑"的意思是**连结论行都不产生**，不是"跑了再藏起来"。
+#    后者白白浪费现场的时间，而且 tests/test-report-render.sh 里那条
+#    "报告里的判定条数 = results.jsonl 条数 − 故意藏起来的" 会算不明白。
+#
+# 下面这张表就是这个功能的全部语义，改一格就是改一次产品行为，
+# 对应的断言在 tests/test-hw-checks.sh 里逐格钉着。几条要记住的：
+#
+#   * **采集 / 平台核对 / 一致性核对 / 网卡** 在所有范围下都跑。它们合起来
+#     几十秒，回答的是"这台机器装了什么、装得对不对"—— 那正是"仅导出报告"
+#     这一档要的东西，也是任何一份报告的底座。
+#   * **整机复查那四条**（dmesg / SEL / AER / BMC 传感器）在任何跑了压测的
+#     范围里都要跑：它们查的是"这一轮机器整体有没有报错"，和压了哪个部件无关。
+#     info 没压测，所以不跑。
+#   * **verify_ecc 在 cpu 范围也跑**：CPU 满载会把内存也带起来，ECC 计数照样有意义。
+#   * **info 跑性能基准、不跑压测也不跑专项验证**：基准都是几十秒的事，
+#     而且一个字节都不往盘上写（bench_disk_bw 是只读的）。
+scope_runs() {
+  local group="${1:-}" scope="${2:-${KLB_SCOPE:-full}}" allow=""
+  case "$group" in
+    inventory|platform|conform|nic)  allow="full cpu mem gpu disk info" ;;
+    gpu_health)                      allow="full gpu info" ;;
+    bench_cpu)                       allow="full cpu info" ;;
+    bench_mem)                       allow="full mem info" ;;
+    bench_gpu)                       allow="full gpu info" ;;
+    bench_disk)                      allow="full disk info" ;;
+    validate_cpu)                    allow="full cpu" ;;
+    validate_gpu)                    allow="full gpu" ;;
+    stress_cpu)                      allow="full cpu" ;;
+    stress_mem)                      allow="full mem" ;;
+    stress_gpu)                      allow="full gpu" ;;
+    stress_disk)                     allow="full disk" ;;
+    verify_ecc)                      allow="full cpu mem" ;;
+    verify_throttle)                 allow="full cpu" ;;
+    verify_disk)                     allow="full disk" ;;
+    verify_common)                   allow="full cpu mem gpu disk" ;;
+    # 认不出来的组名一律跑。新加判定忘了登记的后果应该是"多跑一项"，
+    # 不是"从报告里静悄悄消失"——后者没有任何人会发现。
+    *)                               return 0 ;;
+  esac
+  [[ " $allow " == *" $scope "* ]]
+}
+
+# 这一轮到底压不压测。info 那一档整个 PHASE 3/5 都不进。
+scope_has_stress() {
+  local s="${1:-${KLB_SCOPE:-full}}"
+  scope_runs stress_cpu "$s" || scope_runs stress_mem "$s" \
+    || scope_runs stress_gpu "$s" || scope_runs stress_disk "$s"
+}
+
 # ---------------------------------------------------------------- 机器标识
 # 报告文件名要一眼看得出是哪台机器，用 CPU 型号 + 内存容量。
 
@@ -666,11 +758,19 @@ get_mem_gb() {
   printf '%dGB' "$gb"
 }
 
-# 报告文件/目录名：日期_时间_CPU_内存
-#   20260730_110512_2x-Intel-Xeon-Gold-6430_512GB
+# 报告文件/目录名：日期_时间_CPU_内存_范围
+#   20260730_110512_2x-Intel-Xeon-Gold-6430_512GB_Full
+#   20260730_110512_2x-Intel-Xeon-Gold-6430_512GB_CPU
+#
+# 范围后缀是**安全项**，不是装饰：一台只测了 CPU 的机器和一台全量测过的机器，
+# 报告目录长得一模一样的话，半年后没人分得清哪份能当验收依据。
+# 只能用 ASCII（这个串要当 exFAT 目录名，也会打在文本控制台上）。
+#
+# 同一分钟内连测两次时 factory-test.sh 会在**最末尾**再加 _01 _02，
+# 所以完整形状是 <日期>_<时间>_<CPU>_<内存>_<范围>[_<序号>]。
 get_machine_tag() {
-  local stamp="${1:-$(date '+%Y%m%d_%H%M%S')}"
-  printf '%s_%s_%s' "$stamp" "$(get_cpu_tag)" "$(get_mem_gb)"
+  local stamp="${1:-$(date '+%Y%m%d_%H%M%S')}" scope="${2:-${KLB_SCOPE:-full}}"
+  printf '%s_%s_%s_%s' "$stamp" "$(get_cpu_tag)" "$(get_mem_gb)" "$(scope_tag "$scope")"
 }
 
 # 取整机序列号：优先系统序列号，其次主板，再不行用 MAC

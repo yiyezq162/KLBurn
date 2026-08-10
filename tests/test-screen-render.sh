@@ -572,12 +572,17 @@ check "开机 banner 和页面标题共用同一套艺术字" "yes" \
       "$(if declare -f banner | grep -q '_BRAND_ART'; then echo yes; else echo no; fi)"
 
 # 每一块整屏页面都要有它 —— 少一块，那一页就"掉牌子"了
-for f in cfg_panel dash_burn dash_disk select_duration; do
+for f in cfg_panel dash_burn dash_disk select_duration select_scope; do
   check "$f 第一行是标题条" "1" "$(declare -f "$f" | grep -c 'brand_bar' || true)"
 done
 check "破坏性写确认那屏也要有" "1" \
       "$(grep -c 'brand_bar' "$LIB/storage.sh" || true)"
-check "最终结论那屏也要有" "1" "$(grep -c '^brand_bar' "$FT" || true)"
+# ⚠️ 不能锚在行首（`^brand_bar`）：1.9.5 起收尾那一屏按范围分了两支
+# （TEST COMPLETE / INVENTORY COMPLETE），调用点缩进了两格，
+# 行首锚点会说"最终结论那屏没有标题条" —— 一个不存在的问题。
+check "最终结论那屏也要有" "yes" \
+      "$(grep -qE '^[[:space:]]*brand_bar "\$\(panel_width\)" "(TEST|INVENTORY) COMPLETE"' "$FT" \
+         && echo yes || echo no)"
 
 # ---- 抬头三段不许重复（截图看出来的）----
 # 第一版把 label 同时当中间段和右边段用，屏幕上就成了
@@ -591,6 +596,109 @@ check "硬盘那屏同理" "yes" \
 HDR3="$(box_row3 80 'KLBurn v9.9.9' 'BURN-IN  CPU + MEMORY' 'QUICK')"
 check "抬头里同一个词不许出现两次" "1" \
       "$(printf '%s\n' "$HDR3" | grep -o 'BURN-IN' | grep -c . || true)"
+
+# ================================================================
+echo
+echo "=== 测试范围菜单 + 仅导出报告那一档的结论屏（1.9.5）==="
+#
+# 这一屏是新加的第一块页面，两条硬约束和别的屏一样：
+#   1. **一个中文都不许有**（Linux 文本控制台会变成一屏 ◆）
+#   2. **绝不能卡住流程** —— 60 秒倒计时，超时自动选 [1] 全量
+#
+# 菜单本身是交互的（read -n 1），没法在这里真按键，所以分两头钉：
+# 内容（六个选项都在、都是 ASCII）在这里验，默认键和倒计时在
+# tests/test-hw-checks.sh 里按源码形状验。
+
+# 把菜单那几行 printf 的内容捞出来验字符集 —— 整个函数体里包含注释（中文），
+# 所以只能看它**打到屏幕上的那部分**。
+SCOPE_MENU="$(declare -f select_scope | grep -oE "'[^']*'" | tr -d "'")"
+check "范围菜单打到屏幕上的内容全是可打印 ASCII" "" \
+      "$(printf '%s' "$SCOPE_MENU" | LC_ALL=C grep -nvE '^[ -~]*$' | head -3 | tr '\n' ';')"
+for opt in 'FULL BURN-IN' 'CPU ONLY' 'MEMORY ONLY' 'GPU ONLY' 'DISK ONLY' 'INVENTORY ONLY'; do
+  check "范围菜单里有「$opt」" "yes" \
+        "$(declare -f select_scope | grep -qF "$opt" && echo yes || echo no)"
+done
+check "六个选项键 [1]~[6] 都在" "6" \
+      "$(declare -f select_scope | grep -oE '\[[1-6]\]' | sort -u | grep -c . || true)"
+# 现场最怕"插上去没反应"。这一屏必须自己往下走。
+check "范围菜单必须走 menu_pick（那里面才有倒计时和超时兜底）" "1" \
+      "$(declare -f select_scope | grep -c 'menu_pick' || true)"
+check "menu_pick 超时时返回默认键，不会一直等" "1" \
+      "$(declare -f menu_pick | grep -c 'remaining <= 0' || true)"
+# 倒计时提示打在 stderr 上（选中的键走 stdout 交给调用方），
+# 两条流混了的话屏幕上要么没有倒计时、要么 KLB_SCOPE 里混进一屏提示语。
+check "倒计时提示写 stderr（否则会混进函数的返回值）" "yes" \
+      "$(declare -f menu_pick | grep -q '>&2' && echo yes || echo no)"
+
+# 六个范围的标签在屏幕上都是 ASCII（它们会进标题条和收尾那一屏）
+for s in full cpu mem gpu disk info; do
+  lbl="$(scope_label "$s")"
+  check "scope_label $s 在屏幕上是纯 ASCII" "$lbl" \
+        "$(printf '%s' "$lbl" | LC_ALL=C tr -cd '\40-\176')"
+done
+
+# 配置核对那一屏也要标出本轮范围，否则操作员看不出这一轮要干什么。
+#
+# ⚠️ 前面几组断言把 ROWS 调高过（验大字那一路），这里要的是**版面宽度**，
+#    所以显式退成一行标题条 —— 大字那六行本来就不补齐到面板宽度。
+KLB_SCOPE=cpu
+_SAVED_COMPACT="$BRAND_COMPACT"
+BRAND_COMPACT=1
+cfg_reset
+cfg_add "CPU" "  2 x Intel Xeon Gold 6530   32C/64T"
+SCOPE_PANEL="$(cfg_panel 80 '2026-08-10 10:00:00')"
+check "配置核对面板抬头写明本轮范围" "1" \
+      "$(printf '%s\n' "$SCOPE_PANEL" | grep -c 'SCOPE: CPU ONLY' || true)"
+assert_width "带范围的配置核对面板" "$SCOPE_PANEL" 80
+assert_ascii "带范围的配置核对面板" "$SCOPE_PANEL"
+BRAND_COMPACT="$_SAVED_COMPACT"
+KLB_SCOPE=full
+
+# ---- 仅导出报告那一档不许打绿色 PASS 大字 ----
+#
+# ⚠️⚠️ **这是整个范围功能的安全项。**那一轮一个压测都没跑、一个部件都没验过，
+#    打一个和全量测试一模一样的绿 PASS，现场（和半年后翻照片的人）读到的
+#    就是"这台机器合格"。tests/mutate.sh 里有一条变异专门守着它。
+# 大字前面紧挨着一段颜色转义（printf '%s' "$C_GRN$C_BLD" 之后才 cat 出艺术字），
+# 所以比对之前一律先 strip_ansi —— 直接 grep '^  #' 会因为那段转义而永远不中。
+#
+# ⚠️⚠️ **别写成 `verdict_banner ... | grep -q ...`。**
+#    `grep -q` 命中第一条就退出并关掉管道，上游的 printf/cat 吃到 SIGPIPE
+#    退 141，而本脚本开着 `set -o pipefail` —— 整条管道于是返回失败，
+#    `&& echo yes` 不执行。**输出短的时候上游可能先写完，所以它时好时坏**：
+#    实测同一份代码连跑三遍，结果是 0 1 1。
+#    一条时好时坏的断言比没有断言更糟（下一个人会以为是自己改坏了）。
+#    所以一律**先把输出接进变量**，再拿 case/grep -c 去比。
+INFO_BANNER="$(verdict_banner PASS info | strip_ansi)"
+PASS_FULL_RAW="$(verdict_banner PASS full)"
+PASS_FULL="$(printf '%s\n' "$PASS_FULL_RAW" | strip_ansi)"
+FAIL_INFO="$(verdict_banner FAIL info | strip_ansi)"
+has_str() { case "$1" in *"$2"*) echo yes ;; *) echo no ;; esac; }
+PASS_ART='^  ########    ###     ######'      # PASS 大字的第一行
+FAIL_ART='^  ########    ###    #### ##'      # FAIL 大字的第一行
+INFO_ART='^  ######## ##    ## ########'      # INFO 大字的第一行
+check "info 档不许出现 PASS 大字" "0" \
+      "$(printf '%s\n' "$INFO_BANNER" | grep -c "$PASS_ART" || true)"
+check "info 档换成中性的 INFO 大字" "1" \
+      "$(printf '%s\n' "$INFO_BANNER" | grep -c "$INFO_ART" || true)"
+# ⚠️ 认颜色只匹配 SGR 参数本身（`1;32m`），别去拼 ESC 字符 ——
+#    `$'\033\[1;32m'` 那种写法在 grep 里的转义层数很容易差一层，
+#    而差了之后这条断言**永远为真**（0 匹配），和没有断言一模一样。
+#    下面那条"全量档仍然是绿的"就是配套的反向自检：两条一起才说明它真的在认色。
+check "info 档那块大字不许是绿色（绿在这块屏上就是「合格」）" "0" \
+      "$(verdict_banner PASS info | grep -c '1;32m' || true)"
+check "info 档要当场说清楚这不是一次通过" "yes" \
+      "$(has_str "$INFO_BANNER" 'This is NOT a pass')"
+check "info 档的结论屏（去掉颜色后）全是可打印 ASCII" "" \
+      "$(printf '%s\n' "$INFO_BANNER" | LC_ALL=C grep -nvE '^[ -~]*$' | head -3 | tr '\n' ';')"
+# FAIL 照打不误：info 档里 FAIL 的来源是采集/配置核对真的判出了问题
+check "info 档里的 FAIL 照常打大字（那是实打实的问题）" "1" \
+      "$(printf '%s\n' "$FAIL_INFO" | grep -c "$FAIL_ART" || true)"
+# 其余范围一切照旧
+check "全量档的 PASS 大字不受影响" "1" \
+      "$(printf '%s\n' "$PASS_FULL" | grep -c "$PASS_ART" || true)"
+check "全量档的 PASS 大字仍然是绿的（顺便证明上面那条认色断言不是空转）" "yes" \
+      "$(has_str "$PASS_FULL_RAW" '1;32m')"
 
 # ---- 重绘不许留空白帧 ----
 # 先清屏再逐行画的话，清空和画完之间有个空窗（十几行、每行还要 fork 一次 tr），

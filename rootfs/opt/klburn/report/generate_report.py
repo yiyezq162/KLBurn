@@ -242,6 +242,8 @@ PROFILE_TEXT = {
     "LONG":      "长测",
     "SOAK":      "深度",
     "ENDURANCE": "耐久",
+    # 「仅导出报告」那一档没有时长可选，也就没有档位（见 factory-test.sh）
+    "INVENTORY": "不做压测",
 }
 
 
@@ -249,6 +251,60 @@ def profile_text(p):
     if not p:
         return None
     return PROFILE_TEXT.get(str(p).upper(), p)
+
+
+# ============================================================ 本轮测试范围
+#
+# meta.json 里的 scope 取值和 lib/core.sh 的 scope_tag()/scope_runs() 一一对应：
+#     full / cpu / mem / gpu / disk / info
+#
+# ⚠️ 屏幕上是英文（Linux 文本控制台显示不了中文），报告里是中文 ——
+#    所以这张中文表只能长在这里。它和 shell 那边的键必须一一对得上，
+#    tests/test-hw-checks.sh 有一条逐键对账钉着。
+#
+# ⚠️⚠️ **范围模式的报告绝不能看起来像"这台机器全测过了"。**
+#    一台只测了 CPU 的机器和一台全量测过的机器，报告上打一样的绿色 PASS，
+#    半年后没人分得清 —— 那比不做这个功能还糟。所以：
+#      * 抬头那一行必须写明本轮范围
+#      * 结论块下面紧跟一句"哪些部件本轮没有测"
+#      * info 档不出 PASS 大字（见 build_html 里的 verdict 那一段）
+SCOPE_CN = {
+    "full": "全量老化测试",
+    "cpu":  "CPU 专项测试",
+    "mem":  "内存专项测试",
+    "gpu":  "显卡专项测试",
+    "disk": "硬盘专项测试",
+    "info": "仅导出硬件信息",
+}
+
+# 每个范围"这一轮测了哪些部件"的一句话。写给读报告的人，不是写给代码的。
+SCOPE_COVER = {
+    "full": None,           # 全量：不需要额外解释
+    "cpu":  "本轮只对 <b>CPU</b> 做了压力测试与专项验证。"
+            "内存、硬盘、显卡未做老化测试，本报告不对这几项的可靠性作出结论。",
+    "mem":  "本轮只对 <b>内存</b> 做了压力测试与 ECC 复查。"
+            "CPU、硬盘、显卡未做老化测试，本报告不对这几项的可靠性作出结论。",
+    "gpu":  "本轮只对 <b>显卡</b> 做了压力测试与专项诊断。"
+            "CPU、内存、硬盘未做老化测试，本报告不对这几项的可靠性作出结论。",
+    "disk": "本轮只对 <b>硬盘</b> 做了压力测试与 SMART 复查。"
+            "CPU、内存、显卡未做老化测试，本报告不对这几项的可靠性作出结论。",
+    "info": "本轮<b>未进行任何老化压力测试</b>，只采集了硬件配置并做了配置核对。"
+            "本报告是一份硬件配置清单，<b>不能作为出厂验收依据</b>。",
+}
+
+
+def scope_of(meta):
+    """meta.json 里的 scope。老的 run-dir 没有这个字段，一律当全量。
+
+    ⚠️ 默认必须是 full：1.9.4 以前的报告目录里没有 scope，而它们确实是
+       全量跑出来的。默认成别的值会把历史报告全部重新解释一遍。
+    """
+    s = str((meta or {}).get("scope") or "full").lower()
+    return s if s in SCOPE_CN else "full"
+
+
+def scope_cn(meta):
+    return SCOPE_CN[scope_of(meta)]
 
 
 def fmt_dur(sec):
@@ -1174,10 +1230,125 @@ class Data(object):
                         pass
         return temps, freqs, powers
 
+    # ---------- 单项专测的加细数据 ----------
+    #
+    # 下面这几个方法只在**对应的专项范围**里被用到（CPU 专测、内存专测、
+    # 硬盘专测）。做单项测试的人本来就是冲着那一个部件来的，报告里给他更细的
+    # 东西是这个功能的一半价值；反过来，全量报告里再加这些只会把它撑得更长。
+    #
+    # ⚠️ 加细**不等于**放宽红线：这里出现的每一格都必须是参与判定或直接说明
+    #    本轮测量的数据。寿命类字段（通电时间、累计写入量、磨损百分比）
+    #    在任何范围下都不进交付报告（report-policy 二-3）。
+
+    def pkg_temp_series(self):
+        """逐颗物理 CPU 的封装温度曲线 -> {"0": [...], "1": [...]}。
+
+        取 sys_metrics.csv 的 cpu_pkg_temps 列（分号分隔，"52;78"）。
+        这一列 1.7.0 就在采，但一直只有内部报告读它 —— 而"双路机器一颗 52°C、
+        另一颗 78°C"正是散热器没装好 / 风道偏的典型信号，做 CPU 专项测试的人
+        最该看到的就是这个。老 run-dir 没有这一列，取不到就当没有。
+        """
+        path = os.path.join(self.run_dir, "sys_metrics.csv")
+        out = defaultdict(list)
+        if not os.path.exists(path):
+            return {}
+        with open(path, newline="", encoding="utf-8", errors="replace") as f:
+            for row in csv.DictReader(f):
+                raw = (row.get("cpu_pkg_temps") or "").strip()
+                if not raw:
+                    continue
+                for i, part in enumerate(raw.split(";")):
+                    try:
+                        out[str(i)].append(float(part))
+                    except (TypeError, ValueError):
+                        pass
+        return {k: v for k, v in out.items() if v}
+
+    def ecc_delta_rows(self):
+        """逐条内存的 ECC 计数（压测前 / 压测后 / 新增）。
+
+        读 raw/counters-{pre,post}.txt 里 `ECC <标签> <可纠正> <不可纠正>` 那几行
+        （lib/collect.sh 的 ecc_snapshot 落的）。内核没有 EDAC 接口的机器上
+        这两份里一条 ECC 行都没有 —— 那就整张表不画，不铺一屏 0。
+        """
+        def snap(phase):
+            got = {}
+            for line in read_text(self.rawpath("counters-%s.txt" % phase)).splitlines():
+                p = line.split()
+                if len(p) >= 4 and p[0] == "ECC":
+                    try:
+                        got[p[1]] = (int(p[2]), int(p[3]))
+                    except ValueError:
+                        pass
+            return got
+
+        pre, post = snap("pre"), snap("post")
+        if not post:
+            return []
+        rows = []
+        for label in sorted(post):
+            pce, pue = pre.get(label, (0, 0))
+            cce, cue = post[label]
+            rows.append(OrderedDict([
+                ("内存位置", label.replace("_", " ")),
+                ("可纠正错误（测前）", pce),
+                ("可纠正错误（测后）", cce),
+                ("不可纠正错误（测前）", pue),
+                ("不可纠正错误（测后）", cue),
+                ("本轮新增", (cce - pce) + (cue - pue)),
+            ]))
+        return rows
+
+    def smart_delta_rows(self):
+        """逐盘关键 SMART 项的压测前后对比。
+
+        ⚠️ **只列参与判定的那几项。**通电时间 / 累计写入量 / 磨损百分比这类
+           寿命字段回答不了"这台机器合不合格"，按 report-policy 二-3
+           一律不进交付报告 —— 哪怕这一轮是硬盘专项测试。
+        """
+        fields = [
+            ("realloc_sectors", "重分配扇区"),
+            ("pending_sectors", "待处理扇区"),
+            ("uncorrectable",   "不可修正错误"),
+            ("crc_errors",      "接口 CRC 错误"),
+            ("media_errors",    "介质错误"),
+        ]
+        rows = []
+        d = self.rawpath("smart-post")
+        if not os.path.isdir(d):
+            return []
+        for fn in sorted(os.listdir(d)):
+            if not fn.endswith(".norm.json"):
+                continue
+            key = fn[: -len(".norm.json")]
+            post = read_json(os.path.join(d, fn)) or {}
+            pre = read_json(self.rawpath("smart-pre", fn)) or {}
+            row = OrderedDict([("设备", key),
+                               ("型号", clean(post.get("model")) or "—")])
+            any_val = False
+            for k, label in fields:
+                a, b = pre.get(k), post.get(k)
+                if a is None and b is None:
+                    row[label] = "—"          # 这类盘没有这个属性（NVMe 没有 CRC 等）
+                    continue
+                any_val = True
+                row[label] = "%s → %s" % ("—" if a is None else a,
+                                          "—" if b is None else b)
+            if any_val:
+                rows.append(row)
+        return rows
+
     def gpu_series(self):
-        """返回 {gpu_index: {'temp': [...], 'power': [...], 'name': str}}"""
+        """返回 {gpu_index: {'temp': [...], 'power': [...], 'clock': [...],
+                             'fan': [...], 'name': str}}
+
+        clock / fan 是 1.9.5 才在报告里用起来的（采集从 1.9.0 就有了）：
+        显卡专项测试要回答"这张卡满载时到底跑到了什么状态"，只看温度和功耗
+        答不上来 —— 掉频和风扇转速才是。老 run-dir 没有这两列，取不到就是空。
+        """
         path = os.path.join(self.run_dir, "gpu_metrics.csv")
-        data = defaultdict(lambda: {"temp": [], "power": [], "name": ""})
+        data = defaultdict(lambda: {"temp": [], "power": [], "clock": [], "fan": [],
+                                    "name": ""})
         if not os.path.exists(path):
             return {}
         with open(path, newline="", encoding="utf-8", errors="replace") as f:
@@ -1187,7 +1358,8 @@ class Data(object):
                     continue
                 d = data[idx]
                 d["name"] = row.get("name") or d["name"]
-                for k, col in (("temp", "temp_c"), ("power", "power_w")):
+                for k, col in (("temp", "temp_c"), ("power", "power_w"),
+                               ("clock", "clock_sm_mhz"), ("fan", "fan_pct")):
                     try:
                         d[k].append(float(row[col]))
                     except (ValueError, KeyError, TypeError):
@@ -1329,6 +1501,13 @@ td.num{text-align:right;font-variant-numeric:tabular-nums}
 .verdict{display:inline-block;padding:12px 34px;border-radius:8px;font-size:34px;
 font-weight:800;letter-spacing:4px;color:#fff}
 .v-PASS{background:var(--pass)}.v-FAIL{background:var(--fail)}
+/* 「仅导出硬件信息」那一档的结论块：灰色，绝不能是绿色 —— 绿在这份报告里
+   就是"合格"的意思，而那一轮一个部件都没有做过测试。字号也小一截：
+   它不是结论，是一句说明。
+   （注意：这段注释会随 CSS 一起进 HTML，所以措辞受两条守卫管 ——
+     不许带源码里那种星号重点记号，也不许带 test-internal-report.sh
+     盯着的那几个否定式说法。） */
+.v-INFO{background:var(--skip);font-size:19px;letter-spacing:2px;padding:10px 22px}
 .badge{display:inline-block;min-width:52px;text-align:center;padding:2px 10px;
 border-radius:4px;color:#fff;font-weight:700;font-size:12px;letter-spacing:1px}
 .b-PASS{background:var(--pass)}.b-FAIL{background:var(--fail)}
@@ -1614,9 +1793,11 @@ def build_html(data):
     # 抬头和标题都取自 meta.json（构建时钉进盘里的），不写死在代码里 ——
     # 换一家公司出盘时只改 build/config.sh，这里一行都不用动。
     A("<h1>%s</h1>" % E(meta.get("report_title") or "服务器出厂老化测试报告"))
-    A('<div class="sub">整机序列号 <b>%s</b> ｜ 测试时间 %s ~ %s ｜ '
+    # 本轮范围排在**最前面**：读这份报告的人要回答的第一个问题是
+    # "这台机器到底测了什么"，而不是"它测了多久"。
+    A('<div class="sub">本轮范围 <b>%s</b> ｜ 整机序列号 <b>%s</b> ｜ 测试时间 %s ~ %s ｜ '
       "测试模式 %s ｜ 实际耗时 %s</div>"
-      % (E(serial), E(meta.get("start_time")), E(meta.get("end_time")),
+      % (E(scope_cn(meta)), E(serial), E(meta.get("start_time")), E(meta.get("end_time")),
          E(profile_text(meta.get("profile"))), E(fmt_dur(meta.get("elapsed_secs")))))
     A('<div class="sub">测试工具 %s v%s（%s，构建于 %s）</div>'
       % (E(meta.get("product_name") or "KLBurn"), E(meta.get("klburn_version")),
@@ -1624,9 +1805,31 @@ def build_html(data):
     A("</header>")
 
     # ---------------- 总结论 ----------------
-    A('<div style="margin:18px 0 8px"><span class="verdict v-%s">%s</span>' % (overall, overall))
+    #
+    # ⚠️⚠️ **「仅导出硬件信息」那一档不许出现 PASS 大字。**
+    #
+    # 那一轮一个压测都没跑、一个部件都没验过。打一个和全量测试**一模一样**的
+    # 绿色 PASS，读报告的人得到的信息是"这台机器合格" —— 而报告里根本没有
+    # 任何东西支持这个结论。半年后拿这份报告去争，我们说不清楚。
+    #
+    # FAIL 照打不误：info 档里 FAIL 的来源是采集/配置核对真的判出了问题
+    # （内存容量对不上、看到虚拟设备），那是实打实的、必须看见的东西。
+    #
+    # tests/mutate.sh 里有一条变异专门守着这里。
+    if scope_of(meta) == "info" and overall == "PASS":
+        A('<div style="margin:18px 0 8px"><span class="verdict v-INFO">仅硬件信息 · 未做测试</span>')
+    else:
+        A('<div style="margin:18px 0 8px"><span class="verdict v-%s">%s</span>' % (overall, overall))
     A('<span style="margin-left:18px" class="sub">通过 %d 项 ｜ 失败 %d 项 ｜ 告警 %d 项 ｜ 跳过 %d 项</span></div>'
       % (n_pass, n_fail, n_warn, n_skip))
+
+    # 结论块下面紧跟一句"这一轮到底覆盖了什么"。
+    # **必须紧贴结论，不能埋到下面某一节里** —— 一个孤零零的 PASS 加上一行
+    # "本轮只测了 CPU"，和一个孤零零的 PASS，是两份完全不同的报告。
+    cover = SCOPE_COVER.get(scope_of(meta))
+    if cover:
+        A('<div class="notice notice-info">%s</div>' % cover)
+
     if no_results:
         # 措辞只说"这次测试没跑成"，不说机器有问题——两码事
         A('<div class="notice notice-warn"><b>本次测试未产生任何判定结果，'
@@ -1876,40 +2079,74 @@ def build_html(data):
               "「测试口径」一列是本次实际使用的参数，格式为"
               "「引擎_方向_块大小_队列深度_线程数」。</p>" % (way, safety))
             A(table(bench_disk))
-        stress_h2 = "四、压力测试结果"
-        raw_h2 = "五、原始日志"
+        stress_no, raw_no = "四", "五"
         sub_prefix = 4
     else:
-        stress_h2 = "三、压力测试结果"
-        raw_h2 = "四、原始日志"
+        stress_no, raw_no = "三", "四"
         sub_prefix = 3
+
+    budget = meta.get("budget") or {}
+
+    def bsec(key):
+        """budget 里的秒数，读不出来当 0。老 run-dir 可能整个没有 budget 段。"""
+        try:
+            return int(budget.get(key) or 0)
+        except (TypeError, ValueError):
+            return 0
+
+    # 「仅导出硬件信息」那一档一个压测都没跑，这一节里剩下的是采集、电源、
+    # 网卡连通性、开机内核日志这些检查 —— 顶着「压力测试结果」的标题就是
+    # 说得比做得多（report-policy 六-4）。标题跟着实际内容走。
+    burn_ran = bsec("cpu_secs") + bsec("mem_secs") + bsec("gpu_secs") + bsec("disk_secs") > 0
+    stress_h2 = "%s、%s" % (stress_no, "压力测试结果" if burn_ran else "其他检查结论")
+    raw_h2 = "%s、原始日志" % raw_no
 
     # ================================================================
     A("<h2>%s</h2>" % stress_h2)
 
-    budget = meta.get("budget") or {}
-    dur = OrderedDict([
-        ("测试模式", profile_text(meta.get("profile"))),
-        ("计划总时长", fmt_dur(meta.get("planned_secs"))),
-        ("实际总耗时", fmt_dur(meta.get("elapsed_secs"))),
-        ("CPU 压测时长", fmt_dur(budget.get("cpu_secs"))),
-        ("内存压测时长", fmt_dur(budget.get("mem_secs"))),
-    ])
-    # 「硬盘压测时长 0秒」和那行 SKIP 是一回事，藏就一起藏干净
-    if disk_ran:
-        dur["硬盘压测时长"] = fmt_dur(budget.get("disk_secs"))
-    dur["GPU 压测时长"] = fmt_dur(budget.get("gpu_secs"))
-    # 性能基准跑在压测之前，占的是"实际总耗时"里的一段。不写出来的话，
-    # 各项压测时长加起来对不上总耗时，客户会以为报告算错了。
-    try:
-        if int(budget.get("bench_secs") or 0) > 0:
+    if burn_ran:
+        dur = OrderedDict([
+            ("测试模式", profile_text(meta.get("profile"))),
+            ("计划总时长", fmt_dur(meta.get("planned_secs"))),
+            ("实际总耗时", fmt_dur(meta.get("elapsed_secs"))),
+        ])
+        # 「XX 压测时长 0秒」和那一项没出现在报告里是一回事，藏就一起藏干净。
+        # 硬盘那一行 1.7.6 起就是这么做的，单项专测把同一条规矩推到其余三项：
+        # 只测 CPU 的那一轮里印一行「内存压测时长 0秒」，读的人第一反应是
+        # "内存压测失败了"，而实际上这一轮压根没打算测内存。
+        for label, key, shown in (
+            ("CPU 压测时长",  "cpu_secs",  bsec("cpu_secs") > 0),
+            ("内存压测时长",  "mem_secs",  bsec("mem_secs") > 0),
+            # 硬盘那一行跟着 disk_ran 走而不是秒数：跳过硬盘压测时它和那行 SKIP
+            # 是成对藏的（见上面 DISK_STRESS_ROWS 那段）。
+            ("硬盘压测时长",  "disk_secs", disk_ran),
+            ("GPU 压测时长",  "gpu_secs",  bsec("gpu_secs") > 0),
+        ):
+            if shown:
+                dur[label] = fmt_dur(budget.get(key))
+        # 性能基准跑在压测之前，占的是"实际总耗时"里的一段。不写出来的话，
+        # 各项压测时长加起来对不上总耗时，客户会以为报告算错了。
+        if bsec("bench_secs") > 0:
             dur["性能基准耗时"] = fmt_dur(budget.get("bench_secs"))
-    except (TypeError, ValueError):
-        pass
-    A(kv_block(dur))
-    A('<p class="sub">CPU / 内存 / GPU 三项并发压测（互不占用彼此的时间，选多长测多长）。%s</p>'
-      % ("硬盘单独测试，不与前三项同时进行，所以以上时长不能直接相加算总耗时。"
-         if disk_ran else ""))
+        A(kv_block(dur))
+
+        # 导语也跟着实际跑了几项走。只压了一项的时候"三项并发"是句假话。
+        conc = [n for n, k in (("CPU", "cpu_secs"), ("内存", "mem_secs"), ("GPU", "gpu_secs"))
+                if bsec(k) > 0]
+        if len(conc) > 1:
+            lead = "%s 三项并发压测（互不占用彼此的时间，选多长测多长）。" % " / ".join(conc) \
+                if len(conc) == 3 else \
+                "%s 并发压测（互不占用彼此的时间，选多长测多长）。" % " / ".join(conc)
+        elif len(conc) == 1:
+            lead = "本轮为 %s 专项压测，全部时长都用在这一项上。" % conc[0]
+        else:
+            lead = "本轮为硬盘专项压测。"
+        A('<p class="sub">%s%s</p>'
+          % (lead, "硬盘单独测试，不与上述项目同时进行，所以以上时长不能直接相加算总耗时。"
+             if disk_ran and conc else ""))
+    else:
+        A('<p class="sub">本轮<b>未进行老化压力测试</b>，以下为采集与配置检查阶段产生的结论。'
+          "各部件的可靠性需另行安排老化测试后才能判断。</p>")
 
     # 二级编号动态生成：硬盘、GPU 没测的时候它们的小节整个不出现，
     # 写死编号就会出现 2.2 后面直接跳到 2.5 这种断号。
@@ -1922,6 +2159,70 @@ def build_html(data):
 
     A(SUB("各项结论"))
     result_list(other_rows)
+
+    # ---------------- 单项专测：把那一个部件写细一点 ----------------
+    #
+    # 做单项测试的人是冲着那一个部件来的，报告理应比全量报告在这一项上更细。
+    # 三条边界：
+    #   1. **只在对应范围里出现。**全量报告一格都不多 —— 它本来就够长了。
+    #   2. **数据不在就整节不画**（老 run-dir、内核没有 EDAC、没跑 SMART），
+    #      不铺一屏 "—"。
+    #   3. 红线照旧：寿命类字段一格都不许进来，性能数字一律不判合格。
+    scope = scope_of(meta)
+
+    if scope == "cpu":
+        pkg = data.pkg_temp_series()
+        if len(pkg) >= 1:
+            A(SUB("逐颗 CPU 满载温度"))
+            A('<p class="sub">多路机器上一颗温度明显高于另一颗，通常是散热器安装'
+              "或风道的问题，而不是 CPU 本身有毛病。以下为压测全程的逐颗读数。</p>")
+            A(table([OrderedDict([
+                ("物理 CPU", "第 %d 颗" % (int(k) + 1)),
+                ("峰值温度", "%d°C" % max(v)),
+                ("平均温度", "%d°C" % round(sum(v) / len(v))),
+            ]) for k, v in sorted(pkg.items(), key=lambda kv: int(kv[0]))]))
+            if len(pkg) > 1:
+                A(svg_line_chart(
+                    [("第 %d 颗" % (int(k) + 1), v)
+                     for k, v in sorted(pkg.items(), key=lambda kv: int(kv[0]))],
+                    y_label="°C", y_suffix="°C"))
+
+    if scope == "mem":
+        ecc = data.ecc_delta_rows()
+        if ecc:
+            A(SUB("逐条内存 ECC 计数（压测前后对比）"))
+            A('<p class="sub">ECC 是内存的纠错机制。<b>可纠正错误</b>已被硬件自动纠正、'
+              "数据没有出错；<b>不可纠正错误</b>才是必须更换的信号。"
+              "本表列出压测前后每一条内存的计数，便于定位是哪一条。</p>")
+            A(table(ecc))
+
+    if scope == "gpu":
+        gs_detail = data.gpu_series()
+        clocks = [(("GPU%s " % i) + (gs_detail[i]["name"] or ""), gs_detail[i]["clock"])
+                  for i in sorted(gs_detail, key=lambda x: int(x) if str(x).isdigit() else 0)
+                  if gs_detail[i]["clock"]]
+        fans = [(("GPU%s " % i) + (gs_detail[i]["name"] or ""), gs_detail[i]["fan"])
+                for i in sorted(gs_detail, key=lambda x: int(x) if str(x).isdigit() else 0)
+                if gs_detail[i]["fan"]]
+        if clocks or fans:
+            A(SUB("逐卡满载频率 / 风扇曲线"))
+            A('<p class="sub">满载期间的实测读数。频率随温度下降是显卡的正常保护行为；'
+              "这里<b>只如实报出读数，不做合格与否的判断</b>——"
+              "不同型号的显卡满载频率差别很大，请对照该型号的规格核对。</p>")
+            if clocks:
+                A(svg_line_chart(clocks, y_label="MHz", y_suffix="MHz"))
+            if fans:
+                A(svg_line_chart(fans, y_label="%", y_suffix="%"))
+
+    if scope == "disk":
+        sm = data.smart_delta_rows()
+        if sm:
+            A(SUB("逐盘 SMART 关键项（压测前后对比）"))
+            A('<p class="sub">下表为每块盘在压测前后的关键计数。'
+              "<b>数值没有变化说明这一轮压测没有引入新的坏道</b>；"
+              "「—」表示该型号的盘不提供这一项。"
+              "本表只列参与判定的项目。</p>")
+            A(table(sm))
 
     # 判定阈值从 meta.json 取实际生效的值——现场可以在 klburn.conf 里覆盖，
     # 报告里写死一份就会和实际判定对不上。老的 run-dir 没有这一段，用默认值兜底。
@@ -1958,9 +2259,16 @@ def build_html(data):
             A(svg_line_chart([("CPU 封装功耗", powers)], y_label="W", y_suffix="W"))
         # 1.7.6 把「/ 硬盘」做成可选之后，这句拼出来是「覆盖CPU / 内存全部压测阶段」——
         # 中文和 ASCII 之间少了空格。文案是给客户看的，别留这种毛刺。
+        # 采样器只在 CPU / 内存 / 硬盘这几个阶段里跑（GPU 有自己的采样器），
+        # 所以这句要按**本轮真的跑了哪几段**拼 —— 只测硬盘的那一轮写着
+        # "覆盖 CPU / 内存 全部压测阶段"就是句假话。
+        phases = [n for n, k in (("CPU", "cpu_secs"), ("内存", "mem_secs"))
+                  if bsec(k) > 0]
+        if disk_ran:
+            phases.append("硬盘")
         A('<p class="sub">采样间隔 5 秒，覆盖 %s 全部压测阶段。'
           "读不到的项目（部分平台不提供 RAPL 或 CPU 温度驱动）不画图，不影响判定。</p>"
-          % ("CPU / 内存 / 硬盘" if disk_ran else "CPU / 内存"))
+          % (" / ".join(phases) if phases else "本轮"))
 
     # ---------------- GPU 曲线 ----------------
     gs = data.gpu_series()

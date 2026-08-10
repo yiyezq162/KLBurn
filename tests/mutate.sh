@@ -2,8 +2,9 @@
 #
 # 变异测试：把已经修好的 bug 逐个塞回代码里，确认对应的用例真的会跑红。
 #
-#     ./tests/mutate.sh              # 跑全部变异（约 3~5 分钟）
+#     ./tests/mutate.sh              # 跑全部变异（默认按 nproc 并发）
 #     ./tests/mutate.sh verdict-grep # 只跑一条
+#     ./tests/mutate.sh -j 1         # 串行（排查某一条、或者机器吃紧时）
 #     ./tests/mutate.sh --list       # 看有哪些
 #
 # ================================================================
@@ -23,15 +24,17 @@
 # 后果严重到必须有人守**。每条都在下面写清楚它对应哪条不变量。
 #
 # ================================================================
-# 安全性
+# 安全性：**真工作区自始至终只读**（1.9.5 起）
 # ================================================================
-# 这个脚本会**真的改源码文件**，所以：
-#   - 开跑前记下每个目标文件的 sha256
-#   - 每条变异跑完立刻从备份还原
-#   - trap 保证中途被打断也还原
-#   - 最后再比一次 sha256，对不上就大声报错
-# 它不碰 git，也不要求工作区干净 —— 但你自己的改动和变异混在一起时，
-# 万一还原失败会很难分辨，所以最后那道 sha256 校验是硬性的。
+# 每条变异都在自己的**临时副本**里施加、在副本里跑套件，真源码一个字节都不动。
+# 所以：
+#   - 跑变异的时候照样能看 `git diff`、能提交（以前不行）
+#   - 中途 Ctrl-C 不会留下改了一半的源码（以前会）
+#   - 并行是天然安全的 —— 这也是它现在默认多路并发的前提
+# 开跑前给整棵树留一份 sha256，跑完再比一次；对不上说明有人在变异函数里
+# 写了绝对路径，当场大声报错。
+#
+# 它不碰 git，也不要求工作区干净。
 #
 set -uo pipefail
 
@@ -147,6 +150,13 @@ MUTATIONS=(
 "psu-ghost-ignores-bmc${S}BMC 读到有电的电源仍被当成空槽位丢掉（四路数成三路，和现场那一屏对不上）${S}test-hw-checks${S}$RT/lib/collect.sh${S}mut_psu_ghost_ignores_bmc"
 "psu-redundancy-unconditional${S}「不具备电源冗余」又变回无条件拼（四路掉一路的机器被说成没冗余）${S}test-hw-checks${S}$RT/lib/collect.sh${S}mut_psu_redundancy_unconditional"
 "remap-index-field${S}行重映射查询加回 index 字段（每台机器都静默 SKIP，还对客户断言「该型号无此机制」）${S}test-hw-checks${S}$RT/lib/conformance.sh${S}mut_remap_index_field"
+"disk-scope-skips-confirm${S}硬盘专测直接把破坏性写确认当成已同意（不问就擦盘）${S}test-hw-checks${S}$RT/factory-test.sh${S}mut_disk_scope_skips_confirm"
+"info-scope-green-pass${S}仅导出硬件信息那一档打出绿色 PASS 大字（把「没测」包装成「通过」）${S}test-report-render${S}$RT/report/generate_report.py${S}mut_info_scope_green_pass"
+"info-scope-green-pass-screen${S}同上，现场那块屏幕的版本（收尾那一屏打 PASS 大字）${S}test-screen-render${S}$RT/lib/ui.sh${S}mut_info_scope_green_pass_screen"
+"scope-stress-unguarded${S}范围之外的部件照样压（选了只测 CPU，内存还是被压了 30 分钟）${S}test-hw-checks${S}$RT/lib/core.sh${S}mut_scope_stress_unguarded"
+"scope-tag-dropped${S}报告目录名不带范围后缀（单项专测和全量的目录长得一模一样）${S}test-hw-checks${S}$RT/lib/core.sh${S}mut_scope_tag_dropped"
+"scope-summary-plain-pass${S}批次汇总把单项专测的 PASS 写成和全量一样的 PASS${S}test-batch-tools${S}tools/klburn-summary.py${S}mut_scope_summary_plain_pass"
+"flops-only-best${S}算力只认末尾那行汇总（被超时打断时把已经量到的成绩白扔，平白判 SKIP）${S}test-log-parsing${S}$RT/lib/bench.sh${S}mut_flops_only_best"
 )
 
 # ================================================================
@@ -993,6 +1003,66 @@ mut_remap_index_field() {
     '    --query-remapped-rows=index,remapped_rows.correctable,remapped_rows.uncorrectable,remapped_rows.pending,remapped_rows.failure \'
 }
 
+# ================================================================
+# 测试范围（1.9.5）
+# ================================================================
+
+# ⚠️⚠️ 全项目最危险的一条：`KLB_SCOPE=disk` 被读成"操作员已经同意擦盘"。
+# 范围只决定那道确认会不会被**问到**，绝不决定它开不开。
+# 变异之后，选了硬盘专测就直接开写 —— 盘上原有数据没了，而且没人被问过。
+mut_disk_scope_skips_confirm() {
+  replace_line "$RT/factory-test.sh" \
+    "    if confirm_disk_write 120; then" \
+    '    if [[ "$KLB_SCOPE" == "disk" ]] || confirm_disk_write 120; then'
+}
+
+# 「仅导出硬件信息」那一档打出和全量测试一模一样的绿色 PASS。
+# 那一轮一个压测都没跑、一个部件都没验过 —— 这是把"没测"包装成"通过"。
+mut_info_scope_green_pass() {
+  replace_line "$RT/report/generate_report.py" \
+    '    if scope_of(meta) == "info" and overall == "PASS":' \
+    '    if False:'
+}
+
+# 同一件事在现场那块屏幕上的版本。两处各有各的守卫，缺一处就漏一半。
+mut_info_scope_green_pass_screen() {
+  delete_line "$RT/lib/ui.sh" \
+    '  [[ "$scope" == "info" && "$verdict" == "PASS" ]] && verdict="INFO"'
+}
+
+# 范围映射表被改成"什么都跑"：选了只测 CPU，内存/硬盘/显卡照样被压满时长。
+# 这条守的是那张表本身 —— 它就是这个功能的全部语义。
+mut_scope_stress_unguarded() {
+  replace_line "$RT/lib/core.sh" \
+    '    stress_mem)                      allow="full mem" ;;' \
+    '    stress_mem)                      allow="full cpu mem gpu disk info" ;;'
+}
+
+# 报告目录名不带范围后缀。半年后没人分得清哪份报告能当验收依据 ——
+# 而这正是这个功能最容易被"顺手简化掉"的一处。
+mut_scope_tag_dropped() {
+  replace_line "$RT/lib/core.sh" \
+    "  printf '%s_%s_%s_%s' \"\$stamp\" \"\$(get_cpu_tag)\" \"\$(get_mem_gb)\" \"\$(scope_tag \"\$scope\")\"" \
+    "  printf '%s_%s_%s' \"\$stamp\" \"\$(get_cpu_tag)\" \"\$(get_mem_gb)\""
+}
+
+# 批次汇总把单项专测的 PASS 写成和全量一样的 PASS。
+# 一列全是 PASS 的表格里混进一台"只测了 CPU"的机器，没有任何人会发现。
+mut_scope_summary_plain_pass() {
+  replace_line "tools/klburn-summary.py" \
+    '    if overall == "PASS" and scope != "full":' \
+    '    if False:'
+}
+
+# 算力判读只认末尾那行 `Best GFlops`。它是程序跑完才打的，而 bench_run 的超时
+# 是硬的 —— 被 kill 时前几次的成绩已经打出来了。只认末行 = 把量到的数扔掉，
+# 平白判一个 SKIP，而且没有任何人看得出为什么。
+mut_flops_only_best() {
+  replace_line "$RT/lib/bench.sh" \
+    '    $1 ~ /^[0-9]+$/ && NF >= 4 && $3 ~ /^[0-9]+\.?[0-9]*$/ {' \
+    '    $1 ~ /^ZZ_NEVER_MATCHES_ZZ$/ && NF >= 4 && $3 ~ /^[0-9]+\.?[0-9]*$/ {'
+}
+
 # 硬盘自检结果里「Completed: read failure」被当成通过。这句话里也有
 # "Completed" —— 判据顺序反了就会把**盘自己说的"我没通过"**读成通过，
 # 一块正在坏的盘拿着干净报告出厂。
@@ -1075,7 +1145,30 @@ mut_vtd_fake_patterns() {
 # ================================================================
 # 跑
 # ================================================================
-if [[ "${1:-}" == "--list" ]]; then
+usage() {
+  cat <<'EOF'
+用法: ./tests/mutate.sh [选项] [变异名]
+
+  --list       看有哪些变异
+  -j N         同时跑几条（默认按 nproc 算，上限 8）
+  -j 1         串行。排查某一条、或者机器很吃紧的时候用
+EOF
+}
+
+JOBS=0
+ONLY=""
+LIST=0
+while (( $# )); do
+  case "$1" in
+    --list)    LIST=1;      shift ;;
+    -j|--jobs) JOBS="${2:-}"; shift 2 ;;
+    -h|--help) usage; exit 0 ;;
+    -*)        printf '未知参数: %s\n' "$1" >&2; usage; exit 2 ;;
+    *)         ONLY="$1";   shift ;;
+  esac
+done
+
+if (( LIST )); then
   printf '%-20s %-18s %s\n' "变异" "由谁守" "说明"
   for m in "${MUTATIONS[@]}"; do
     IFS="$S" read -r id desc suite _fn <<< "$m"
@@ -1084,81 +1177,239 @@ if [[ "${1:-}" == "--list" ]]; then
   exit 0
 fi
 
-ONLY="${1:-}"
+if [[ ! "$JOBS" =~ ^[0-9]+$ ]] || (( JOBS == 0 )); then
+  JOBS="$(nproc 2>/dev/null || echo 4)"
+  # 再多就是在跟自己抢 I/O，而且 test-report-render 那一路会起 weasyprint，
+  # 挺吃内存 —— 并发太高反而更慢。
+  (( JOBS > 8 )) && JOBS=8
+fi
+(( JOBS < 1 )) && JOBS=1
 
-BACKUP="$(mktemp -d)"
-RESTORED=1
-restore_all() {
-  local f
-  while IFS= read -r f; do
-    [[ -n "$f" ]] || continue
-    cp -p "$BACKUP/$(echo "$f" | tr '/' '_')" "$f" 2>/dev/null
-  done < <(cat "$BACKUP/.touched" 2>/dev/null)
-}
-cleanup() {
-  restore_all
-  rm -rf "$BACKUP"
-  (( RESTORED )) || printf '\n\033[1;31m⚠ 有文件没能还原，检查 git status！\033[0m\n'
-}
+# ================================================================
+# 并行怎么做到安全：**每条变异跑在自己的副本里，真工作区一个字节都不动**
+# ================================================================
+#
+# 1.9.5 之前是"就地改真源码、跑完再还原"。那样根本没法并行（两条变异会互相
+# 踩），而且有个一直存在的副作用：**跑变异期间 `git diff` 不可信、不能提交**，
+# 中途 Ctrl-C 还可能留下改了一半的源码。104 条串行下来要二十多分钟，
+# 而"跑一次要二十多分钟"的闸门，最后的结果是没人再跑它。
+#
+# 现在改成：把源码树拷进临时目录，在**副本**里施加变异、在副本里跑套件。于是
+#   - 并行是天然安全的（各人一份，互不相干）
+#   - 真工作区自始至终只读 —— 跑变异的时候照样能看 diff、能提交
+#   - 中途被打断也不会留下半截源码
+#
+# 代价是每条变异要拷一次源码树。**拷的是 rootfs/tests/tools/build/docs，
+# 不含 vendor/ 和 out/**（那两个加起来好几个 G，而且没有一条测试读它们），
+# 一份 3MB 上下、几十毫秒，相比套件本身的耗时可以忽略。
+#
+# ⚠️ 副本必须落在 **WSL 原生文件系统**上（mktemp 默认的 /tmp），
+#    不能落在 /mnt/c 下 —— 在 9p 上拷几千个小文件比跑测试本身还慢。
+COPY_DIRS=(rootfs tests tools build docs)
+
+# 只读的真机样本。**先在池子里拷一份，之后每个副本用硬链接挂过去。**
+#
+# `test_out/` 是从 U 盘拷回来的真机记录（78MB / 2192 个文件），
+# `test-hw-checks.sh` 里那组 BMC 传感器断言直接吃它 ——
+# "十份真机共 25~91 条带阈值的传感器，越线 0 条"那一条就是拿它跑的。
+# 副本里没有它，那组断言会判"一份样本都没吃到"而跑红，于是
+# **每一条走 test-hw-checks 的变异都显示"被抓住"** —— 一片假绿。
+# （这正是下面那段基线自检抓出来的真问题，两次。）
+#
+# ⚠️ **软链不行。**`find <软链> -name x` 在不加 -H/-L 时**不会往下走**
+#    （POSIX 就这么定的），那条断言照样一份样本都找不到。踩过一次，别改回去。
+#
+# 所以：整份拷进池子一次（从 9p 上拷，几秒），之后每个副本 `cp -al` 挂硬链接。
+# 池子在 /tmp（同一个文件系统），硬链接只建 inode，不搬数据。
+# 没有任何变异会写它；真有人写了，下面「真工作区校验」把它一起算进指纹。
+FIXTURE_DIRS=(test_out)
+
+REPO_ROOT="$PWD"
+
+POOL="$(mktemp -d)"
+cleanup() { rm -rf "$POOL"; }
 trap cleanup EXIT
 
-: > "$BACKUP/.touched"
+# 真机样本只从 /mnt/c 上拷这一次
+FIXTURES="$POOL/.fixtures"
+mkdir -p "$FIXTURES"
+for d in "${FIXTURE_DIRS[@]}"; do
+  [[ -d "$d" ]] && cp -a "$d" "$FIXTURES/" 2>/dev/null
+done
+
+# make_copy <目标目录> —— 造一份能跑测试的源码副本
+make_copy() {
+  local w="$1" d
+  mkdir -p "$w"
+  for d in "${COPY_DIRS[@]}"; do
+    [[ -d "$d" ]] && cp -a "$d" "$w/" 2>/dev/null
+  done
+  for d in "${FIXTURE_DIRS[@]}"; do
+    [[ -d "$FIXTURES/$d" ]] && cp -al "$FIXTURES/$d" "$w/$d" 2>/dev/null
+  done
+  return 0
+}
+
+# 开跑前给真工作区留一份指纹，跑完再比一次。
+# 这条断言现在的含义变了：不是"还原干净了"，而是**"我们压根没碰过它"**。
+#
+# 只按 COPY_DIRS 算，**不含 test_out**：那 78MB / 2192 个文件在 /mnt/c 上，
+# 前后各 sha256 一遍就是白读 156MB 的 9p，而它压根不是任何一条变异的目标
+# （变异只改 rootfs/tests/tools/build 下的源码）。
+SNAP="$POOL/.snapshot"
+( for d in "${COPY_DIRS[@]}"; do
+    [[ -d "$d" ]] && find "$d" -type f -print0
+  done | sort -z | xargs -0 sha256sum ) > "$SNAP" 2>/dev/null
+
+# run_one <id> <desc> <suite> <target> <fn>  -> 往 stdout 打一行
+#   CAUGHT|<id>|<suite>|
+#   ESCAPED|<id>|<suite>|
+#   BROKEN|<id>|<suite>|<原因>
+run_one() {
+  local id="$1" _desc="$2" suite="$3" target="$4" fn="$5"
+  local w="$POOL/$id"
+
+  if [[ ! -f "$target" ]]; then
+    printf 'BROKEN|%s|%s|目标文件不存在：%s\n' "$id" "$suite" "$target"
+    return
+  fi
+
+  make_copy "$w"
+
+  # 变异函数里写的都是**相对路径**（$RT/…、tests/…、tools/…、build/…），
+  # 所以进副本目录再调它，改的就是副本。下面「真工作区校验」那一条同时兜住
+  # "哪天有人在变异函数里写了绝对路径"这种事。
+  local err rc=0
+  err="$( cd "$w" && "$fn" 2>&1 | tail -1 )" || rc=$?
+  if (( rc != 0 )); then
+    printf 'BROKEN|%s|%s|施加失败：%s\n' "$id" "$suite" "$err"
+    rm -rf "$w"; return
+  fi
+
+  # 跑对应的套件，**必须**非零退出
+  if ( cd "$w" && ./tests/"$suite".sh >/dev/null 2>&1 ); then
+    printf 'ESCAPED|%s|%s|\n' "$id" "$suite"
+  else
+    printf 'CAUGHT|%s|%s|\n' "$id" "$suite"
+  fi
+  rm -rf "$w"
+}
 
 CAUGHT=0; ESCAPED=0; BROKEN=0
 ESCAPED_LIST=()
 
 printf '\n\033[1;36m===== 变异测试 =====\033[0m\n'
-printf '每条变异都必须让对应的测试套件跑红；没红 = 那条守卫是摆设\n\n'
+printf '每条变异都必须让对应的测试套件跑红；没红 = 那条守卫是摆设\n'
+printf '并发 %d 条，各跑在自己的源码副本里（真工作区只读）\n\n' "$JOBS"
 
+TODO=()
 for m in "${MUTATIONS[@]}"; do
-  IFS="$S" read -r id desc suite target fn <<< "$m"
+  IFS="$S" read -r id _desc _suite _target _fn <<< "$m"
   [[ -n "$ONLY" && "$ONLY" != "$id" ]] && continue
-
-  printf '\033[1m%s\033[0m  (%s)\n' "$id" "$suite"
-  printf '    %s\n' "$desc"
-
-  if [[ ! -f "$target" ]]; then
-    printf '    \033[31m✗ 目标文件不存在：%s\033[0m\n\n' "$target"
-    BROKEN=$(( BROKEN + 1 )); continue
-  fi
-
-  # 备份必须在施加之前。这里不碰 git —— 用 git checkout 兜底会把你自己
-  # 没提交的改动一起冲掉，那是拿别人的工作去换测试的方便。
-  cp -p "$target" "$BACKUP/$(echo "$target" | tr '/' '_')"
-  echo "$target" >> "$BACKUP/.touched"
-
-  if ! err="$($fn 2>&1 | tail -1)"; then
-    printf '    \033[31m✗ 施加失败：%s\033[0m\n\n' "$err"
-    BROKEN=$(( BROKEN + 1 ))
-    restore_all; continue
-  fi
-
-  # 跑对应的套件，**必须**非零退出
-  if ./tests/"$suite".sh >/dev/null 2>&1; then
-    printf '    \033[31m✗ 逃掉了 —— %s 仍然全绿，这条守卫是摆设\033[0m\n\n' "$suite"
-    ESCAPED=$(( ESCAPED + 1 )); ESCAPED_LIST+=("$id -> $suite")
-  else
-    printf '    \033[32m✓ 被 %s 抓住\033[0m\n\n' "$suite"
-    CAUGHT=$(( CAUGHT + 1 ))
-  fi
-
-  restore_all
+  TODO+=("$m")
 done
 
-# ---------------------------------------------------------------- 还原校验
-printf '\033[1m还原校验\033[0m\n'
-DIRTY=""
-while IFS= read -r f; do
-  [[ -n "$f" ]] || continue
-  b="$BACKUP/$(echo "$f" | tr '/' '_')"
-  cmp -s "$f" "$b" || DIRTY="$DIRTY $f"
-done < <(sort -u "$BACKUP/.touched" 2>/dev/null)
+# ---------------------------------------------------------------- 基线自检
+#
+# ⚠️⚠️ **这一段是副本模式的命门，别删。**
+#
+# 判定"被抓住"的依据是"套件跑红了"。可套件跑红的原因**不止变异一种** ——
+# 副本要是少拷了一个目录、或者拷坏了，套件会因为完全无关的原因红，
+# 于是**每一条变异都显示"被抓住"**，屏幕上一片绿，而它一条都没真验过。
+# 那正是这个项目最恨的那种失效：一个什么都没检查的闸门，长得和检查过一模一样。
+#
+# 所以先在一份**没有施加任何变异**的干净副本里，把这一轮要用到的套件各跑一遍，
+# 必须全绿。有一个不绿就整轮作废 —— 那时候"抓住"这个结论本身没有意义。
+printf '\033[1m基线自检\033[0m（干净副本里各套件必须全绿，否则"抓住"没有意义）\n'
+BASE="$POOL/.baseline"
+make_copy "$BASE"
 
-if [[ -z "$DIRTY" ]]; then
-  printf '  \033[32m所有被改过的文件都已还原\033[0m\n'
+SUITES_USED=()
+while IFS= read -r s; do [[ -n "$s" ]] && SUITES_USED+=("$s"); done < <(
+  for m in "${TODO[@]:-}"; do IFS="$S" read -r _i _d s _t _f <<< "$m"; printf '%s\n' "$s"; done \
+    | sort -u
+)
+
+BASE_BAD=()
+for s in "${SUITES_USED[@]:-}"; do
+  if ( cd "$BASE" && ./tests/"$s".sh >/dev/null 2>&1 ); then
+    printf '  \033[32mOK\033[0m   %s\n' "$s"
+  else
+    printf '  \033[31mFAIL\033[0m %s —— 干净副本里它就是红的\n' "$s"
+    BASE_BAD+=("$s")
+  fi
+done
+rm -rf "$BASE"
+
+if (( ${#BASE_BAD[@]} )); then
+  printf '\n\033[1;31m基线就不绿，整轮作废：%s\033[0m\n' "${BASE_BAD[*]}"
+  printf '这时候每条变异都会显示"被抓住"，而那个绿是假的。\n'
+  printf '先在真工作区把这些套件跑通（./tests/run-all.sh），或者检查 COPY_DIRS 是不是少拷了目录。\n'
+  exit 1
+fi
+printf '\n'
+
+RESULTS="$POOL/.results"; : > "$RESULTS"
+
+# 作业池：跑满 JOBS 条就 `wait -n` 等一条收工再补一条。
+if (( ${#TODO[@]} )); then
+  running=0
+  for m in "${TODO[@]}"; do
+    IFS="$S" read -r id desc suite target fn <<< "$m"
+    run_one "$id" "$desc" "$suite" "$target" "$fn" >> "$RESULTS" &
+    running=$(( running + 1 ))
+    if (( running >= JOBS )); then
+      wait -n 2>/dev/null || true
+      running=$(( running - 1 ))
+    fi
+  done
+  wait
+fi
+
+# ⚠️ 结果按**清单顺序**打，不按完成顺序。
+#    并行的完成顺序每次都不一样，照完成顺序打的话两次跑出来的报告没法直接
+#    diff —— 而"这次和上次比多了/少了哪条"正是看这份输出最常干的事。
+RESTORED=1
+if (( ${#TODO[@]} )); then
+  for m in "${TODO[@]}"; do
+    IFS="$S" read -r id desc suite _target _fn <<< "$m"
+    printf '\033[1m%s\033[0m  (%s)\n' "$id" "$suite"
+    printf '    %s\n' "$desc"
+    line="$(grep -F -- "|${id}|" "$RESULTS" | head -1)"
+    IFS='|' read -r verdict _id _suite why <<< "$line"
+    case "$verdict" in
+      CAUGHT)
+        printf '    \033[32m✓ 被 %s 抓住\033[0m\n\n' "$suite"
+        CAUGHT=$(( CAUGHT + 1 )) ;;
+      ESCAPED)
+        printf '    \033[31m✗ 逃掉了 —— %s 仍然全绿，这条守卫是摆设\033[0m\n\n' "$suite"
+        ESCAPED=$(( ESCAPED + 1 )); ESCAPED_LIST+=("$id -> $suite") ;;
+      BROKEN)
+        printf '    \033[31m✗ %s\033[0m\n\n' "$why"
+        BROKEN=$(( BROKEN + 1 )) ;;
+      *)
+        # 子进程被 OOM / 被杀掉时会走到这儿。**不能当成"抓住了"** ——
+        # 没有结果就是没有结果，宁可报成施加失败让人去看。
+        printf '    \033[31m✗ 这一条没跑出结果（子进程被杀了？内存不够就 -j 1 再跑）\033[0m\n\n'
+        BROKEN=$(( BROKEN + 1 )) ;;
+    esac
+  done
+fi
+
+# ---------------------------------------------------------------- 真工作区没被碰过
+#
+# 以前这里叫"还原校验"（就地改完再还原）。变异跑进副本之后，这条断言问的是
+# 更强的一句：**这一轮从头到尾，真工作区一个字节都没变过。**
+# 它同时兜住"哪天有人把变异函数改成写绝对路径"这种事 —— 那种改动在副本模式下
+# 会静悄悄地去改真源码，而且测试照样全绿。
+printf '\033[1m真工作区校验\033[0m\n'
+if sha256sum -c --quiet "$SNAP" >/dev/null 2>&1; then
+  printf '  \033[32m真工作区一个字节都没被动过\033[0m\n'
 else
   RESTORED=0
-  printf '  \033[1;31m这些文件没还原回去：%s\033[0m\n' "$DIRTY"
+  printf '  \033[1;31m真工作区被改动了！下面这些对不上：\033[0m\n'
+  sha256sum -c "$SNAP" 2>/dev/null | grep -v ': OK$' | head -10 | sed 's/^/    /'
+  printf '  \033[1;31m变异函数里是不是写了绝对路径？先看 git status\033[0m\n'
 fi
 
 printf '\n========================================\n'

@@ -63,10 +63,69 @@ read_line_countdown() {
   done
 }
 
+# ---------------------------------------------------------------- 菜单的倒计时循环
+# menu_pick <默认键> <超时秒> <最大键> <倒计时提示语> -> 打印选中的键
+#
+# 抽出来是因为范围菜单和时长菜单一字不差地重复了这段：数着秒、单键读、
+# 回车用默认、超时也用默认。**"超时自动继续"是这两屏共同的硬约束**
+# （§11 那条：无人值守的盘不能停在一个等按键的屏上），只有一份实现才守得住。
+#
+# 单键读（read -n 1），不要回车 —— 现场按 1 就该立刻走。
+menu_pick() {
+  local default_key="$1" timeout="$2" maxkey="$3" hint="$4"
+  local key start now remaining
+  start=$(date +%s)
+  while :; do
+    now=$(date +%s)
+    remaining=$(( timeout - (now - start) ))
+    if (( remaining <= 0 )); then printf '\n' >&2; printf '%s' "$default_key"; return 0; fi
+    printf '\r\033[K  %s%s in %2ds%s' "$C_YEL" "$hint" "$remaining" "$C_RST" >&2
+    if IFS= read -r -s -t 1 -n 1 key; then
+      case "$key" in
+        [1-9]) (( key <= maxkey )) && { printf '\n' >&2; printf '%s' "$key"; return 0; } ;;
+        '')    printf '\n' >&2; printf '%s' "$default_key"; return 0 ;;
+      esac
+    fi
+  done
+}
+
+# ---------------------------------------------------------------- 测试范围菜单
+# 结果写到全局 KLB_SCOPE（full / cpu / mem / gpu / disk / info）。
+#
+# 排在时长菜单**之前**：选了"仅导出报告"就没有时长可选，那一档直接跳过时长菜单。
+#
+# ⚠️ 60 秒倒计时、超时自动选 [1] 全量。**这一屏绝不能卡住流程** ——
+#    插上盘没人管的时候它必须自己往下走，否则现场只会以为盘坏了、直接断电重来。
+select_scope() {
+  local chosen
+
+  brand_bar "$(panel_width)" "SELECT SCOPE"
+  section "SELECT TEST SCOPE"
+  printf '   %s[1]%s  FULL BURN-IN     everything below, run as one session  (default)\n' "$C_BLD" "$C_RST"
+  printf '   %s[2]%s  CPU ONLY         CPU stress + computation validation\n'             "$C_BLD" "$C_RST"
+  printf '   %s[3]%s  MEMORY ONLY      memory stress + ECC re-check\n'                    "$C_BLD" "$C_RST"
+  printf '   %s[4]%s  GPU ONLY         GPU stress + vendor diagnostics\n'                 "$C_BLD" "$C_RST"
+  printf '   %s[5]%s  DISK ONLY        disk stress (still asks before writing)\n'         "$C_BLD" "$C_RST"
+  printf '   %s[6]%s  INVENTORY ONLY   collect + cross-check only, no burn-in at all\n'   "$C_BLD" "$C_RST"
+  printf '\n'
+  printf '   %sInventory, configuration cross-checks and NIC tests run in every mode.%s\n' "$C_GRY" "$C_RST"
+  printf '   %sParts outside the chosen scope are NOT tested and NOT judged - the%s\n'     "$C_GRY" "$C_RST"
+  printf '   %sreport says so, and its folder name carries the scope.%s\n\n'               "$C_GRY" "$C_RST"
+
+  chosen="$(menu_pick 1 "${SCOPE_MENU_TIMEOUT:-60}" 6 \
+              'Press 1-6 to choose, ENTER to accept.  Auto-select FULL BURN-IN')"
+
+  case "$chosen" in
+    2) KLB_SCOPE="cpu"  ;; 3) KLB_SCOPE="mem"  ;; 4) KLB_SCOPE="gpu" ;;
+    5) KLB_SCOPE="disk" ;; 6) KLB_SCOPE="info" ;; *) KLB_SCOPE="full" ;;
+  esac
+  printf '  %s==> %s%s\n\n' "$C_GRN$C_BLD" "$(scope_label "$KLB_SCOPE")" "$C_RST"
+}
+
 # ---------------------------------------------------------------- 时长选择菜单
 # 结果写到全局 DURATION_PROFILE / DURATION_SECONDS
 select_duration() {
-  local default_key="2" timeout=30 key start now remaining chosen=""
+  local chosen
 
   brand_bar "$(panel_width)" "SELECT DURATION"
   section "SELECT TEST DURATION"
@@ -77,24 +136,27 @@ select_duration() {
   printf '   %s[5]%s  SOAK         4 hours\n'                        "$C_BLD" "$C_RST"
   printf '   %s[6]%s  ENDURANCE    8 hours     (overnight)\n'        "$C_BLD" "$C_RST"
   printf '\n'
-  printf '   %sCPU / memory / GPU run concurrently for the full time above.%s\n' "$C_GRY" "$C_RST"
-  printf '   %sIf disk stress is confirmed, it adds another 30%% on top.%s\n\n'  "$C_GRY" "$C_RST"
+  # 这两行必须跟着范围走 —— 单项专测里那句"三项并发"是假的，
+  # 而硬盘专测拿的是**全部**时长，不是全量档里那 30%。
+  case "${KLB_SCOPE:-full}" in
+    cpu)  printf '   %sCPU stress runs for the full time above.%s\n\n'    "$C_GRY" "$C_RST" ;;
+    mem)  printf '   %sMemory stress runs for the full time above.%s\n\n' "$C_GRY" "$C_RST" ;;
+    gpu)  printf '   %sGPU stress runs for the full time above.%s\n\n'    "$C_GRY" "$C_RST" ;;
+    disk) printf '   %sDisk stress runs for the full time above (write test needs confirmation).%s\n\n' \
+            "$C_GRY" "$C_RST" ;;
+    *)    printf '   %sCPU / memory / GPU run concurrently for the full time above.%s\n' "$C_GRY" "$C_RST"
+          printf '   %sIf disk stress is confirmed, it adds another 30%% on top.%s\n\n'  "$C_GRY" "$C_RST" ;;
+  esac
 
-  start=$(date +%s)
-  while :; do
-    now=$(date +%s)
-    remaining=$(( timeout - (now - start) ))
-    if (( remaining <= 0 )); then chosen="$default_key"; printf '\n'; break; fi
-    printf '\r\033[K  %sPress 1-6 to choose, ENTER to start now.  Auto-start STANDARD in %2ds%s' \
-      "$C_YEL" "$remaining" "$C_RST"
-    if IFS= read -r -s -t 1 -n 1 key; then
-      case "$key" in
-        [1-6]) chosen="$key"; printf '\n'; break ;;
-        '')    chosen="$default_key"; printf '\n'; break ;;
-      esac
-    fi
-  done
+  chosen="$(menu_pick 2 "${DURATION_MENU_TIMEOUT:-30}" 6 \
+              'Press 1-6 to choose, ENTER to start now.  Auto-start STANDARD')"
 
+  _select_duration_apply "$chosen"
+}
+
+# 键 -> 档位。单独一个函数，好让 tests 直接断言这张表（现场那一屏没法自动化按键）。
+_select_duration_apply() {
+  local chosen="${1:-2}"
   case "$chosen" in
     1) DURATION_PROFILE="QUICK";     DURATION_SECONDS=600 ;;
     3) DURATION_PROFILE="EXTENDED";  DURATION_SECONDS=3600 ;;
@@ -108,10 +170,44 @@ select_duration() {
 }
 
 # ---------------------------------------------------------------- 最终结论大字
+#
+# verdict_banner <PASS|FAIL> [范围]
+#
+# ⚠️⚠️ **「仅导出报告」那一档绝不许打出绿色 PASS 大字。**
+#
+# 那一轮一个压测都没跑、一个部件都没验过 —— 屏幕上一个大写的绿 PASS，
+# 现场（和半年后翻照片的人）读到的是"这台机器测过了，合格"。
+# 这比不做这个功能还糟：它把"没测"包装成了"通过"。
+# 所以 info 档的 PASS 换成一块中性的 INFO 大字，并且当场说清楚它是什么意思。
+#
+# FAIL 照打不误：info 档里 FAIL 的来源是采集/配置核对真的判出了问题
+# （比如内存容量对不上），那是实打实的、必须让人看见的东西。
+#
+# tests/mutate.sh 里有一条变异专门守着这里（把 info 打回 PASS 大字必须跑红）。
 verdict_banner() {
-  local verdict="$1"
+  local verdict="$1" scope="${2:-${KLB_SCOPE:-full}}"
+  [[ "$scope" == "info" && "$verdict" == "PASS" ]] && verdict="INFO"
   printf '\n'
   case "$verdict" in
+    INFO)
+      # 中性色（青），**不是绿的** —— 绿在这块屏幕上就是"合格"的意思。
+      printf '%s' "$C_CYN$C_BLD"
+      cat <<'EOF'
+  ######## ##    ## ########  ######
+     ##    ###   ## ##       ##    ##
+     ##    ####  ## ##       ##    ##
+     ##    ## ## ## ######   ##    ##
+     ##    ##  #### ##       ##    ##
+     ##    ##   ### ##       ##    ##
+  ######## ##    ## ##        ######
+EOF
+      printf '%s\n' "$C_RST"
+      printf '  %sInventory only - NOTHING was stress-tested on this run.%s\n' \
+        "$C_YEL$C_BLD" "$C_RST"
+      printf '  %sThis is NOT a pass. Re-run with a test scope to judge the hardware.%s\n' \
+        "$C_YEL" "$C_RST"
+      return 0
+      ;;
     PASS)
       printf '%s' "$C_GRN$C_BLD"
       cat <<'EOF'
@@ -780,7 +876,9 @@ cfg_panel() {
   local w="$1" right="$2" i n line
   brand_bar "$w" "$right"
   box_rule "$w"
-  box_row3 "$w" "" "CONFIGURATION REVIEW" ""
+  # 抬头左边写本轮范围。少了它，操作员在这一屏看不出这一轮打算干什么 ——
+  # 「只测 CPU」和「全量」画出来的面板一模一样，而两者的结论差着一整台机器。
+  box_row3 "$w" "SCOPE: $(scope_label "${KLB_SCOPE:-full}")" "CONFIGURATION REVIEW" ""
   box_rule "$w"
   local rowcolor
   for i in "${!_CFG_TITLES[@]}"; do

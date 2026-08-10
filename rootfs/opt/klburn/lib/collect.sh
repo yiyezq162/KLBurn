@@ -1774,7 +1774,10 @@ collect_all() {
   # 硬盘自己的出厂自检，在这儿**发起**，结果留到 verify_disk_selftest 去读。
   # 短自检约两分钟、非破坏性、盘在后台自己跑，不占我们的时间；
   # 越早发起，到复查那一步它跑完的可能性越大。
-  disk_selftest_start
+  #
+  # 只在会去读结果的范围里发起（见 core.sh 的 scope_runs）：CPU 专测那一轮
+  # 没有 verify_disk_selftest，发起了也没人看 —— 白让盘转一遍。
+  scope_runs verify_disk && disk_selftest_start
   # 网卡自己的自检要在**把口拉起来之前**跑：offline 自检会把链路踢下去，
   # 排在后面的话 DHCP 那一步会拿到一个刚被自己踢掉的链路。
   check_nic_selftest  # 定义在 lib/network.sh

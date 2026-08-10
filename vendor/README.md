@@ -20,10 +20,12 @@ vendor/
 ├── gpu_burn/
 │   ├── gpu_burn                       # 编译好的 gpu_burn（./build/build-gpu-burn.sh 产出）
 │   └── compare.fatbin
-├── bench/                             # 可选：性能基准程序，整个子目录原样铺进盘里
+├── bench/                             # 可选：性能基准 / 专项诊断，整个子目录原样铺进盘里
+│   ├── cpuflops/                      #   klburn_flops（CPU 算力，1.9.5 起首选）
 │   ├── cuda-samples/                  #   bandwidthTest / p2pBandwidthLatencyTest
-│   ├── linpack/                       #   xlinpack_xeon64 + libiomp5.so
-│   └── mlc/                           #   mlc 或 mlc_avx512
+│   ├── linpack/                       #   xlinpack_xeon64 + libiomp5.so（Intel 专用，兜底）
+│   ├── mlc/                           #   mlc 或 mlc_avx512
+│   └── opendcdiag/                    #   处理器计算正确性诊断（+ libzstd/libz）
 └── logo.png                           # 可选：报告抬头 logo（PNG，建议高度 100px 内）
 ```
 
@@ -36,6 +38,8 @@ vendor/
 | `storcli/storcli64` | 阵列卡只能报 PCI 反查到的型号，读不到固件版本和逻辑盘状态（见下方说明：**卡后面物理盘的 SMART 不依赖它**） |
 | `perccli/` `ssacli/` `sas3ircu/` | 同上，只是对应的是 Dell PERC / HPE Smart Array / IT 模式 HBA。一个都不放也正常，那一项判 SKIP 不判 FAIL |
 | `bench/` | 性能基准那几项（显卡传输带宽、显卡间互联、CPU 算力、内存带宽）判 SKIP。硬盘带宽不受影响（`fio` 在盘里） |
+| `bench/cpuflops/` | CPU 算力退回 `linpack/` 那个 Intel 专用二进制 —— **非 Intel 机器这一项就永远测不出来**。两个都不放才判 SKIP |
+| `bench/opendcdiag/` | 「CPU 计算正确性」判 SKIP（`origin=self`，不进交付报告）。压测照跑，只是抓不到"算完了但算错了"那一类 |
 | `logo.png` | 报告抬头不显示 logo |
 
 ---
@@ -265,16 +269,39 @@ vendor/logo.png
 
 ```
 vendor/bench/
+├── cpuflops/
+│   └── klburn_flops                  # CPU 浮点算力（1.9.5 起**首选**这个）
 ├── cuda-samples/
 │   ├── bandwidthTest                 # 主机↔显存、显存内部的传输带宽
 │   └── p2pBandwidthLatencyTest       # 显卡两两之间的互联带宽
 ├── linpack/
-│   ├── xlinpack_xeon64               # CPU 浮点算力
+│   ├── xlinpack_xeon64               # CPU 浮点算力（只在 cpuflops 没放时兜底）
 │   ├── help.lpk  xhelp.lpk           # 它自己要读的帮助文件，一起放
 │   └── （老版本还要 libiomp5.so，见下）
 └── mlc/
     └── mlc                           # 内存峰值读带宽
 ```
+
+> **`cpuflops/` 是 1.9.5 新增的，而且优先于 `linpack/`。**
+> `xlinpack_xeon64` 是 Intel 发布的二进制，在海光 / AMD 上第一行就打
+> `runs on only genuine Intel processors` 然后退出 —— 非 Intel 机器的
+> 「CPU 浮点算力」于是永远测不出来。`klburn_flops` 是我们自己写的
+> （源码 `build/src/klburn-flops.c` 随仓库走），链 OpenBLAS 的 `dgesv`，
+> 算法和公式都和 LINPACK 同口径，所有平台通用：
+>
+> ```bash
+> sudo apt install gcc libopenblas-dev
+> ./build/build-cpuflops.sh
+> ```
+>
+> ⚠️ **它在 Intel 机器上的数字比 `xlinpack_xeon64` 低一到两成**（OpenBLAS 对
+> MKL 的常见差距），这是换了尺子、不是机器变慢了。统一用它换来的是
+> **全系列机器的数字可比**，而这一项本来就只报数、不判合格。
+> 这一轮用的是哪套记在 `meta.json` 的 `bench_params.flops_method` 里
+> （只在内部工程报告里显示）。
+>
+> ⚠️ 它动态链 `libopenblas.so.0`，所以 ISO 里必须有 `libopenblas0-pthread`
+> （`build/config.sh` 的 `PKGS_STRESS` 里显式列着）。删了那一行这项就永远 SKIP。
 
 ⚠️ **和阵列卡工具不一样：这里是把整个子目录原样铺进 `/opt/klburn/tools/bench/<子目录>/`，
 不是只捞一个可执行文件出来。** 有的程序要带自己的运行库和数据文件，
@@ -374,15 +401,26 @@ tar xzf mlc_v3.12.tgz && cp Linux/mlc Linux/redist.txt vendor/bench/mlc/
 
 ### opendcdiag —— 处理器算得对不对
 
-有现成脚本：
+有现成脚本（1.9.5 起**默认就该跑一遍**，它是 Apache-2.0，可以随盘分发）：
 
 ```bash
+sudo apt install git meson ninja-build g++ libboost-dev libeigen3-dev libzstd-dev zlib1g-dev
 ./build/build-opendcdiag.sh
 ```
 
 **它抓的是 `stress-ng` 抓不到的那一类**：程序正常返回、退出码 0、日志干干净净，
 只是**结果算错了**。这叫静默数据损坏（SDC，业界也叫"会算错的核"）。
 Google 和 Meta 各自发过论文之后，它已经出现在做 AI / HPC 那批客户的验收单上。
+
+编它时的三个坑（脚本里都处理了，换版本时留意）：
+
+- **上游一个 tag 都没有**（`git ls-remote --tags` 返回空），所以脚本钉的是
+  commit SHA、按 SHA 单独 fetch。1.9.5 之前那句 `--branch v2024.10.0` 是
+  必然失败的。
+- **meson 的 release 构建照样带调试符号，产物 232MB**，剥完 3.0MB。
+  不剥的话那 229MB 会一路进 squashfs 和 ISO。
+- 它链了 `libzstd` / `libz`，脚本会把这两个 `.so` 一并拷进
+  `vendor/bench/opendcdiag/`（和 `xlinpack_xeon64` 带 `libiomp5.so` 同一个先例）。
 
 默认在 PHASE 2/5（机器空闲时）跑 120 秒，改时长：`klburn.conf` 里写
 `VALIDATE_SDC_SECS=<秒>`。

@@ -844,26 +844,40 @@ verify_bmc_sensors() {
 }
 
 # ---------------------------------------------------------------- 汇总入口
+#
+# 各项都受本轮**测试范围**管（见 core.sh 的 scope_runs）。三条要记住的：
+#
+#   * **整机复查那四条**（dmesg / SEL / AER / BMC 传感器）在任何跑了压测的
+#     范围里都跑：它们查的是"这一轮机器整体有没有报错"，和压了哪个部件无关。
+#     只压了 CPU 的那一轮里，PCIe 总线报了 AER、BMC 记了电源掉电，
+#     照样是这台机器的毛病。
+#   * **verify_ecc 在 cpu 范围也跑**：CPU 满载会把内存也带起来，ECC 计数照样有意义。
+#   * 整个 verify_all 只在**跑过压测**的范围里调用（见 factory-test.sh）——
+#     「仅导出报告」那一档压根没有"测后"这回事。
 verify_all() {
   section "PHASE 5/5  POST-TEST VERIFICATION"
-  collect_smart "post"
-  verify_smart
-  verify_disk_temp
-  # 自检是 PHASE 1 发起的，这里只读结果。排在 collect_smart post 之后没关系
-  # （它自己跑自己的 smartctl -l selftest），但必须在 verify_all 里 ——
-  # 少了这一句，盘在后台白跑一遍自检，没人去看结果。
-  verify_disk_selftest
+  if scope_runs verify_disk; then
+    collect_smart "post"
+    verify_smart
+    verify_disk_temp
+    # 自检是 PHASE 1 发起的，这里只读结果。排在 collect_smart post 之后没关系
+    # （它自己跑自己的 smartctl -l selftest），但必须在 verify_all 里 ——
+    # 少了这一句，盘在后台白跑一遍自检，没人去看结果。
+    verify_disk_selftest
+  fi
   # 计数器测后快照。必须排在下面三条判定之前 —— 它们读的就是这份。
   collect_counters "post"
-  verify_ecc
-  verify_throttle
-  verify_aer
-  verify_dmesg
-  verify_sel
-  capture "sensors-post.txt" sensors
-  # 测后传感器快照必须排在 verify_bmc_sensors 之前 —— 那一条判的就是这份。
-  # （排反了它会退去读测前那份，于是"压测把风扇跑停了"这类事永远查不出来。）
-  [[ "${IPMI_OK:-0}" == "1" ]] && capture -t 60 "ipmi-sensors-post.txt" ipmitool sensor list
-  verify_bmc_sensors
+  scope_runs verify_ecc      && verify_ecc
+  scope_runs verify_throttle && verify_throttle
+  if scope_runs verify_common; then
+    verify_aer
+    verify_dmesg
+    verify_sel
+    capture "sensors-post.txt" sensors
+    # 测后传感器快照必须排在 verify_bmc_sensors 之前 —— 那一条判的就是这份。
+    # （排反了它会退去读测前那份，于是"压测把风扇跑停了"这类事永远查不出来。）
+    [[ "${IPMI_OK:-0}" == "1" ]] && capture -t 60 "ipmi-sensors-post.txt" ipmitool sensor list
+    verify_bmc_sensors
+  fi
   return 0
 }

@@ -159,8 +159,14 @@ validate_gpu_diag() {
 # ---------------------------------------------------------------- 汇总入口
 # 和基准同一个阶段（PHASE 2/5，机器空闲时）。两个都是可选件，
 # 一个都没放的时候整段几秒钟就过去了。
+#
+# 两项都受本轮**测试范围**管（见 core.sh 的 scope_runs）：
+# 只测内存 / 只测硬盘 / 仅导出报告时，这两项整项不跑、也不出结论行。
+# 「仅导出报告」那一档跑基准但**不跑这里** —— 这两个各要几分钟，
+# 而那一档的整个卖点就是几分钟拿到一份配置清单。
 validate_all() {
   validate_init
-  validate_cpu_sdc
-  validate_gpu_diag
+  scope_runs validate_cpu && validate_cpu_sdc
+  scope_runs validate_gpu && validate_gpu_diag
+  return 0
 }

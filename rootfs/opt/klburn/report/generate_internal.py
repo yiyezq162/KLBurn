@@ -58,7 +58,8 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 # 注意只借工具，不借它的版式 —— 两份报告的读者完全不同。
 from generate_report import (  # noqa: E402
     CSS, Data, E, clean, collapsible, dmi_blocks, fmt_dur, human_bytes,
-    kv_block, profile_text, read_json, read_text, svg_line_chart, table,
+    kv_block, profile_text, read_json, read_text, scope_cn, scope_of,
+    svg_line_chart, table,
 )
 
 # ============================================================ 评估等级
@@ -1500,7 +1501,9 @@ def build_internal_html(d):
       "用于复盘和日后追溯。交付给客户的是报告目录下与目录同名的那个 .html。</span></div>")
     A('<div class="company">%s</div>' % E(meta.get("company_name")))
     A("<h1>%s ｜ 工程数据</h1>" % E(meta.get("report_title") or "服务器出厂老化测试报告"))
-    A('<div class="sub">机器标识 <b>%s</b></div>' % E(tag))
+    # 范围和机器标识并排：内部复盘时"这份是哪一轮"和"这份测了什么"是同一个问题。
+    A('<div class="sub">机器标识 <b>%s</b> ｜ 本轮范围 <b>%s</b></div>'
+      % (E(tag), E(scope_cn(meta))))
     A("</header>")
     A(nav_html())
 
@@ -1515,6 +1518,12 @@ def build_internal_html(d):
     thr = meta.get("thresholds") or {}
     A(kv_block(OrderedDict([
         ("整机序列号", serial),
+        ("测试范围", "%s（scope=%s）" % (scope_cn(meta), scope_of(meta))),
+        # 这一轮的算力是拿哪套程序量的。**只在内部报告里出现** ——
+        # 客户报告不许出现工具名。留着它是为了日后有人拿新旧报告对比、
+        # 发现算力数字对不上时能解释：1.9.5 起统一换成了自研的 OpenBLAS 版本，
+        # 在 Intel 机器上比原来的 MKL 版本低一到两成，不是机器变慢了。
+        ("算力测量方法", (meta.get("bench_params") or {}).get("flops_method") or "—"),
         ("测试档位", profile_text(meta.get("profile"))),
         ("计划时长", fmt_dur(meta.get("planned_secs"))),
         ("实际耗时", fmt_dur(meta.get("elapsed_secs"))),

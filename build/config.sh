@@ -11,7 +11,7 @@
 # ⚠️ 改完脚本要「先 bump 再构建」。0.3.0 就栽过一次：ISO 构建完之后又改了
 # core.sh/collect.sh 却没动版本号，于是现场那根盘自称 0.3.0、跑的却是修复前的
 # 代码（lshw 卡满 90s、屏幕上冒 Killed），对着仓库怎么看都对不上。
-KLBURN_VERSION="1.9.4"
+KLBURN_VERSION="1.9.5"
 
 # ================================================================
 # 品牌抬头
@@ -279,6 +279,19 @@ PKGS_NET=(
 # 压测类
 PKGS_STRESS=(
   stress-ng stressapptest fio sysbench
+  # CPU 浮点算力那一项要的 BLAS 运行库（vendor/bench/cpuflops/klburn_flops
+  # 动态链它，见 build/build-cpuflops.sh）。
+  #
+  # ⚠️ **删了它这一项就永远 SKIP**，而且现场看不出原因 —— 程序在，只是
+  #    一跑就是 "error while loading shared libraries"，那行报错落进日志里
+  #    看着像"这台机器有问题"。tests/check-firmware.sh 之外没人守着它，
+  #    改这一行之前先想清楚。
+  #
+  # 为什么是 -pthread 那个变体：Ubuntu 把 libopenblas 拆成 pthread / openmp /
+  # serial 三个包，三个都 provide libopenblas.so.0。显式钉一个，免得依赖
+  # 解析在不同时期挑中不同的那个（openmp 那版会和 stress-ng 抢线程）。
+  # 它会把 libgfortran5 一起带进来，那是 OpenBLAS 自己的依赖。
+  libopenblas0-pthread
 )
 # 报告落盘 / 杂项
 PKGS_MISC=(

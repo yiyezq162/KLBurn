@@ -64,6 +64,7 @@ WORKDIR=""
 FIRMWARE="bios"
 NO_DATA=0
 DISK_STRESS=0
+SCOPE="full"          # 本轮测试范围（1.9.5 新增的那个菜单）
 
 usage() {
   cat <<'EOF'
@@ -79,6 +80,10 @@ usage() {
   --disk-stress        真的过掉两道破坏性写确认，让 fio 往那两块空白盘上写。
                        **只在 --stage full 下有效，默认关。**
                        验的是全项目最危险的一条：fio 不会写穿启动 U 盘
+  --scope S            本轮测试范围：full（默认）/ cpu / mem / gpu / disk / info。
+                       脚本会在范围菜单上按对应的键，并断言报告目录名带上了
+                       对应的后缀（_Full / _CPU / …）。冒烟档跑 --scope info
+                       最快：那一档不做任何压测
   --iso PATH           用指定 ISO（默认取 out/ 里 mtime 最新的）
   --net                给虚拟机接一块网卡（默认不接，网卡项会判 SKIP）
   --keep               跑完保留磁盘镜像和截图，方便手工看
@@ -97,6 +102,7 @@ while (( $# )); do
     --firmware)    FIRMWARE="$2"; shift 2 ;;
     --no-data-partition) NO_DATA=1; shift ;;
     --disk-stress) DISK_STRESS=1; shift ;;
+    --scope)       SCOPE="$2";  shift 2 ;;
     --workdir)     WORKDIR="$2"; shift 2 ;;
     --spare-disks) SPARE_N="$2"; shift 2 ;;
     -h|--help)     usage; exit 0 ;;
@@ -131,6 +137,28 @@ fi
 if (( DISK_STRESS )) && (( NO_DATA )); then
   printf '致命: --disk-stress 和 --no-data-partition 不能一起用\n' >&2
   printf '      后者故意让报告落不到"U 盘"上，那正是前者要检查的东西\n' >&2
+  exit 2
+fi
+
+# ---------------------------------------------------------------- 范围 -> 按键 / 目录后缀
+#
+# 范围菜单排在**建立报告目录之前**（范围要进目录名），所以这一键必须比
+# 时长菜单那一键更早发出去。两张表和 lib/ui.sh 的 select_scope、
+# lib/core.sh 的 scope_tag 是同一套，改一处这里就要跟着改。
+case "$SCOPE" in
+  full) SCOPE_KEY=1; SCOPE_TAG="Full" ;;
+  cpu)  SCOPE_KEY=2; SCOPE_TAG="CPU"  ;;
+  mem)  SCOPE_KEY=3; SCOPE_TAG="MEM"  ;;
+  gpu)  SCOPE_KEY=4; SCOPE_TAG="GPU"  ;;
+  disk) SCOPE_KEY=5; SCOPE_TAG="DISK" ;;
+  info) SCOPE_KEY=6; SCOPE_TAG="INFO" ;;
+  *) printf '致命: --scope 只能是 full/cpu/mem/gpu/disk/info，收到 %s\n' "$SCOPE" >&2; exit 2 ;;
+esac
+# --disk-stress 验的是"fio 真写盘、而且不会写穿启动 U 盘"。硬盘专测那一档
+# 拿的是**全部**时长（不是全量档的 30%），跑起来久得多，而且这条路的按键
+# 时序是按全量档调的。要验硬盘专测另开一轮，别把两件事绞在一起。
+if (( DISK_STRESS )) && [[ "$SCOPE" != "full" ]]; then
+  printf '致命: --disk-stress 目前只支持 --scope full（按键时序是按它调的）\n' >&2
   exit 2
 fi
 
@@ -388,13 +416,25 @@ if [[ "$STAGE" == "smoke" ]]; then
   # 冒烟只想知道"起没起来、认没认出数据分区"。
   # KLBurn 一开机就 mount_data_partition + log_attach，klburn.log 会立刻落盘 ——
   # 所以根本不用等它跑完，看盘上有没有东西就够了。
-  info "冒烟档：等 150 秒让它开机并建立报告目录"
+  info "冒烟档：等 150 秒让它开机并建立报告目录（范围 $SCOPE）"
   # 15 秒这一张是专门为 --no-data-partition 留的：找不到数据分区时那个黄色大框
   # 警告出现在 STEP 1、只停 8 秒，等到 30 秒就已经被后面的采集日志顶走了。
   # 那条"有没有打警告"没法程序化断言，只能靠人看截图，所以至少得截到。
   sleep 15; shot "15"
-  for t in 30 60 90 120 150; do
-    sleep $(( t == 30 ? 15 : 30 ))
+
+  # ---------------- 范围菜单（1.9.5）----------------
+  # 它排在**建立报告目录之前**，60 秒倒计时。不按的话它超时回落全量，
+  # 报告目录要等到第 100 秒左右才建出来 —— 冒烟档统共只有 150 秒，太紧。
+  # 按一次把它放过去，顺便把 --scope 那条路真跑一遍。
+  #
+  # 这一键**只按一次**：多按出来的键会留在 tty 缓冲里被时长菜单吃掉
+  # （那一屏是单键读），后果是档位不是你以为的那个。
+  sleep 25
+  shot "scope-menu"          # 界面改动只有截图看得出来，先截再按
+  mon "sendkey $SCOPE_KEY"
+  info "范围菜单已按 [$SCOPE_KEY]（$SCOPE）"
+  for t in 60 90 120 150; do
+    sleep 30
     kill -0 "$QEMU_PID" 2>/dev/null || { bad "虚拟机在第 ${t}s 意外退出了"; break; }
     shot "$t"
     printf '       ... %ss\n' "$t"
@@ -425,6 +465,15 @@ elif (( DISK_STRESS )); then
   # **绝不能像下面那个分支那样反复按**：多按出来的键会留在 tty 缓冲里，
   # 被后面 confirm_disk_write 的整行读取吃掉 —— "1yes" 不等于 "yes"，
   # 于是本该擦盘的这一轮又静默变成了跳过，而且看起来像是机制不灵。
+  # ---------------- 范围菜单（1.9.5，排在时长菜单之前）----------------
+  # 它在建立报告目录之前，所以没有任何日志锚点可等（那时候 klburn.log 还在
+  # 内存里，没落到"U 盘"上）。只能按时间：SELECT_START 之后菜单已经画出来，
+  # 而它有 60 秒倒计时，窗口很宽。**只按一次**（多按的键会被后面的整行读吃掉，
+  # "1yes" 不等于 "yes"，那一轮就静默变成跳过擦盘）。
+  sleep "$SELECT_START"
+  mon "sendkey $SCOPE_KEY"
+  info "范围菜单已按 [$SCOPE_KEY]（$SCOPE）"
+
   if wait_for_log "Report      :" 240 "开机完成，时长菜单要出来了"; then
     sleep 2
     mon "sendkey 1"
@@ -529,6 +578,13 @@ else
   # 按早了打到 GRUB 上。"Report      :" 是它开机时打的最后一批日志之一，
   # 时长菜单紧接着就画出来（30 秒倒计时）。--disk-stress 那条路用的是同一个锚点。
   sleep "$SELECT_START"
+  # ---------------- 先过范围菜单（1.9.5）----------------
+  # 它排在报告目录建立之前，所以没有日志锚点可等，只能按时间 ——
+  # 好在它有 60 秒倒计时，窗口很宽，而且**按不中的后果是回落到全量**
+  # （菜单的默认值），也就是这条路本来就要的那个范围。
+  mon "sendkey $SCOPE_KEY"
+  info "范围菜单已按 [$SCOPE_KEY]（$SCOPE）"
+
   wait_for_log "Report      :" 300 "KLBurn 起来了（时长菜单马上出来）" || true
 
   # ---------------- 选档：只按一次 ----------------
@@ -564,9 +620,25 @@ else
   # 锚点用带冒号的那条（面板画出来时打的），"Configuration review done" 是它走完了。
   wait_for_log "Configuration review:" 420 "配置核对屏出来了" && { sleep 3; shot "config-review"; }
 
-  # 压测仪表盘：现场要盯八个小时的就是这一屏。
-  # 配置核对 60 秒 + 破坏性写确认 120 秒都得走完才开跑，等够再截。
-  sleep 240; shot "burn-in"
+  # 压测仪表盘：现场要盯八个小时的就是这一屏，**改了界面就必须真去看这张图**
+  # （1.7.2/1.7.3 有七个问题是只有看图才发现的，当时断言全绿）。
+  #
+  # ⚠️ **别再用固定的 `sleep 240`。**那个数是按"配置核对 60s + 破坏性写确认
+  #    120s + 一小段基准"估的，而 PHASE 2 的长度是会变的：1.9.5 把 OpenDCDiag
+  #    放进盘之后，`validate_cpu_sdc` 自己就要跑 120 秒 —— 于是这一张截到的是
+  #    基准阶段的滚动日志，仪表盘一张都没截到。**而断言全绿**，因为没有任何
+  #    断言在看这张图。这正是这个项目最怕的那种失效。
+  #
+  #    改成等压测真的开跑：`stress_cpu` 起来时会记一条 `[CPU] stress-ng ...`，
+  #    它是 info() 打的、会落进 klburn.log，也就会落到"U 盘"镜像上。
+  #    等到它再多给 20 秒，让采样器攒出第一批读数（否则频率/占用率那几格是 --）。
+  if wait_for_log "[CPU] stress-ng" 900 "压测开跑了（下一步截仪表盘）"; then
+    sleep 20
+  else
+    info "没等到压测开跑的锚点，还是按老办法等一会儿再截"
+    sleep 60
+  fi
+  shot "burn-in"
 
   # QUICK 10 分钟 + 采集/复查/出报告的余量。用锚点等而不是死等 900 秒。
   #
@@ -734,9 +806,25 @@ TAG="$(basename "$RUNDIR")"
 [[ -s "$RUNDIR/klburn.log" ]] && ok "klburn.log 有内容" \
                               || bad "klburn.log 不存在或是空的"
 
-# 目录名格式：日期_时间_CPU型号_内存容量
-[[ "$TAG" =~ ^[0-9]{8}_[0-9]{6}_.+ ]] && ok "报告目录名格式对（日期_时间_CPU_内存）" \
-                                      || bad "报告目录名不像话：$TAG"
+# 目录名格式：日期_时间_CPU型号_内存容量_范围[_序号]
+#
+# ⚠️ 1.9.5 起末尾多了范围后缀，而且它是**安全项**不是装饰：一台只测了 CPU 的
+#    机器和一台全量测过的机器，目录名一模一样的话，半年后没人分得清哪份能当
+#    验收依据。所以这里既验形状、也验它确实是本轮选的那个范围。
+#    末尾可选的 _01/_02 是"同一分钟内连测两次"的去重序号（RTC 卡住的机器上
+#    是必然事件），它排在范围后缀**之后**。
+if [[ "$TAG" =~ ^[0-9]{8}_[0-9]{6}_.+_(Full|CPU|MEM|GPU|DISK|INFO)(_[0-9]{2})?$ ]]; then
+  ok "报告目录名格式对（日期_时间_CPU_内存_范围）：$TAG"
+else
+  bad "报告目录名不像话（少了范围后缀？）：$TAG"
+fi
+if [[ "$TAG" =~ _${SCOPE_TAG}(_[0-9]{2})?$ ]]; then
+  ok "目录名上的范围后缀就是本轮选的那个（_${SCOPE_TAG}）"
+else
+  bad "范围后缀对不上：期望 _${SCOPE_TAG}，实际目录名是 $TAG"
+  info "  = 范围菜单那一键没打中，菜单 60 秒超时回落成了全量。"
+  info "    这是本脚本按键时间窗没打中，**不是产品的问题**。"
+fi
 
 if [[ "$STAGE" == "smoke" ]]; then
   # 冒烟到此为止：能开机、能认出数据分区、能建目录写日志，就算过。

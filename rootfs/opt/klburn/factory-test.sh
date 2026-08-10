@@ -100,12 +100,21 @@ section "NETWORK TIME SYNC (best-effort)"
 CLOCK_SYNCED=1
 try_sync_clock_via_network || CLOCK_SYNCED=0
 
+# ---------------------------------------------------------------- 选测试范围
+# 全量 / 只测 CPU / 只测内存 / 只测显卡 / 只测硬盘 / 仅导出报告。
+#
+# ⚠️ **必须排在建立运行目录之前**：范围要进目录名和报告文件名
+# （见 core.sh 的 get_machine_tag），而目录一旦建好就没法回头改了。
+# 时长菜单排在它后面 —— 先决定"测什么"，再决定"测多久"。
+select_scope
+
 # ---------------------------------------------------------------- 建立本次运行目录
 SERIAL="$(get_serial)"
 RUN_STAMP="$(date '+%Y%m%d_%H%M%S')"
-# 文件名格式：日期_时间_CPU_内存，例如
-#   20260730_110512_2x-Intel-Xeon-Gold-6430_512GB
-MACHINE_TAG="$(get_machine_tag "$RUN_STAMP")"
+# 文件名格式：日期_时间_CPU_内存_范围，例如
+#   20260730_110512_2x-Intel-Xeon-Gold-6430_512GB_Full
+#   20260730_110512_2x-Intel-Xeon-Gold-6430_512GB_CPU
+MACHINE_TAG="$(get_machine_tag "$RUN_STAMP" "$KLB_SCOPE")"
 # 报告和原始数据全部放进同一个以 MACHINE_TAG 命名的文件夹里，
 # out\ 根目录下不再直接堆 .html 文件——U 盘反复插不同机器测下来，
 # 历史记录一多，散落的文件会很难找。
@@ -140,6 +149,7 @@ fi
 
 info "Serial      : $SERIAL"
 info "Machine     : $MACHINE_TAG"
+info "Scope       : $(scope_label "$KLB_SCOPE")"
 info "Report      : $REPORT_HTML"
 if [[ "${DATA_OK:-0}" != "1" ]]; then
   warn "Report will NOT survive power-off (no USB data partition)."
@@ -164,7 +174,13 @@ else
 fi
 
 # ---------------------------------------------------------------- 选时长
-select_duration
+# 「仅导出报告」那一档没有时长可选 —— 一个部件都不压，问"压多久"是句废话。
+if scope_has_stress; then
+  select_duration
+else
+  DURATION_PROFILE="INVENTORY"
+  DURATION_SECONDS=0
+fi
 
 # ---------------------------------------------------------------- 采集
 scan_disks
@@ -185,13 +201,25 @@ conformance_all
 config_review 60
 
 # ---------------------------------------------------------------- 破坏性写确认
+#
+# ⚠️⚠️ **硬盘专测那一路，这道确认一个字都不许省。**
+#
+# `KLB_SCOPE=disk` 的意思是"这一轮要测硬盘"，**不是**"操作员已经同意擦盘"。
+# 往裸设备写数据会毁掉盘上原有内容，而 confirm_disk_write 是唯一的闸门 ——
+# 范围只决定这道闸门会不会被问到，绝不决定它开不开。
+# 现场不确认就只测读带宽（bench_disk_bw 是 rw=read + direct=1，一个字节都不写）。
+#
+# 反过来，不测硬盘的那几个范围里**不问**：那一屏是个 120 秒的输入框，
+# 问一个这轮根本不会执行的破坏性操作，只会让现场白等、白紧张一次。
 DISK_CONFIRMED=0
-if (( ${#DISK_CAND[@]} > 0 )); then
-  if confirm_disk_write 120; then
-    DISK_CONFIRMED=1
+if scope_runs stress_disk; then
+  if (( ${#DISK_CAND[@]} > 0 )); then
+    if confirm_disk_write 120; then
+      DISK_CONFIRMED=1
+    fi
+  else
+    DISK_SKIP_REASON="未发现可进行读写压力测试的本机硬盘（系统正在使用的磁盘不参与破坏性测试）"
   fi
-else
-  DISK_SKIP_REASON="未发现可进行读写压力测试的本机硬盘（系统正在使用的磁盘不参与破坏性测试）"
 fi
 
 # ---------------------------------------------------------------- 时间分配
@@ -202,22 +230,25 @@ fi
 # 硬盘单独测：fio 裸盘读写要是跟 CPU/内存满载凑在一起，出来的带宽/IOPS
 # 数字会被 CPU 争用扭曲，没有参考价值，所以不拿来并发。它单独占一段时间，
 # 跑在并发阶段结束之后，不从 CPU/内存/GPU 那份时间里扣。
+#
+# 单项专测时上面那段"并发"只剩一项，选多长就是那一项测多长。
+# 硬盘专测是唯一一个换算法的：它拿**全部**时长，不是全量档里那 30%
+# —— 那 30% 是"顺带也压一下盘"的量，专门来测盘的时候按它跑就是名不副实。
 gpu_will_run=0
-if (( GPU_USABLE > 0 )) && [[ -x "$KLB_TOOLS/gpu_burn" ]]; then
+if scope_runs stress_gpu && (( GPU_USABLE > 0 )) && [[ -x "$KLB_TOOLS/gpu_burn" ]]; then
   gpu_will_run=1
 fi
 
-CPU_SECS=$DURATION_SECONDS
-MEM_SECS=$DURATION_SECONDS
-if (( gpu_will_run )); then
-  GPU_SECS=$DURATION_SECONDS
-else
-  GPU_SECS=0
-fi
+CPU_SECS=0; MEM_SECS=0; GPU_SECS=0; DSK_SECS=0
+scope_runs stress_cpu && CPU_SECS=$DURATION_SECONDS
+scope_runs stress_mem && MEM_SECS=$DURATION_SECONDS
+(( gpu_will_run )) && GPU_SECS=$DURATION_SECONDS
 if (( DISK_CONFIRMED == 1 )); then
-  DSK_SECS=$(( DURATION_SECONDS * 30 / 100 ))
-else
-  DSK_SECS=0
+  if [[ "$KLB_SCOPE" == "disk" ]]; then
+    DSK_SECS=$DURATION_SECONDS
+  else
+    DSK_SECS=$(( DURATION_SECONDS * 30 / 100 ))
+  fi
 fi
 
 TEST_START_TS="$(date '+%Y-%m-%d %H:%M:%S')"
@@ -230,10 +261,33 @@ TEST_START_EPOCH="$(date +%s)"
 # 才知道压测要多久。1.9.0 一度把它放在 bench 之后，于是
 # tests/e2e-qemu.sh 用它当锚点判档位时永远等超时（那边等 420 秒，
 # 而基准阶段本身就可能跑更久）。
-burn_label="CPU + MEMORY"
-(( gpu_will_run )) && burn_label="$burn_label + GPU"
-info "Time budget: $burn_label concurrently for $(fmt_dur "$DURATION_SECONDS")$(
-  (( DISK_CONFIRMED == 1 )) && printf '; DISK separately for %s' "$(fmt_dur "$DSK_SECS")")"
+#
+# 标签按**这一轮真的会压的东西**拼，别写死 "CPU + MEMORY"：只测显卡的那一轮
+# 屏幕上挂着 "BURN-IN CPU + MEMORY"，现场看到的就是一句假话。
+# 全都不压时（硬盘专测 / 仅导出报告）它是空串，下面整个并发阶段跳过。
+burn_label=""
+burn_n=0
+scope_runs stress_cpu && { burn_label="CPU";                              burn_n=$(( burn_n + 1 )); }
+scope_runs stress_mem && { burn_label="${burn_label:+$burn_label + }MEMORY"; burn_n=$(( burn_n + 1 )); }
+(( gpu_will_run ))    && { burn_label="${burn_label:+$burn_label + }GPU";    burn_n=$(( burn_n + 1 )); }
+
+# "concurrently" 这个词只在真的有两项以上并发时才写。
+#
+# ⚠️ 它同时是 tests/e2e-qemu.sh 的**判档锚点**（那边 grep 的是完整定长串
+#    "concurrently for 0h10m00s"，因为查的是 2.5GB 磁盘镜像、-oE 会截断）。
+#    单项专测里没有"并发"这回事，所以那一支不带这个词；e2e 的完整档跑的是
+#    全量范围，锚点不受影响。改这一行之前先看 e2e 那段注释。
+burn_conc=""
+(( burn_n > 1 )) && burn_conc=" concurrently"
+
+if [[ -n "$burn_label" ]]; then
+  info "Time budget: ${burn_label}${burn_conc} for $(fmt_dur "$DURATION_SECONDS")$(
+    (( DISK_CONFIRMED == 1 )) && printf '; DISK separately for %s' "$(fmt_dur "$DSK_SECS")")"
+elif (( DISK_CONFIRMED == 1 )); then
+  info "Time budget: DISK for $(fmt_dur "$DSK_SECS")"
+else
+  info "Time budget: no burn-in this run (scope: $(scope_label "$KLB_SCOPE"))"
+fi
 
 # ---------------------------------------------------------------- 性能基准
 # **必须排在老化压测之前。**基准量的是"这台机器跑得有多快"，要在机器空闲时测；
@@ -249,59 +303,86 @@ bench_all "$DISK_CONFIRMED"
 validate_all
 BENCH_SECS=$(( $(date +%s) - BENCH_START_EPOCH ))
 
-# ---------------------------------------------------------------- 压测：CPU / 内存 / GPU 并发
-stress_init
+# ---------------------------------------------------------------- 压测
+# 「仅导出报告」那一档整段跳过：没有任何东西要压，也就没有仪表盘、没有
+# turbostat 采样、没有测后复查。
+if scope_has_stress; then
+  stress_init
 
-# 仪表盘是"每 2 秒清屏 + 整屏重画"，前提是只有它一个人在往控制台上写。
-# 压测子进程的输出早就全部重定向进日志文件了，剩下的写入源就是内核 ——
-# PCIe AER / EDAC / nvme reset 这类消息会在压测期间随时插进来把面板顶花。
-# 只压 console 的 loglevel，ring buffer 一个字都不少（dmesg 采集和 OOM
-# 判定读的都是 ring buffer）。压测全部结束后原样恢复。
-console_quiet_on
+  # 仪表盘是"每 2 秒清屏 + 整屏重画"，前提是只有它一个人在往控制台上写。
+  # 压测子进程的输出早就全部重定向进日志文件了，剩下的写入源就是内核 ——
+  # PCIe AER / EDAC / nvme reset 这类消息会在压测期间随时插进来把面板顶花。
+  # 只压 console 的 loglevel，ring buffer 一个字都不少（dmesg 采集和 OOM
+  # 判定读的都是 ring buffer）。压测全部结束后原样恢复。
+  console_quiet_on
 
-# 逐核频率/温度/功耗的采样。只留档不判定，起不来就当没有（见 stress.sh）。
-turbostat_start
+  # 逐核频率/温度/功耗的采样。只留档不判定，起不来就当没有（见 stress.sh）。
+  turbostat_start
 
-section "PHASE 3/5  BURN-IN: $burn_label CONCURRENTLY  ($(fmt_dur "$DURATION_SECONDS"))"
+  # ---- CPU / 内存 / GPU（在范围里的那几项并发跑）----
+  # burn_label 为空 = 这一轮这三样一个都不压（硬盘专测），整段跳过。
+  if [[ -n "$burn_label" ]]; then
+    section "PHASE 3/5  BURN-IN: ${burn_label}${burn_conc:+ CONCURRENTLY}  ($(fmt_dur "$DURATION_SECONDS"))"
 
-BURN_PIDS=()
-( stress_cpu "$CPU_SECS" ) & BURN_PIDS+=("$!")
-( stress_mem "$MEM_SECS" ) & BURN_PIDS+=("$!")
-if (( gpu_will_run )); then
-  ( gpu_stress "$GPU_SECS" ) & BURN_PIDS+=("$!")
+    BURN_PIDS=()
+    scope_runs stress_cpu && { ( stress_cpu "$CPU_SECS" ) & BURN_PIDS+=("$!"); }
+    scope_runs stress_mem && { ( stress_mem "$MEM_SECS" ) & BURN_PIDS+=("$!"); }
+    if (( gpu_will_run )); then
+      ( gpu_stress "$GPU_SECS" ) & BURN_PIDS+=("$!")
+    fi
+
+    # 传的是"这一轮在压什么"（CPU + MEMORY + GPU），不是阶段名 ——
+    # 阶段名由 dash_burn 自己加，右上角放的是档位。
+    progress_bar_concurrent "$DURATION_SECONDS" "$burn_label" "${BURN_PIDS[@]}"
+    wait "${BURN_PIDS[@]}" 2>/dev/null || true
+  fi
+
+  # ---- 硬盘（单独跑，不和上面并发）----
+  if scope_runs stress_disk; then
+    if (( DISK_CONFIRMED == 1 )); then
+      stress_disk "$DSK_SECS"
+    else
+      stress_disk_skipped "${DISK_SKIP_REASON:-未确认}"
+    fi
+  fi
+
+  # ---- GPU 缺工具的情况 ----
+  # 驱动认得到卡、但这张盘里没带 gpu_burn 时，上面的并发批次里根本没有 GPU
+  # （gpu_will_run=0），必须在这里显式补一次调用，让 gpu_stress 把那条 SKIP 记下来。
+  # 否则报告里 "GPU 压力测试" 这一项会整个消失 —— 既不是 PASS 也不是 SKIP，
+  # 看报告的人根本不知道 GPU 到底测没测。
+  if scope_runs stress_gpu && (( gpu_will_run == 0 && GPU_USABLE > 0 )); then
+    gpu_stress 0
+  fi
+
+  # ---- 范围里的部件根本不在这台机器上 ----
+  # 选了"只测显卡"却插在一台没有独立显卡的机器上（现场完全可能）。
+  # 这时候上面每一支都不成立，报告里关于显卡的压测**一行都没有** ——
+  # 看报告的人只会以为我们漏测了。
+  #
+  # ⚠️ 这是 SKIP，不是 FAIL：**这台机器没装显卡是事实，不是故障**。
+  #    而且这条讲的是被测机器的事实（不是"我们没带工具"），所以**不传
+  #    origin=self** —— 客户有权知道他点名要测的东西这台机器上没有。
+  if scope_runs stress_gpu && (( GPU_USABLE == 0 )); then
+    result_add "stress_gpu" "GPU 压力测试" "$ST_SKIP" \
+      "本轮选择的测试范围是显卡专项测试，但本机未检测到可用的独立显卡，\
+显卡相关项目均未进行。此项不影响整机结论。" ""
+  fi
+
+  turbostat_stop
+  # 仪表盘到此为止，把内核消息放回控制台 —— 后面复查/出报告阶段本来就是
+  # 正常滚动输出，而且这时候真出了内核错误，现场应该第一时间看见。
+  console_quiet_off
 fi
-
-# 传的是"这一轮在压什么"（CPU + MEMORY + GPU），不是阶段名 ——
-# 阶段名由 dash_burn 自己加，右上角放的是档位。
-progress_bar_concurrent "$DURATION_SECONDS" "$burn_label" "${BURN_PIDS[@]}"
-wait "${BURN_PIDS[@]}" 2>/dev/null || true
-
-# ---------------------------------------------------------------- 压测：硬盘（单独跑，不并发）
-if (( DISK_CONFIRMED == 1 )); then
-  stress_disk "$DSK_SECS"
-else
-  stress_disk_skipped "${DISK_SKIP_REASON:-未确认}"
-fi
-
-# ---------------------------------------------------------------- 压测：GPU 缺工具的情况
-# 驱动认得到卡、但这张盘里没带 gpu_burn 时，上面的并发批次里根本没有 GPU
-# （gpu_will_run=0），必须在这里显式补一次调用，让 gpu_stress 把那条 SKIP 记下来。
-# 否则报告里 "GPU 压力测试" 这一项会整个消失 —— 既不是 PASS 也不是 SKIP，
-# 看报告的人根本不知道 GPU 到底测没测。
-if (( gpu_will_run == 0 && GPU_USABLE > 0 )); then
-  gpu_stress 0
-fi
-
-turbostat_stop
-# 仪表盘到此为止，把内核消息放回控制台 —— 后面复查/出报告阶段本来就是
-# 正常滚动输出，而且这时候真出了内核错误，现场应该第一时间看见。
-console_quiet_off
 
 TEST_END_TS="$(date '+%Y-%m-%d %H:%M:%S')"
 TEST_ELAPSED=$(( $(date +%s) - TEST_START_EPOCH ))
 
 # ---------------------------------------------------------------- 复查
-verify_all
+# 「测后复查」的前提是有"测"这回事。仅导出报告那一档没有测后，也就没有复查。
+if scope_has_stress; then
+  verify_all
+fi
 
 # ---------------------------------------------------------------- 元数据
 # disk_tested 必须是"真的被 fio 写过的盘"，不是"候选盘"。
@@ -331,6 +412,7 @@ cat > "$RUN_DIR/meta.json" <<EOF
   "serial":         "${SERIAL}",
   "run_stamp":      "${RUN_STAMP}",
   "machine_tag":    "${MACHINE_TAG}",
+  "scope":          "${KLB_SCOPE}",
   "profile":        "${DURATION_PROFILE}",
   "planned_secs":   ${DURATION_SECONDS},
   "elapsed_secs":   ${TEST_ELAPSED},
@@ -351,6 +433,7 @@ cat > "$RUN_DIR/meta.json" <<EOF
     "disk_temp_warn": ${DISK_TEMP_WARN}, "disk_temp_fail": ${DISK_TEMP_FAIL}
   },
   "bench_params": {
+    "flops_method":  "${BENCH_FLOPS_METHOD:-none}",
     "linpack_runs":  "${BENCH_LINPACK_RUNS:-4}",
     "linpack_n":     "${BENCH_LINPACK_N:-}",
     "disk_qd_sata":  "${BENCH_DISK_QD_SATA:-32}",
@@ -463,8 +546,14 @@ if ! jq -e -s 'length > 0' "$RUN_DIR/results.jsonl" >/dev/null 2>&1; then
   warn "The machine was NOT evaluated. Re-test; do not ship on this report."
 fi
 
-brand_bar "$(panel_width)" "TEST COMPLETE"
-verdict_banner "$OVERALL"
+if scope_has_stress; then
+  brand_bar "$(panel_width)" "TEST COMPLETE"
+else
+  brand_bar "$(panel_width)" "INVENTORY COMPLETE"
+fi
+# 第二个参数是本轮范围：**「仅导出报告」那一档绝不许打绿色 PASS 大字**，
+# 由 verdict_banner 就地换成中性的 INFO（见 lib/ui.sh 那段注释）。
+verdict_banner "$OVERALL" "$KLB_SCOPE"
 
 # 大字之后再说一次原因：这个 FAIL 说的是"这轮测试作废"，不是"这台机器坏了"。
 # 只在上面 warn 一次的话，出报告那几行一滚就看不见了，现场会照着 FAIL 去查硬件。
@@ -477,6 +566,8 @@ fi
 
 hr
 printf '  Serial      : %s\n' "$SERIAL"
+# 范围排在档位前面：这一屏经常被拍照发群里，"测了什么"比"测了多久"要紧得多。
+printf '  Scope       : %s\n' "$(scope_label "$KLB_SCOPE")"
 printf '  Profile     : %s (%s)\n' "$DURATION_PROFILE" "$(fmt_dur "$TEST_ELAPSED")"
 printf '  Report      : %s\n' "$REPORT_HTML"
 [[ -s "${REPORT_HTML%.html}.pdf" ]] && printf '  Report (PDF): %s\n' "${REPORT_HTML%.html}.pdf"

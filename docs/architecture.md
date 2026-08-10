@@ -128,10 +128,15 @@ STEP 1   定位报告存储位置        mount_data_partition()      四层回�
 NETWORK  联网校时（best-effort）  try_sync_clock_via_network()
          └─ 必须在算 RUN_STAMP 之前：目录名和时间戳一旦写死就晚了
 
+SCOPE    select_scope()           60 秒倒计时，默认全量（KLB_SCOPE）
+         └─ **必须排在建立 RUN_DIR 之前**：范围要进目录名（_Full/_CPU/…），
+            目录一旦建好就没法回头改了
+
          建立 RUN_DIR / RAW_DIR，早期日志并入 klburn.log
          时钟可信度自检（年份 < 2024，或早于本介质构建日期 -> 标记存疑）
 
          select_duration()        30 秒倒计时，默认 STANDARD
+         └─ 「仅导出报告」那一档跳过它（一个部件都不压，没有时长可选）
 
 PHASE 1  硬件采集                collect_all()
          collect_system → check_memory_capacity → check_pcie_link
@@ -300,6 +305,55 @@ rootfs/opt/klburn/
 ---
 
 ## 六、判定规则总表
+
+### 6.0 先看范围：哪些项目这一轮会跑
+
+1.9.5 起开机先选**测试范围**（`KLB_SCOPE`，六个值：`full` / `cpu` / `mem` /
+`gpu` / `disk` / `info`）。**范围之外的项目整项不跑、也不产生结论行** ——
+不是"跑了再藏起来"。判据只有一处：[`lib/core.sh`](../rootfs/opt/klburn/lib/core.sh)
+的 `scope_runs <判定组> [范围]`。
+
+`✓` = 跑；`—` = 本轮整项不跑。
+
+| 判定组 | 包含哪些 id | full | cpu | mem | gpu | disk | info |
+|---|---|:-:|:-:|:-:|:-:|:-:|:-:|
+| `inventory` | `collect_*` 全部 | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ |
+| `platform` | `check_mem_cap` `check_pcie_link` `check_psu` `check_virtual_dev` `check_bios_profile` `check_sn_consistency` `verify_dmesg_boot` | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ |
+| `conform` | `check_dimm_uniform` `check_nic_uniform` `check_disk_uniform` `check_gpu_uniform` | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ |
+| `nic` | `check_nic_selftest` `check_nic_speed` `test_nic` | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ |
+| `gpu_health` | `check_gpu_ecc` `check_gpu_remap` | ✓ | — | — | ✓ | — | ✓ |
+| `bench_cpu` | `bench_cpu_flops` | ✓ | ✓ | — | — | — | ✓ |
+| `bench_mem` | `bench_mem_bw` | ✓ | — | ✓ | — | — | ✓ |
+| `bench_gpu` | `bench_gpu_bw_*` `bench_gpu_p2p` | ✓ | — | — | ✓ | — | ✓ |
+| `bench_disk` | `bench_disk_bw`（**只读，不写盘**） | ✓ | — | — | — | ✓ | ✓ |
+| `validate_cpu` | `validate_cpu_sdc` | ✓ | ✓ | — | — | — | — |
+| `validate_gpu` | `validate_gpu_diag` | ✓ | — | — | ✓ | — | — |
+| `stress_cpu` | `stress_cpu` | ✓ | ✓ | — | — | — | — |
+| `stress_mem` | `stress_mem` | ✓ | — | ✓ | — | — | — |
+| `stress_gpu` | `stress_gpu` `check_gpu_load` | ✓ | — | — | ✓ | — | — |
+| `stress_disk` | `stress_disk`（**要现场确认**） | ✓ | — | — | — | ✓ | — |
+| `verify_ecc` | `verify_ecc` | ✓ | ✓ | ✓ | — | — | — |
+| `verify_throttle` | `verify_throttle` | ✓ | ✓ | — | — | — | — |
+| `verify_disk` | `verify_smart` `verify_disk_temp` `verify_disk_selftest` | ✓ | — | — | — | ✓ | — |
+| `verify_common` | `verify_dmesg` `verify_sel` `verify_aer` `verify_bmc_sensors` | ✓ | ✓ | ✓ | ✓ | ✓ | — |
+
+几条容易改错的：
+
+- **前四组（采集 / 平台核对 / 一致性核对 / 网卡）在所有范围下都跑。**
+  它们合起来几十秒，回答的是"这台机器装了什么、装得对不对" ——
+  那是任何一份报告的底座，也正是「仅导出报告」这一档要的东西。
+- **`verify_common` 在任何跑了压测的范围里都跑。**它查的是"这一轮机器整体有没有
+  报错"，和压了哪个部件无关：只压了 CPU 的那一轮里 PCIe 报了 AER、BMC 记了
+  电源掉电，照样是这台机器的毛病。
+- **`verify_ecc` 在 `cpu` 范围也跑** —— CPU 满载会把内存也带起来。
+- **`info` 跑基准、不跑压测也不跑专项验证。**基准每项几十秒，而且一个字节都不
+  往盘上写；跳过的是那个"要单独占一段时间"的老化阶段。
+- **认不出来的组名一律跑。**新加判定忘了登记的后果应该是"多跑一项"，
+  不是"那条结论从报告里静悄悄消失"—— 后者没有任何人会发现。
+
+`tests/test-hw-checks.sh` 里有一份**独立写的同一张表**，逐格（114 格）对账。
+
+### 6.1 各项判定
 
 | id | 项目 | PASS | WARN | SKIP | FAIL |
 |---|---|---|---|---|---|
@@ -855,6 +909,12 @@ check_fans() {
 报告里那一项就凭空消失，既不是 PASS 也不是 SKIP。所以
 `test-hw-checks.sh` 里有一组"汇总入口调用链不能少人"的断言，
 加了新检查记得同时加进那个列表。
+
+**4b. 想清楚它属于哪个测试范围**（§6.0）。挂上去的形状是
+`scope_runs <组> && check_fans`。**不确定就先不登记** —— `scope_runs` 对认不出来的
+组名一律返回"跑"，后果是"多跑一项"；反过来登记错了，后果是那条结论在某些范围下
+静悄悄消失，没有任何人会发现。真要新开一个组，`core.sh` 的表和
+`test-hw-checks.sh` 里那份独立写的同一张表要一起改（两边对不上就跑红）。
 
 写文案时对照 [`report-policy.md`](report-policy.md)：客户可见的 detail 里
 不许出现内部用语，`test-hw-checks.sh` 的全局扫描会自动约束新写的文案。
@@ -1490,6 +1550,45 @@ check_fans() {
     分不清是哪种情况。**该项不适用时出一条写明原因的 SKIP，不是让它消失。**
     （和 §11-43「分节只决定印在哪一节，绝不决定印不印」是同一件事的两面。）
 
+### 测试范围（1.9.5）
+
+60. **"这一轮没打算测"和"测过了、没问题"，报告上必须一眼分得开**（1.9.5）。
+    这是单项专测这个功能**唯一不能犯的错**：一台只测了 CPU 的机器打出和全量
+    测试一模一样的绿色 PASS，半年后没有任何人分得清它到底测过什么 ——
+    **那比不做这个功能还糟**。四道措施缺一不可：
+
+    - 报告抬头第一行写明本轮范围，结论块下面紧跟一句"哪些部件这一轮没测"
+    - 「仅导出硬件信息」那一档**不出 PASS 大字**（屏幕上换成中性的青色 `INFO`
+      加一句 "This is NOT a pass"，报告里换成灰色的「仅硬件信息 · 未做测试」）
+    - 报告目录名 / 报告文件名 / `meta.json` 全都带范围后缀（`_Full` `_CPU` …）
+    - 批次汇总里非全量的结论写成 `PASS(CPU)` 这种形状 ——
+      **排序筛选时它和 `PASS` 不是同一个值**
+
+    FAIL 在任何范围下都照打不误：那是实打实的问题，和测了多少无关。
+    `mutate.sh` 里 `info-scope-green-pass` / `info-scope-green-pass-screen` /
+    `scope-tag-dropped` / `scope-summary-plain-pass` 四条各钉一处。
+61. **范围之外的项目"整项不跑"，不是"跑了再藏"**（1.9.5）。两者的差别不是风格：
+    后者白白浪费现场的时间（选了只测 CPU，内存照样被压满三十分钟），
+    而且 `test-report-render.sh` 那条「报告里的判定条数 = `results.jsonl` 条数
+    − 故意藏起来的」会算不明白 —— 那条断言是报告侧最重要的一张网。
+    判据集中在 `scope_runs()` 一处，调用点一律是
+    `scope_runs <组> && <那一项>`，**不在判定函数内部再判一次范围**。
+62. **范围只决定"问不问"，绝不决定"答什么"**（1.9.5）。`KLB_SCOPE=disk` 的意思是
+    "这一轮要测硬盘"，**不是**"操作员已经同意擦盘"。往裸设备写数据会毁掉盘上
+    原有内容，而 `confirm_disk_write` 是唯一的闸门 —— 范围只让它**必然被问到**。
+    `test-hw-checks.sh` 钉着"`DISK_CONFIRMED=1` 在主流程里只有一处，
+    而且必须紧跟在 `confirm_disk_write` 的成功分支里"，
+    `mutate.sh` 的 `disk-scope-skips-confirm` 守着同一件事。
+63. **范围菜单必须排在建立 `RUN_DIR` 之前**（1.9.5）。范围要进目录名，而目录一旦
+    建好就没法回头改。代价是这一屏**没有任何日志锚点**可等（那时候 `klburn.log`
+    还在内存里，没落到 U 盘上）—— `e2e-qemu.sh` 那边只能按时间按键，
+    所以它的倒计时给到 60 秒（窗口够宽），而且按不中的后果是**回落到全量**
+    （菜单的默认值），不是卡住。
+64. **老 run-dir 没有 `scope` 字段时一律当全量**（1.9.5）。1.9.4 及以前的报告
+    确实都是全量跑出来的；默认成别的值会把历史上所有报告重新解释一遍。
+    三处（交付报告 / 内部报告 / 批次工具）用同一个默认值，
+    `test-batch-tools.sh` 里有断言钉着。
+
 ---
 
 ## 十二、测试地图
@@ -1521,11 +1620,28 @@ check_fans() {
 | `check-firmware.sh` | **盘里关键驱动要的固件一个都不能少**：拿 `modinfo -F firmware` 问驱动自己要什么，再逐个去 `<rootfs>/lib/firmware` 下找。顺带复核"有且只有一个内核"和 CPU 微码在不在 | 构建之后（它查的是构建工作区里的 rootfs） |
 | `mutate.sh` | 把已修好的 bug 逐个塞回代码，确认对应的用例真的会跑红。**逃掉 = 那条守卫是摆设** | 改了任何判定逻辑或守卫之后 |
 
-`mutate.sh` 里有两条守卫**故意没有变异**（脚本里写了理由，别当成漏了）：
+**`mutate.sh` 1.9.5 起跑在源码副本里、默认并行**（105 条约 3 分半，原来串行 25 分钟）：
+
+- 每条变异把 `rootfs/tests/tools/build/docs` 拷进 `/tmp` 的一份副本，在**副本**里
+  施加、在副本里跑套件。**真工作区自始至终只读** —— 跑变异的时候照样能看
+  `git diff`、能提交，中途 Ctrl-C 也不会留下改了一半的源码（1.9.5 之前都不行）。
+- 跑完比对整棵树的 sha256，确认"我们压根没碰过它"。这条同时兜住
+  "哪天有人在变异函数里写了绝对路径"。
+- `test_out/`（78MB 真机样本，`test-hw-checks` 那组传感器断言要吃）先在池子里
+  拷一份，各副本再 `cp -al` 挂硬链接。**软链不行**：`find <软链>` 不加 `-H/-L`
+  不会往下走，那条断言会一份样本都找不到。
+- **副本模式有一个新的失效方式，所以多了一段「基线自检」**：先在一份**没有变异**
+  的干净副本里把各套件跑一遍，必须全绿。副本要是少拷了目录，套件会因为完全
+  无关的原因红 —— 于是**每一条变异都显示"被抓住"**，一片假绿。
+  这一段真抓到过两次（`test_out` 没进副本、以及一条 `grep -q` + `pipefail`
+  的竞态断言）。基线不绿就整轮作废，不给结论。
+- 机器吃紧或者要排查某一条时用 `-j 1` 回到串行。
+
+另有两条守卫**故意没有变异**（脚本里写了理由，别当成漏了）：
 `build-gpu-burn.sh` 的逐代 cubin 自检要重裁 1GB 静态库再链接，十几分钟起步；
 `check-firmware.sh` 的 `pci.ids` 日期断言要一个已构建的 rootfs，没有时它判 0 项跳过 ——
 在没 rootfs 的机器上会得到「逃掉了」的**假警报**，而假警报比漏报还难查。
-两条都违反 `mutate.sh`「3~5 分钟、不需要构建」的契约，和 `--disk-stress` 那条同理。
+两条都违反 `mutate.sh`「几分钟、不需要构建」的契约，和 `--disk-stress` 那条同理。
 
 ```bash
 sudo ./tests/e2e-qemu.sh                          # BIOS 冒烟，约 3 分钟
@@ -1534,7 +1650,8 @@ sudo ./tests/e2e-qemu.sh --no-data-partition      # U 盘上没有可用 exFAT �
 sudo ./tests/e2e-qemu.sh --stage full             # 完整跑一遍 QUICK 档，约 20 分钟
 sudo ./tests/e2e-qemu.sh --stage full --disk-stress   # 再加上"fio 真写盘"，约 20 分钟
 ./tests/check-firmware.sh                         # 固件对账，几秒
-./tests/mutate.sh                                 # 全部变异，约 3~5 分钟
+./tests/mutate.sh                                 # 全部变异，默认并行，约 3~4 分钟
+./tests/mutate.sh -j 1                            # 串行（排查某一条、或者机器吃紧）
 ./tests/mutate.sh --list                          # 看有哪些变异、各由谁守
 ```
 
@@ -1630,7 +1747,7 @@ FAIL 第 4 个分区挂不上              <- 连文件系统都没了
 第一条正是"写穿"的指纹：harness 轮询的那份日志，本身就躺在被 fio 写的那块盘上。
 
 > 这条变异**不能**放进 `mutate.sh`：它要重新出一张 ISO 再跑 20 分钟，
-> 而 `mutate.sh` 的契约是"3~5 分钟、不需要构建"。
+> 而 `mutate.sh` 的契约是"几分钟、不需要构建"。
 > 挂进去会让每次跑变异都变成一小时。
 > 单元级那条（`media-blind`）在 `mutate.sh` 里，够日常用。
 

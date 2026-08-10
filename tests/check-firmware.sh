@@ -314,6 +314,62 @@ for ids in pci.ids usb.ids; do
   fi
 done
 
+# ================================================================
+# 三、盘里那几个 vendor 程序的依赖库，一个都不能少
+# ================================================================
+#
+# 和固件那一节是**同一类失效**：缺一个 .so 不会有任何报错指出来。
+# 程序在盘里、权限也对，一跑就是 `error while loading shared libraries`，
+# 而那行报错落进日志里，判定只看到"这一项没测出结果" ——
+# 现场表现是"这一项莫名其妙 SKIP"，没有人查得出为什么。
+#
+# 1.9.5 这条变成硬需求：`klburn_flops`（CPU 浮点算力）动态链 libopenblas，
+# 而 libopenblas 是**靠 build/config.sh 的 PKGS_STRESS 装进盘的**。
+# 有人把那一行删掉的话，这一项就永远 SKIP，而且非 Intel 机器再也测不出算力。
+#
+# 判据：程序自己目录里带了那个 .so 也算数（运行时 bench_run() 会把它加进
+# LD_LIBRARY_PATH，opendcdiag 带的 libzstd/libz 就是这么走的）。
+echo
+echo "=== vendor 程序的依赖库（缺一个 = 那一项在现场永远 SKIP）==="
+
+BENCHROOT="$ROOTFS/opt/klburn/tools/bench"
+if [[ ! -d "$BENCHROOT" ]]; then
+  printf '  \033[0;33m--\033[0m   盘里没有 tools/bench/（vendor/bench 是空的），跳过\n'
+else
+  # rootfs 里能找到某个 soname 吗
+  lib_in_rootfs() {
+    local soname="$1" d
+    for d in "$ROOTFS"/lib/x86_64-linux-gnu "$ROOTFS"/usr/lib/x86_64-linux-gnu \
+             "$ROOTFS"/lib "$ROOTFS"/usr/lib; do
+      [[ -e "$d/$soname" ]] && return 0
+    done
+    return 1
+  }
+  n_exe=0
+  while IFS= read -r exe; do
+    [[ -n "$exe" ]] || continue
+    readelf -d "$exe" >/dev/null 2>&1 || continue
+    readelf -d "$exe" 2>/dev/null | grep -q NEEDED || continue
+    n_exe=$(( n_exe + 1 ))
+    rel="${exe#"$ROOTFS"}"
+    missing_libs=""
+    while IFS= read -r so; do
+      [[ -n "$so" ]] || continue
+      # 程序自己目录里带的那份优先（xlinpack 的 libiomp5、opendcdiag 的 libzstd）
+      [[ -e "$(dirname "$exe")/$so" ]] && continue
+      lib_in_rootfs "$so" || missing_libs="$missing_libs $so"
+    done < <(readelf -d "$exe" 2>/dev/null | sed -nE 's/.*NEEDED.*\[(.+)\]/\1/p')
+    if [[ -z "$missing_libs" ]]; then
+      ok "$rel 的依赖库都在盘里"
+    else
+      bad "$rel 缺依赖库:$missing_libs
+       这一项在现场会跑不出结果、判成 SKIP，而且没有任何报错指出原因。
+       多半是 build/config.sh 的 PKGS_* 里少了对应的包。"
+    fi
+  done < <(find "$BENCHROOT" -type f -perm -u+x 2>/dev/null | sort)
+  (( n_exe > 0 )) || printf '  \033[0;33m--\033[0m   tools/bench/ 下没有动态链接的可执行文件\n'
+fi
+
 echo
 printf '通过 %d 项，失败 %d 项\n' "$PASS" "$FAIL"
 exit $(( FAIL > 0 ? 1 : 0 ))

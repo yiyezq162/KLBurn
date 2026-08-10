@@ -2482,11 +2482,166 @@ SOAK 14400
 ENDURANCE 28800
 EOF
 
-# 默认档位不能变：现场 30 秒不按键就按它跑，改错了没人会立刻发现
-check "倒计时结束的默认档位必须是 STANDARD（30 分钟）" "yes" \
-      "$(if grep -q 'default_key="2"' "$UI_SH" \
-            && printf '%s\n' "$profiles" | grep -q 'STANDARD";[[:space:]]*DURATION_SECONDS=1800'; \
-         then echo yes; else echo no; fi)"
+# 默认档位不能变：现场 30 秒不按键就按它跑，改错了没人会立刻发现。
+#
+# 1.9.5 起改成**真调一次**那张键→档位的表（_select_duration_apply），
+# 不再 grep `default_key="2"` —— 那个变量在把倒计时循环抽成 menu_pick 之后
+# 就不在 select_duration 里了，而 grep 找不到时这条断言只会说"默认档变了"，
+# 指向一个完全不存在的问题。调用真函数则不管怎么重构都成立。
+(
+  # shellcheck source=/dev/null
+  source "$LIB/ui.sh" 2>/dev/null || true
+  DURATION_PROFILE=""; DURATION_SECONDS=0
+  _select_duration_apply "" >/dev/null 2>&1
+  printf '%s %s\n' "$DURATION_PROFILE" "$DURATION_SECONDS"
+) > "$TMP/dur-default.txt" 2>/dev/null
+check "倒计时结束的默认档位必须是 STANDARD（30 分钟）" "STANDARD 1800" \
+      "$(cat "$TMP/dur-default.txt" 2>/dev/null)"
+# 菜单把 2 当默认键交给 menu_pick，而 2 又落在上面那张表的 STANDARD 上 ——
+# 两头都钉住，改任何一头都跑红。
+check "范围菜单和时长菜单都必须有倒计时兜底（无人值守不能停在等按键的屏上）" "2" \
+      "$(grep -cE '^[[:space:]]*chosen="\$\(menu_pick ' "$UI_SH" || true)"
+check "时长菜单的默认键是 2" "1" \
+      "$(grep -cE 'menu_pick 2 "\$\{DURATION_MENU_TIMEOUT' "$UI_SH" || true)"
+check "范围菜单的默认键是 1（全量）" "1" \
+      "$(grep -cE 'menu_pick 1 "\$\{SCOPE_MENU_TIMEOUT' "$UI_SH" || true)"
+
+# ================================================================
+echo
+echo "=== 测试范围：范围 -> 判定项的映射（1.9.5）==="
+#
+# 这张表就是这个功能的全部语义。下面把它**再写一遍**（独立于 core.sh 里的
+# 实现），两边必须逐格对得上 —— 改一格就是改一次产品行为，
+# 而"某个部件在某个范围下悄悄不跑了"是没有任何人会发现的那类改动。
+#
+# 每行：<判定组> <这个组会在哪些范围下跑>
+scope_spec() {
+  cat <<'EOF'
+inventory     full cpu mem gpu disk info
+platform      full cpu mem gpu disk info
+conform       full cpu mem gpu disk info
+nic           full cpu mem gpu disk info
+gpu_health    full gpu info
+bench_cpu     full cpu info
+bench_mem     full mem info
+bench_gpu     full gpu info
+bench_disk    full disk info
+validate_cpu  full cpu
+validate_gpu  full gpu
+stress_cpu    full cpu
+stress_mem    full mem
+stress_gpu    full gpu
+stress_disk   full disk
+verify_ecc    full cpu mem
+verify_throttle full cpu
+verify_disk   full disk
+verify_common full cpu mem gpu disk
+EOF
+}
+
+n_cells=0
+bad_cells=""
+while read -r group allow; do
+  [[ -n "$group" ]] || continue
+  for s in full cpu mem gpu disk info; do
+    n_cells=$(( n_cells + 1 ))
+    want=no; [[ " $allow " == *" $s "* ]] && want=yes
+    got=no;  scope_runs "$group" "$s" && got=yes
+    [[ "$want" == "$got" ]] || bad_cells="$bad_cells ${group}/${s}(期望$want)"
+  done
+done < <(scope_spec)
+check "范围映射表逐格对得上（共 $n_cells 格）" "" "$bad_cells"
+check "映射表真的被逐格验过了（不是零格空转）" "114" "$n_cells"
+
+# 认不出来的组名一律**跑**。新加判定忘了登记的后果应该是"多跑一项"，
+# 而不是"那条结论从报告里静悄悄消失"—— 后者没有任何人会发现。
+for s in full cpu mem gpu disk info; do
+  check "没登记的判定组在 $s 下默认要跑" "yes" \
+        "$(scope_runs some_brand_new_check "$s" && echo yes || echo no)"
+done
+
+# 一个都不压的范围只有 info。scope_has_stress 是主流程用来决定
+# "要不要选时长、要不要进 PHASE 3、要不要做测后复查"的总开关。
+for s in full cpu mem gpu disk; do
+  check "$s 要跑压测" "yes" "$(scope_has_stress "$s" && echo yes || echo no)"
+done
+check "info 一个压测都不跑" "no" "$(scope_has_stress info && echo yes || echo no)"
+
+# ---- 目录名后缀 ----
+# ⚠️ **只能是 ASCII**：这个串要当 exFAT 目录名，也会打在 Linux 文本控制台上
+#    （1.7.2 那一屏 ◆◆◆ 就是中文进了控制台）。
+for s in full cpu mem gpu disk info; do
+  t="$(scope_tag "$s")"
+  check "scope_tag $s 非空" "yes" "$([[ -n "$t" ]] && echo yes || echo no)"
+  check "scope_tag $s 只含 ASCII 字母" "$t" \
+        "$(printf '%s' "$t" | LC_ALL=C tr -cd 'A-Za-z')"
+  l="$(scope_label "$s")"
+  check "scope_label $s 只含可打印 ASCII" "$l" \
+        "$(printf '%s' "$l" | LC_ALL=C tr -cd '\40-\176')"
+done
+check "六个范围的后缀两两不同（撞了就等于没加后缀）" "6" \
+      "$(for s in full cpu mem gpu disk info; do scope_tag "$s"; echo; done | sort -u | grep -c .)"
+
+# 目录名末尾必须带范围后缀 —— 这是"半年后还分得清这份报告测过什么"的
+# 唯一线索（报告文件名跟着目录名走）。
+tag_cpu="$(KLB_SCOPE=cpu get_machine_tag 20260810_101500 cpu)"
+check "get_machine_tag 末尾带范围后缀" "yes" \
+      "$([[ "$tag_cpu" == *_CPU ]] && echo yes || echo no)"
+check "目录名仍然以 日期_时间 开头（e2e 和批次工具都按这个形状认）" "yes" \
+      "$([[ "$tag_cpu" =~ ^[0-9]{8}_[0-9]{6}_.+ ]] && echo yes || echo no)"
+check "目录名里不许有非 ASCII" "$tag_cpu" \
+      "$(printf '%s' "$tag_cpu" | LC_ALL=C tr -cd '\40-\176')"
+
+# ---- 三处范围名单必须一致 ----
+# shell 认的键、交付报告的中文表、批次工具的中文表 —— 三处对不上的后果和
+# BOGUS 名单那次一模一样：一边认、一边不认，而且不会有任何报错。
+#
+# ⚠️ 判据只能是**解析出那张 SCOPE_CN 表**再比键，不能拿 `grep '"cpu":'` 去数 ——
+#    同一个文件里 SCOPE_COVER / PROFILE_TEXT 也有一模一样形状的行，
+#    数出来是 2、3，而那条断言只会说"少了/多了一个中文名"，指向一个不存在的问题。
+SUMMARY_PY="$(cd "$LIB/../../../.." && pwd)/tools/klburn-summary.py"
+scope_cn_keys() {
+  python3 - "$1" <<'PYEOF'
+import re, sys
+src = open(sys.argv[1], encoding="utf-8").read()
+m = re.search(r"^SCOPE_CN\s*=\s*\{(.*?)^\}", src, re.S | re.M)
+d = dict(re.findall(r'"(\w+)":\s*"([^"]+)"', m.group(1))) if m else {}
+print("|".join("%s=%s" % kv for kv in sorted(d.items())))
+PYEOF
+}
+GEN_SCOPES="$(scope_cn_keys "$GEN_PY")"
+SUM_SCOPES="$(scope_cn_keys "$SUMMARY_PY")"
+check "交付报告里的 SCOPE_CN 正好是那六个范围" \
+      "cpu=CPU 专项测试|disk=硬盘专项测试|full=全量老化测试|gpu=显卡专项测试|info=仅导出硬件信息|mem=内存专项测试" \
+      "$GEN_SCOPES"
+check "批次工具的 SCOPE_CN 和交付报告逐个一致（对不上的后果和 BOGUS 名单那次一样）" \
+      "$GEN_SCOPES" "$SUM_SCOPES"
+# shell 那边认的键也必须是同一套 —— 三处对不上时不会有任何报错
+for s in full cpu mem gpu disk info; do
+  check "shell 认识范围 $s" "yes" "$(scope_valid "$s" && echo yes || echo no)"
+  check "交付报告里有 $s 的中文名" "yes" \
+        "$([[ "$GEN_SCOPES" == *"${s}="* ]] && echo yes || echo no)"
+done
+check "shell 不认识瞎编的范围" "no" "$(scope_valid nonsense && echo yes || echo no)"
+
+# ---- 硬盘专测那道闸门 ----
+#
+# ⚠️⚠️ **KLB_SCOPE=disk 只是让破坏性写确认必然被问到，绝不是让它跳过。**
+#    往裸设备写数据会毁掉盘上原有内容，confirm_disk_write 是唯一的闸门。
+#    这条断言钉的是"没有任何一条路径能在不问的情况下把 DISK_CONFIRMED 置 1"。
+FT_SH="$LIB/../factory-test.sh"
+check "DISK_CONFIRMED=1 在主流程里只有一处" "1" \
+      "$(grep -c '^\s*DISK_CONFIRMED=1\s*$' "$FT_SH" || true)"
+# ⚠️ 别写成 `... | grep -q ...`：grep -q 命中就关管道，上游吃 SIGPIPE 退 141，
+#    而本脚本开着 pipefail，整条管道于是返回失败 —— 输出短的时候时好时坏。
+#    先接进变量再比（同一个坑 1.9.5 在 test-screen-render 里真踩到过）。
+_dc_ctx="$(grep -B1 '^\s*DISK_CONFIRMED=1\s*$' "$FT_SH" || true)"
+check "那一处必须紧跟在 confirm_disk_write 的成功分支里" "yes" \
+      "$(case "$_dc_ctx" in *'if confirm_disk_write'*) echo yes ;; *) echo no ;; esac)"
+# 两处：一处是"要不要问破坏性写确认"，一处是"要不要真跑 fio"。
+# 两处都得在，缺前一处 = 硬盘专测不问就跑，缺后一处 = 问了却不跑。
+check "破坏性写确认和硬盘压测两段都由 scope_runs stress_disk 管" "2" \
+      "$(grep -c 'if scope_runs stress_disk; then' "$FT_SH" || true)"
 
 # ================================================================
 echo
@@ -2530,7 +2685,7 @@ for fn in check_dimm_uniform check_nic_uniform check_disk_uniform check_gpu_unif
   check "conformance_all 必须调用 $fn" \
         "yes" "$(declare -f conformance_all | grep -q "\b${fn}\b" && echo yes || echo no)"
 done
-for fn in bench_init bench_gpu_bandwidth bench_gpu_p2p bench_cpu_linpack \
+for fn in bench_init bench_gpu_bandwidth bench_gpu_p2p bench_cpu_flops \
           bench_mem_bandwidth bench_disk_bandwidth; do
   check "bench_all 必须调用 $fn" \
         "yes" "$(declare -f bench_all | grep -q "\b${fn}\b" && echo yes || echo no)"

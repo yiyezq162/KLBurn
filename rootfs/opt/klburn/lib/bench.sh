@@ -584,12 +584,98 @@ linpack_problem_size() {
   printf '%s' "$n"
 }
 
-bench_cpu_linpack() {
+# flops_parse <日志> -> "<最好成绩GFlops> <成功跑完的次数>"
+#
+# 认两个地方，哪个大取哪个：
+#   1. 末尾那行 `Best GFlops   : 1234.567`
+#   2. 逐次那张表的 GFlops 列
+#
+# ⚠️ **不能只认第 1 行。**那一行是程序跑完才打的，而 bench_run 的超时是硬的
+#    （无人值守的工具里任何外部程序都必须短得住）—— 被打断时前面几次的成绩
+#    已经打出来了，只认末行就等于把已经量到的数扔掉，白白判一个 SKIP。
+flops_parse() {
+  local log="${1:-}"
+  [[ -f "$log" ]] || { printf '0 0'; return; }
+  awk '
+    /^Best GFlops[[:space:]]*:/ { if ($NF + 0 > v) v = $NF + 0 }
+    # 逐次那张表：第一列是次数，第三列是 GFlops。求解失败的那几行第三列是
+    # "-"，正则挑不中，所以 n 数的是**真的出了数**的次数。
+    $1 ~ /^[0-9]+$/ && NF >= 4 && $3 ~ /^[0-9]+\.?[0-9]*$/ {
+      if ($3 + 0 > v) v = $3 + 0
+      n++
+    }
+    END { printf "%.4f %d", v + 0, n + 0 }
+  ' "$log" 2>/dev/null
+}
+
+# 这一轮的算力是拿哪套程序量的。**只进 meta.json（内部），不进交付报告** ——
+# 客户报告里不许出现工具名（§6-2）。留着它是为了日后有人拿新旧报告对比、
+# 发现数字对不上时能解释得清楚。
+BENCH_FLOPS_METHOD="none"
+
+# ---------------------------------------------------------------- CPU 浮点算力
+#
+# 两套程序，**优先自研那个**：
+#
+#   klburn_flops     我们自己编的（build/src/klburn-flops.c，链 OpenBLAS）
+#   xlinpack_xeon64  Intel 发布的二进制，只在自研那个没进盘时兜底
+#
+# ⚠️ 为什么统一用自研那个，哪怕在 Intel 机器上数字会低一到两成：
+#    Intel 那个在海光 / AMD 上**第一行就罢工**（"runs on only genuine Intel
+#    processors"），于是非 Intel 机器这一项永远测不出来。
+#    两套程序并行的话，同一个报告字段在不同机器上是两个口径 —— 而它们在
+#    报告里叫同一个名字。**全系列可比比峰值好看重要**，何况这一项本来就
+#    只报数、不判合格。
+bench_cpu_flops() {
   local exe
-  if ! exe="$(bench_tool xlinpack_xeon64 linpack_xeon64)"; then
-    bench_skip_no_tool "bench_cpu_flops" "CPU 浮点算力" "CPU 浮点算力"
+  if exe="$(bench_tool klburn_flops)"; then
+    BENCH_FLOPS_METHOD="openblas-dgesv"
+    _bench_cpu_flops_openblas "$exe"
     return 0
   fi
+  if exe="$(bench_tool xlinpack_xeon64 linpack_xeon64)"; then
+    BENCH_FLOPS_METHOD="intel-linpack"
+    _bench_cpu_flops_intel "$exe"
+    return 0
+  fi
+  bench_skip_no_tool "bench_cpu_flops" "CPU 浮点算力" "CPU 浮点算力"
+}
+
+_bench_cpu_flops_openblas() {
+  local exe="$1" n runs
+  n="${BENCH_LINPACK_N:-$(linpack_problem_size)}"
+  runs="${BENCH_LINPACK_RUNS:-4}"
+  info "[BENCH] CPU floating-point throughput, problem size $n, $runs run(s) ..."
+
+  local log="$BENCH_LOG_DIR/cpu-linpack.log"
+  local dir; dir="$(dirname "$exe")"
+  # 线程数显式给：OpenBLAS 自己挑的不一定是全核（容器 / cgroup 限制下尤其），
+  # 而这一项量的就是**全核**算力。
+  ( cd "$dir" && LD_LIBRARY_PATH="$dir:${LD_LIBRARY_PATH:-}" \
+      OPENBLAS_NUM_THREADS="$(nproc)" \
+      timeout --kill-after=20s "${BENCH_LINPACK_TIMEOUT:-600}" \
+      "$exe" -n "$n" -r "$runs" ) > "$log" 2>&1 || true
+
+  local gflops nruns
+  read -r gflops nruns < <(flops_parse "$log")
+  if [[ "$gflops" == "0.0000" ]]; then
+    # 一次都没出数：内存要不起、被超时打断、或者残差大到结果不可信。
+    # 每一种都是我们这边的事，不该去染客户的结论 —— origin=self，不进交付报告。
+    bench_skip_no_result "bench_cpu_flops" "CPU 浮点算力" "CPU 的浮点算力" \
+      "raw/bench/cpu-linpack.log"
+    return 0
+  fi
+
+  metric_add "bench" "CPU 浮点算力（GFlops）" "$(num_fmt "$gflops")"
+  metric_add "bench" "算力测试问题规模（阶）" "$n"
+  bench_report "bench_cpu_flops" "CPU 浮点算力" \
+    "$gflops" "GFlops" \
+    "全核浮点矩阵运算（问题规模 ${n} 阶，重复 ${nruns} 次取最好成绩）的平均算力" \
+    "raw/bench/cpu-linpack.log"
+}
+
+_bench_cpu_flops_intel() {
+  local exe="$1"
 
   local n runs
   n="${BENCH_LINPACK_N:-$(linpack_problem_size)}"
@@ -889,12 +975,24 @@ bench_disk_bandwidth() {
 # 汇总入口
 # ================================================================
 # <写盘是否已确认>：只影响硬盘那一项要不要测写带宽，其余不受影响。
+#
+# 每一项都受本轮**测试范围**管（KLB_SCOPE，见 core.sh 的 scope_runs）：
+# 范围之外的**整项不跑，也不产生结论行** —— 不是"跑了再藏起来"。
+#
+# ⚠️ 「仅导出报告」那一档（info）这五项**全都跑**：每项几十秒，而且一个字节
+#    都不往盘上写（bench_disk_bandwidth 在没确认写盘时是 rw=read + direct=1）。
+#    它跳过的是老化压测和专项验证，不是基准。
 bench_all() {
   local write_ok="${1:-0}"
   bench_init
-  bench_gpu_bandwidth
-  bench_gpu_p2p
-  bench_cpu_linpack
-  bench_mem_bandwidth
-  bench_disk_bandwidth "$write_ok"
+  if scope_runs bench_gpu; then
+    bench_gpu_bandwidth
+    bench_gpu_p2p
+  fi
+  scope_runs bench_cpu  && bench_cpu_flops
+  scope_runs bench_mem  && bench_mem_bandwidth
+  scope_runs bench_disk && bench_disk_bandwidth "$write_ok"
+  # 上面几条是 `判断 && 命令` 的形式，最后一条不成立时整个函数会返回非零。
+  # 主流程没开 set -e，所以不会中断，但返回码会误导调用方 —— 显式收口。
+  return 0
 }
