@@ -584,6 +584,15 @@ class Data(object):
     #      —— 最小 DMI 只有 Location + Status，那是 BIOS 懒，不是空槽位
     #   3. 存在的身份字段**全是占位符**
     #      —— 同一台的 PSU3 厂商是占位符，但序列号和 2700W 都是真的
+    #
+    # ⚠️⚠️ **外加一条一票否决：BMC 说这一路进了电，就一定是真电源。**（1.9.4）
+    #    上面三条只看得到 DMI。1.9.3 那台 6530 的 PSU4 三条全中，
+    #    可 `ipmitool sdr` 上白纸黑字写着 `PSU4_Vin 220 Volts / PSU4_Pout 130 Watts`
+    #    —— 那是一路正在给整机供电的真电源，只是 BIOS 没填它那一格。
+    #    误杀的后果是三处口径全错：报告 1.8 电源表少一行、判定文案写「共 3 个在位」、
+    #    而现场配置核对屏打的是「PSU 4/4 present」。
+    #    判据和 report-policy 二-6 一致：**"读不出身份" ≠ "这个部件不存在"**。
+    #    lib/collect.sh 的 psu_is_real 是同一条规则，两边必须一致。
     ID_KEYS = ("Manufacturer", "Name", "Model Part Number", "Serial Number")
 
     @staticmethod
@@ -628,10 +637,12 @@ class Data(object):
         out = []
         for i, b in enumerate(dmi_blocks(self.dmi, "System Power Supply"), 1):
             p = b["props"]
-            if self._psu_is_phantom(p):
-                continue
             loc = clean(p.get("Location")) or clean(p.get("Name")) or ("PSU%d" % i)
             m = re.search(r"\d+", loc)
+            # 幽灵槽位不列 —— 但 BMC 读到这一路进电时它就不是幽灵（见 ID_KEYS 上面）
+            if (self._psu_is_phantom(p)
+                    and self.psu_ac_state_any(m.group(0) if m else i) != "正常"):
+                continue
             out.append(OrderedDict([
                 ("位置", loc),
                 ("厂商", clean(p.get("Manufacturer"))),
@@ -1503,8 +1514,40 @@ def build_html(data):
     # 印给客户的结果是每台机器都刷一片黄，而且刷的是他看不懂、也无从处理的
     # 东西 —— 白白让人去找机器的毛病。它对**我们**有价值（同一批板子的 BIOS
     # 有没有共性问题），所以留在 results.jsonl 和内部报告里，不外发。
-    INTERNAL_ONLY_ROWS = ("collect_deep", "collect_fwts")
+    #
+    # `check_sn_consistency`（序列号一致性，1.9.4 加进来）同一把尺子。它查的是
+    # **文书**对不对得上（主板 BIOS / BMC / 机身标签三处），不是硬件有没有毛病，
+    # 而整机结论只回答后者。组装机上 BIOS 那一格本来就没人填，也没地方填 ——
+    # 报告于是每台都挂一条黄的「主板 BIOS 未填写整机序列号，建议出货前补写」，
+    # 客户读到的是"这台机器有问题"，而它连硬件都不是。
+    # 整机序列号本身照常印在报告抬头和 1.1 整机那张表里，一个字没少；
+    # 三处对不对得上留在内部报告里，那才是我们自己要盯的事。
+    INTERNAL_ONLY_ROWS = ("collect_deep", "collect_fwts", "check_sn_consistency")
     shown = [r for r in shown if r.get("id") not in INTERNAL_ONLY_ROWS]
+
+    # ---------------- 「我们没测到」的那些 SKIP ----------------
+    #
+    # `origin=self` 是产生结论的那一处自己打的标（lib/core.sh 的 result_add）：
+    # **这条 SKIP 的原因在我们这边，不在被测机器上** —— 盘里没带那个基准/诊断
+    # 程序，或者程序跑了没给出有效结果。
+    #
+    # 客户报告里印一行
+    #     SKIP  显卡专项诊断  当前测试环境未包含显卡厂商诊断程序，本项未做核对
+    # 他读到的不是"这台机器没问题"，是"这家供应商的工具箱是破的"。
+    # 这一行对他做"收还是不收"的决定没有任何帮助，属于二-5「判的是我们、
+    # 不是机器」那一类。1.9.3 印出去过，客户当面骂了一次。
+    #
+    # ⚠️ 三条边界，改之前先读：
+    #   1. **只藏 SKIP。**origin 对别的状态没有意义，也不该有 —— 部件自己
+    #      给的 FAIL（`validate_*` 判出"这颗 CPU 会算错"）是真故障，
+    #      一条都不许藏（二-5-2 最后那段）。
+    #   2. **判据是 origin，不是文案。**别改成"看看句子里有没有'未包含'" ——
+    #      措辞一改那条判据就静悄悄失效，而失效的方向是漏出去。
+    #   3. **"这台机器上没有可测的东西"不是 self。**「本机只安装了 1 张显卡，
+    #      没有卡间互联可测」「未发现可测试的本机硬盘」讲的是被测机器的事实，
+    #      客户有权知道哪些没测，照常印。那些地方不传 origin。
+    shown = [r for r in shown
+             if not (r.get("status") == "SKIP" and r.get("origin") == "self")]
 
     # ---------------- 判定按"读者关心的三件事"分组 ----------------
     #
@@ -1516,6 +1559,14 @@ def build_html(data):
     # 全部判定里有没有 FAIL（上面那行 overall 已经算完了，在分组之前）。
     # 认不出来的 id 一律落到"压测与复查"那一段 —— 新加判定忘了登记的话，
     # 后果是它出现在一个不太贴切的小节里，而**不是从报告里消失**。
+    #
+    # `check_sn_consistency` 留在这张表里是**故意**的：它已经被
+    # INTERNAL_ONLY_ROWS 滤掉了，这里登记的是"万一以后又放出来，它该印在哪一节"。
+    # 从表里删掉的话，将来一放出来它就落到"压测与复查"那一段去了。
+    #
+    # `validate_*`（部件专项验证）没登记，所以落到"压测与复查"那一段 ——
+    # 它们查的是"部件自己怎么说"（这颗 CPU 会不会算错、厂商诊断过不过），
+    # 和压测同属"扛不扛得住 / 有没有毛病"，落在那一节是对的。
     CONFORM_IDS = (
         "check_dimm_uniform", "check_nic_uniform", "check_disk_uniform",
         "check_gpu_uniform", "check_gpu_ecc", "check_gpu_remap",
@@ -1813,12 +1864,17 @@ def build_html(data):
             #    来对账；拼出来的字符串 grep 不到，那条对账就成了摆设。
             if any("顺序写带宽" in r for r in bench_disk):
                 title, way = "硬盘顺序读写带宽", "顺序读写"
+                safety = ""
             else:
                 title, way = "硬盘顺序读带宽", "顺序读"
+                # 只测了读的时候把"没写盘"这件事就地说清楚。客户看到「硬盘带宽」
+                # 四个字，第一个念头就是"你们是不是把我盘上的数据冲了" ——
+                # 等他打电话来问就晚了（lib/bench.sh 那条结论里也写了同一句）。
+                safety = "本项全程只从硬盘读取、未向硬盘写入任何数据，盘上原有数据不受影响。"
             A(BSUB(title))
-            A('<p class="sub">128KB 大块%s，逐块单独测量。'
+            A('<p class="sub">128KB 大块%s，逐块单独测量。%s'
               "「测试口径」一列是本次实际使用的参数，格式为"
-              "「引擎_方向_块大小_队列深度_线程数」。</p>" % way)
+              "「引擎_方向_块大小_队列深度_线程数」。</p>" % (way, safety))
             A(table(bench_disk))
         stress_h2 = "四、压力测试结果"
         raw_h2 = "五、原始日志"

@@ -971,6 +971,31 @@ psu_ac_state_any() {
   psu_ac_state_sdr "$idx" "$fd"
 }
 
+# psu_is_real <dmi_psu_list 判的 real 位> <编号> [sensors] [sdr] -> 0=真电源
+#
+# ⚠️⚠️ **BMC 说这一路进了电，就一定是真电源，DMI 怎么写都不算数。**
+#
+# `dmi_psu_list` 判"幽灵槽位"只看得到 DMI：额定功率显式为 0、身份字段全是占位符
+# -> 判成空槽位。这条启发式在 1.9.3 一台四路电源的机器上误杀了：
+#
+#     dmidecode:  PSU4  Max Power Capacity: 0 W   四个身份字段全是 To Be Filled By O.E.M.
+#     ipmitool :  PSU4_Vin 220 Volts   PSU4_Pin 150 Watts   PSU4_Pout 130 Watts
+#
+# 那是一路正在给整机供电的真电源，只是这块主板的 BIOS 没填它那一格。
+# 结果：报告写「共 3 个电源模块在位」，1.8 电源表里也只有三行，
+# 而现场配置核对屏（lib/ui.sh，当时没走这条判据）打的是「PSU 4/4 present」——
+# 同一轮测试的两处对不上，客户一对照就会问哪个是真的。
+#
+# 判据的方向和 report-policy 二-6 那条一致：
+# **"读不出身份" ≠ "这个部件不存在"** —— 只是这次多了一个更硬的反证。
+psu_is_real() {
+  local real="${1:-1}" idx="${2:-}" fs="${3:-}" fd="${4:-}"
+  [[ "$real" == "1" ]] && return 0
+  [[ -n "$idx" ]] || return 1
+  [[ "$(psu_ac_state_any "$idx" "${fs:-$RAW_DIR/ipmi-sensors.txt}" \
+        "${fd:-$RAW_DIR/ipmi-sdr.txt}")" == "present" ]]
+}
+
 # 电源在位与供电检查。
 #
 # 只接了一半电源线在测试台上是常态，所以"没进电"判 WARN 而不是 FAIL；
@@ -990,11 +1015,15 @@ check_psu() {
   # 上报了、但每一条都是空槽位（占位符 + 未在位）。和"压根没上报"是两回事，
   # 得分开说：前者是 BIOS 把表填满了占位符，后者是根本没这张表。
   # 两种都判 SKIP —— 我们确实没有可用的电源数据，说不出这台机器电源好不好。
-  local usable=0
+  local usable=0 _i=0
   for line in "${psus[@]}"; do
+    _i=$((_i+1))
+    local _loc="${line%%|*}"
     local _st="${line#*|}"; _st="${_st%%|*}"
     local _real="${line##*|}"
-    [[ "$_real" == "1" ]] || continue
+    local _n; _n="$(printf '%s' "$_loc" | grep -oE '[0-9]+' | head -1)"
+    [[ -n "$_n" ]] || _n="$_i"
+    psu_is_real "$_real" "$_n" || continue
     [[ "$_st" == *"Present"* && "$_st" != *"Not Present"* ]] || continue
     usable=$((usable+1))
   done
@@ -1013,7 +1042,7 @@ check_psu() {
     sel_psu="$(count_lines "$RAW_DIR/ipmi-sel-psu.txt")"
   fi
 
-  local total=0 present=0 idx=0 ac_read=0
+  local total=0 present=0 idx=0 ac_read=0 live=0
   local noac=() broken=() suspect=()
   for line in "${psus[@]}"; do
     idx=$((idx+1))
@@ -1021,13 +1050,19 @@ check_psu() {
     local st="${rest%%|*}" real="${rest##*|}"
     [[ -n "$loc" ]] || loc="PSU${idx}"
 
-    # 幽灵槽位（0 W + 身份全是占位符）整条不算 —— 不进总数，也不进"在位"数
-    [[ "$real" == "1" ]] || { dbg "psu $loc 判为空槽位（额定 0W 且无身份信息），不计入"; continue; }
-    total=$((total+1))
-
-    # 位置名里带编号就用它（PSU2 -> 2），否则按出现顺序当编号
+    # 位置名里带编号就用它（PSU2 -> 2），否则按出现顺序当编号。
+    # ⚠️ 必须排在下面那条"幽灵槽位"之前 —— psu_is_real 要拿这个编号去问 BMC。
     local n; n="$(printf '%s' "$loc" | grep -oE '[0-9]+' | head -1)"
     [[ -n "$n" ]] || n="$idx"
+
+    # 幽灵槽位（0 W + 身份全是占位符、而且 BMC 也没读到这一路进电）整条不算 ——
+    # 不进总数，也不进"在位"数。BMC 读到进电时 psu_is_real 会把它捞回来（见那个函数）。
+    if ! psu_is_real "$real" "$n"; then
+      dbg "psu $loc 判为空槽位（额定 0W、无身份信息，且 BMC 未读到这一路进电），不计入"
+      continue
+    fi
+    [[ "$real" == "1" ]] || dbg "psu $loc DMI 像空槽位，但 BMC 读到这一路有交流输入，按真电源计入"
+    total=$((total+1))
 
     # ⚠️ **`Not Present` 里含有 `Present` 子串。** 原来写的是
     #       [[ "$st" == *"Present"* ]] || continue
@@ -1050,7 +1085,10 @@ check_psu() {
 
     if [[ "$ac" == "absent" ]]; then
       noac+=("$loc")
-    elif [[ "$st" =~ (Critical|Failed|Non-recoverable) ]]; then
+    else
+      [[ "$ac" == "present" ]] && live=$((live+1))
+    fi
+    if [[ "$ac" != "absent" ]] && [[ "$st" =~ (Critical|Failed|Non-recoverable) ]]; then
       # 判 FAIL 的前提是"BMC 确认这一路有交流输入、模块却还报异常"——那才是模块坏了。
       #
       # ac=unknown（没有 BMC，或者 BMC 上没有这个编号的 Vin 传感器）时不能判 FAIL：
@@ -1086,9 +1124,27 @@ check_psu() {
 （没有 BMC，或 BMC 未提供对应编号的 Vin），无法区分是没接电源线还是模块本身故障，\
 请人工确认电源线是否插好；共 ${present} 个电源模块在位${sel_txt}" "$ref"
   elif (( ${#noac[@]} > 0 )); then
+    # ⚠️ **不要无条件写"当前不具备电源冗余"。**
+    #
+    # 1.9.3 的报告在一台**四路电源、三路带电**的机器上打的就是这句话 ——
+    # 那台机器整机才 456 W，三路 2700 W 的电源在供，冗余充裕得很。
+    # 客户读到"不具备冗余"会以为这台机器有毛病，而实际上只是测试台上
+    # 少插了一根电源线。**说得比测得多**，是六-4 那条。
+    #
+    # 冗余在不在，只由"还剩几路在带电"决定：
+    #   剩 0 路  -> 这机器不该还开着，照实说（这一支实际到不了，机器早关了）
+    #   剩 1 路  -> 唯一一路，掉了就整机断电 —— 这才是真的没有冗余
+    #   剩 ≥2 路 -> 还有冗余，只是少了一路；说"少了一路"，别说"没有冗余"
+    # 读不到（live 一路都没数到、ac_read=0）时**一个字都不提冗余**。
+    local red=""
+    if (( ac_read == 1 )); then
+      if   (( live <= 1 )); then red="；当前仅剩 ${live} 路在供电，不具备电源冗余"
+      else                       red="；其余 ${live} 路供电正常，仍具备电源冗余"
+      fi
+    fi
     result_add "check_psu" "电源" "$ST_WARN" \
-      "共 ${present} 个电源模块在位，其中 ${noac[*]} 未检测到交流输入（未接电源线，或该路市电/线缆异常），\
-当前不具备电源冗余${sel_txt}" "$ref"
+      "共 ${present} 个电源模块在位，其中 ${noac[*]} 未检测到交流输入（未接电源线，或该路市电/线缆异常）\
+${red}${sel_txt}" "$ref"
   elif (( ac_read == 0 )); then
     # ⚠️ **一路交流输入都没读到的时候，不许写"交流输入正常"。**
     # 原来这里和"逐路都读到了"共用一句 PASS 文案，报告于是自相矛盾：

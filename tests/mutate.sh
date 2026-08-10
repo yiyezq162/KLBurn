@@ -139,6 +139,14 @@ MUTATIONS=(
 "memtest-first-entry${S}memtest 菜单项插到第一条（插上盘开机跑的是内存测试，不是我们的测试）${S}test-batch-tools${S}build/lib/patch-grub.py${S}mut_memtest_first_entry"
 "summary-empty-as-pass${S}批次汇总把「一条判定都没有」算成 PASS（第四处口径自成一套）${S}test-batch-tools${S}tools/klburn-summary.py${S}mut_summary_empty_as_pass"
 "sdc-nonzero-as-fail${S}专项验证把「非零退出」直接当成机器坏了（工具跑不起来 = 判客户的机器 FAIL）${S}test-log-parsing${S}$RT/lib/validate.sh${S}mut_sdc_nonzero_as_fail"
+"sn-to-customer${S}序列号一致性漏进客户报告（组装机没处写序列号，每台都刷一条黄）${S}test-report-render${S}$RT/report/generate_report.py${S}mut_sn_to_customer"
+"selfskip-to-customer${S}「我们没带那个程序」的 SKIP 漏进客户报告（客户读成「这家供应商的工具箱是破的」）${S}test-report-render${S}$RT/report/generate_report.py${S}mut_selfskip_to_customer"
+"selfskip-overreach${S}藏 SKIP 的规则扩大化，把「本机只有一张卡」这种机器事实也藏了${S}test-report-render${S}$RT/report/generate_report.py${S}mut_selfskip_overreach"
+"d2d-single-size${S}显存带宽退回只量一个小块（量到的是显卡缓存：4090 报出 3622 GB/s，标称 1008）${S}test-log-parsing${S}$RT/lib/bench.sh${S}mut_d2d_single_size"
+"d2d-take-fastest${S}显存带宽曲线取最快那一行而不是最大块那一行（挑中的正是被缓存喂出来的小块）${S}test-log-parsing${S}$RT/lib/bench.sh${S}mut_d2d_take_fastest"
+"psu-ghost-ignores-bmc${S}BMC 读到有电的电源仍被当成空槽位丢掉（四路数成三路，和现场那一屏对不上）${S}test-hw-checks${S}$RT/lib/collect.sh${S}mut_psu_ghost_ignores_bmc"
+"psu-redundancy-unconditional${S}「不具备电源冗余」又变回无条件拼（四路掉一路的机器被说成没冗余）${S}test-hw-checks${S}$RT/lib/collect.sh${S}mut_psu_redundancy_unconditional"
+"remap-index-field${S}行重映射查询加回 index 字段（每台机器都静默 SKIP，还对客户断言「该型号无此机制」）${S}test-hw-checks${S}$RT/lib/conformance.sh${S}mut_remap_index_field"
 )
 
 # ================================================================
@@ -321,7 +329,7 @@ mut_raid_hint_subshell() {
 # 一个字都不会少拿。放回客户报告就是拿内部流程去占客户的版面（report-policy 二-4）。
 mut_deep_to_customer() {
   replace_line "$RT/report/generate_report.py" \
-    'INTERNAL_ONLY_ROWS = ("collect_deep", "collect_fwts")' \
+    'INTERNAL_ONLY_ROWS = ("collect_deep", "collect_fwts", "check_sn_consistency")' \
     '    INTERNAL_ONLY_ROWS = ()'
 }
 
@@ -911,8 +919,78 @@ mut_summary_empty_as_pass() {
 # 也无从处理的东西。这条和 collect_deep 是同一个机制、同一个理由。
 mut_fwts_to_customer() {
   replace_line "$RT/report/generate_report.py" \
-    '    INTERNAL_ONLY_ROWS = ("collect_deep", "collect_fwts")' \
-    '    INTERNAL_ONLY_ROWS = ("collect_deep",)'
+    '    INTERNAL_ONLY_ROWS = ("collect_deep", "collect_fwts", "check_sn_consistency")' \
+    '    INTERNAL_ONLY_ROWS = ("collect_deep", "check_sn_consistency")'
+}
+
+# 序列号一致性漏进客户报告。它查的是**文书**对不对得上（BIOS / BMC / 机身标签），
+# 不是硬件有没有毛病 —— 组装机上 BIOS 那一格本来就没人填、也没地方填，
+# 于是每台机器都挂一条黄的「建议出货前在 BIOS 中补写」，
+# 客户读到的是"这台机器有问题"，而它连硬件都不是。
+mut_sn_to_customer() {
+  replace_line "$RT/report/generate_report.py" \
+    '    INTERNAL_ONLY_ROWS = ("collect_deep", "collect_fwts", "check_sn_consistency")' \
+    '    INTERNAL_ONLY_ROWS = ("collect_deep", "collect_fwts")'
+}
+
+# 「我们没带那个程序」的 SKIP 漏进客户报告。1.9.3 真漏过，客户当面发火 ——
+# 他读到的不是"这台机器没问题"，是"这家供应商的工具箱是破的"。
+mut_selfskip_to_customer() {
+  replace_line "$RT/report/generate_report.py" \
+    '             if not (r.get("status") == "SKIP" and r.get("origin") == "self")]' \
+    '             if True]'
+}
+
+# 反过来那一头：把**所有** SKIP 都藏掉。"藏"的规则一扩大化，
+# 「本机只安装了 1 张显卡，没有卡间互联可测」这种**被测机器的事实**
+# 也跟着消失了 —— 客户就不知道哪些项没测过。
+mut_selfskip_overreach() {
+  replace_line "$RT/report/generate_report.py" \
+    '             if not (r.get("status") == "SKIP" and r.get("origin") == "self")]' \
+    '             if r.get("status") != "SKIP"]'
+}
+
+# 显存带宽退回"只量一个块大小"。块小到装得进显卡缓存时量到的是缓存带宽 ——
+# 1.9.3 那台 RTX 4090 报出 3622.7 GB/s，而它标称只有 1008。
+# 去掉"曲线压没压平"那道判据之后，这个数会被当成有效读数报出去。
+mut_d2d_single_size() {
+  replace_line "$RT/lib/bench.sh" \
+    '    if (big > 2048 * MiB) big = 2048 * MiB' \
+    '    if (big > 32 * MiB) big = 32 * MiB'
+}
+
+# 显存带宽的曲线判据取最快的那一行而不是最大块那一行。
+# 挑中的正好是被缓存喂出来的小块 —— 判据还在，但已经失去意义。
+mut_d2d_take_fastest() {
+  replace_line "$RT/lib/bench.sh" \
+    '      if (hi == "" || sz > hi) { hi = sz; hibw = bw }' \
+    '      if (hi == "" || bw > hibw) { hi = sz; hibw = bw }'
+}
+
+# BMC 明明读到这一路进了电，还是把它当成空槽位丢掉。
+# 1.9.3 那台 6530 的 PSU4 就是这么丢的：报告写「共 3 个电源模块在位」，
+# 而同一轮的现场配置核对屏打的是「PSU 4/4 present」，两处对不上。
+mut_psu_ghost_ignores_bmc() {
+  replace_line "$RT/lib/collect.sh" \
+    '  [[ -n "$idx" ]] || return 1' \
+    '  return 1'
+}
+
+# 「当前不具备电源冗余」又变回无条件拼上去的。四路电源掉一路、
+# 整机才 456W 的机器也会被写成"没有冗余"，客户以为机器有毛病。
+mut_psu_redundancy_unconditional() {
+  replace_line "$RT/lib/collect.sh" \
+    '      if   (( live <= 1 )); then red="；当前仅剩 ${live} 路在供电，不具备电源冗余"' \
+    '      if   (( live <= 99 )); then red="；当前不具备电源冗余"'
+}
+
+# 显存行重映射的查询里加回 `index`。驱动不认这个字段名，会把整条查询否掉，
+# 于是这一项在**每一台机器**上都判 SKIP —— 包括真正需要它的 A100/H100，
+# 而且还对客户断言"该型号无此机制"。
+mut_remap_index_field() {
+  replace_line "$RT/lib/conformance.sh" \
+    '    --query-remapped-rows=remapped_rows.correctable,remapped_rows.uncorrectable,remapped_rows.pending,remapped_rows.failure \' \
+    '    --query-remapped-rows=index,remapped_rows.correctable,remapped_rows.uncorrectable,remapped_rows.pending,remapped_rows.failure \'
 }
 
 # 硬盘自检结果里「Completed: read failure」被当成通过。这句话里也有

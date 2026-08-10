@@ -455,9 +455,12 @@ RAW_INDEX = (
      "列是 index,volatile_ce,volatile_ue,aggregate_ce,aggregate_ue；"
      "`[N/A]` 表示该型号不支持 ECC，**不是 0**"),
     (r"^gpu-remapped-rows\.csv$", "GPU",
-     "逐卡的显存行重映射状态（可纠正 / 不可纠正 / 待生效 / 是否失败）",
+     "逐卡的显存行重映射状态（一行一张卡，无卡号列）",
      "显存行重映射判 WARN/FAIL 时",
-     "failure=Yes 是备用行用尽（按 NVIDIA 口径要返修）；pending=Yes 只是需要重启"),
+     "列是 correctable,uncorrectable,pending,failure；"
+     "failure=Yes 是备用行用尽（按 NVIDIA 口径要返修）；pending=Yes 只是需要重启。"
+     "整个文件只有一行 `Field \"xxx\" is not a valid field to query.` "
+     "= 查询字段名和这版驱动对不上（1.9.3 栽过），那一项会静悄悄判 SKIP"),
     (r"^disk-uniform-scope\.txt$", "存储",
      "硬盘型号一致性这一项**比了哪几块盘**（每行一个设备名）",
      "有人问「为什么只比了两块盘」「我们那根 U 盘算不算进去了」时",

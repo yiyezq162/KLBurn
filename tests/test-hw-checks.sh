@@ -458,6 +458,78 @@ psu_case "$DMI_OK_CRIT" "$SENS_BOTH_HOT" "$SDR_BOTH_OK"
 check "数值传感器确认有电 + DMI 报 Critical -> 这才判 FAIL" \
       "FAIL" "$LAST_STATUS"
 
+# ================================================================
+# ★ 1.9.4：BMC 读到这一路进了电，就一定是真电源，DMI 怎么写都不算数
+# ================================================================
+# 1.9.3 那台 6530 的真实形状：PSU4 额定 0 W、四个身份字段全是占位符
+# （"幽灵槽位"三个条件全中），可 BMC 上白纸黑字写着
+#     PSU4_Vin 220 Volts   PSU4_Pout 130 Watts
+# 那是一路**正在给整机供电的真电源**，只是这块主板的 BIOS 没填它那一格。
+# 误杀的后果：报告写「共 3 个电源模块在位」，而同一轮的现场配置核对屏
+# 打的是「PSU 4/4 present」—— 同一轮测试的两处对不上。
+DMI_3REAL_1GHOST='Handle 0x1, DMI type 39, 22 bytes
+System Power Supply
+	Location: PSU1
+	Name: CRPS2700D2
+	Serial Number: SN0001
+	Max Power Capacity: 2700 W
+	Status: Present, OK
+
+Handle 0x2, DMI type 39, 22 bytes
+System Power Supply
+	Location: PSU2
+	Name: CRPS2700D2
+	Serial Number: SN0002
+	Max Power Capacity: 2700 W
+	Status: Present, OK
+
+Handle 0x3, DMI type 39, 22 bytes
+System Power Supply
+	Location: PSU3
+	Name: To Be Filled By O.E.M.
+	Serial Number: 2P070175056
+	Max Power Capacity: 2700 W
+	Status: Present, OK
+
+Handle 0x4, DMI type 39, 22 bytes
+System Power Supply
+	Location: PSU4
+	Name: To Be Filled By O.E.M.
+	Manufacturer: To Be Filled By O.E.M.
+	Serial Number: To Be Filled By O.E.M.
+	Max Power Capacity: 0 W
+	Status: Present, OK'
+# 三路带电（含那路 DMI 里像空槽位的 PSU4），PSU2 没接线 —— 就是 6530 那台的样子
+SENS_4PSU_P2DEAD='PSU1_Vin | 220.000 | Volts | ok | 10.1
+PSU2_Vin | na      | Volts | na | 10.9
+PSU3_Vin | 220.000 | Volts | ok | 10.17
+PSU4_Vin | 220.000 | Volts | ok | 10.25'
+
+psu_case "$DMI_3REAL_1GHOST" "$SENS_4PSU_P2DEAD"
+check "BMC 读到 PSU4 有 220V -> 它是真电源，四路都要算进在位数" "1" \
+      "$(printf '%s' "$LAST_DETAIL" | grep -c '共 4 个电源模块在位')"
+check "少一路交流输入仍是 WARN（不是故障）" "WARN" "$LAST_STATUS"
+# ★ 「不具备电源冗余」原来是**无条件**拼上去的。四路电源掉一路、整机才 456W
+#   的机器也照写不误 —— 客户读到"不具备冗余"会以为这台机器有毛病。
+check "还剩 3 路带电时要说「仍具备电源冗余」" "1" \
+      "$(printf '%s' "$LAST_DETAIL" | grep -c '仍具备电源冗余')"
+check "而且绝不许出现「不具备电源冗余」" "0" \
+      "$(printf '%s' "$LAST_DETAIL" | grep -c '不具备电源冗余')"
+
+# 反过来：真的只剩一路了，那才是没有冗余 —— 这句话不许因此消失。
+psu_case "$DMI_OK_OK" "$SENS_PSU2_DEAD"
+check "两路里掉一路、只剩 1 路 -> 这才说不具备冗余" "1" \
+      "$(printf '%s' "$LAST_DETAIL" | grep -c '仅剩 1 路在供电，不具备电源冗余')"
+
+# 反过来的另一头：BMC 里那一路**也没有**读数时，幽灵槽位仍然要丢掉 ——
+# "捞回来"的判据只有"BMC 确认进了电"，不许放宽成"只要有个槽位就算"。
+SENS_3PSU_NO4='PSU1_Vin | 220.000 | Volts | ok | 10.1
+PSU2_Vin | 220.000 | Volts | ok | 10.9
+PSU3_Vin | 220.000 | Volts | ok | 10.17'
+psu_case "$DMI_3REAL_1GHOST" "$SENS_3PSU_NO4"
+check "BMC 也读不到 PSU4 -> 仍按空槽位丢掉，只算 3 路（捞回来的判据不许放宽）" "1" \
+      "$(printf '%s' "$LAST_DETAIL" | grep -c '共 3 个电源模块在位')"
+
 RAW_DIR="$TMP"; RUN_DIR="$TMP"
 
 # ================================================================
@@ -3298,15 +3370,31 @@ check "全是 [N/A] -> 有效卡数 0（判 SKIP，不能报成「ECC 正常」�
 printf '0, 3, 0, 3, 0\n1, 0, 2, 0, 2\n' > "$TMP/ecc-bad.csv"
 check "可纠正和不可纠正要分开求和" "2 3 2" "$(gpu_ecc_scan "$TMP/ecc-bad.csv")"
 
-printf '0, 0, 0, No, No\n1, 0, 0, No, No\n' > "$TMP/remap-ok.csv"
+# 行重映射的 CSV **没有卡号列**（1.9.4 起）：`--query-remapped-rows` 不认
+# `index` 这个字段名，带上它整条查询会被驱动否掉。四列依次是
+# correctable / uncorrectable / pending / failure。
+printf '0, 0, No, No\n0, 0, No, No\n' > "$TMP/remap-ok.csv"
 check "两张卡都干净" "2 0 0 0" "$(gpu_remap_scan "$TMP/remap-ok.csv")"
-printf '0, 4, 2, No, No\n1, 0, 0, Yes, No\n' > "$TMP/remap-warn.csv"
+printf '4, 2, No, No\n0, 0, Yes, No\n' > "$TMP/remap-warn.csv"
 check "不可纠正行数求和、待生效按卡数算" "2 2 1 0" "$(gpu_remap_scan "$TMP/remap-warn.csv")"
-printf '0, 0, 0, No, Yes\n' > "$TMP/remap-fail.csv"
+printf '0, 0, No, Yes\n' > "$TMP/remap-fail.csv"
 check "重映射失败要单独数出来（那一条判 FAIL）" "1 0 0 1" "$(gpu_remap_scan "$TMP/remap-fail.csv")"
-printf '0, [N/A], [N/A], [N/A], [N/A]\n' > "$TMP/remap-na.csv"
+printf '[N/A], [N/A], [N/A], [N/A]\n' > "$TMP/remap-na.csv"
 check "不支持行重映射的卡 -> 有效卡数 0（判 SKIP）" "0 0 0 0" \
       "$(gpu_remap_scan "$TMP/remap-na.csv")"
+# ⚠️ 这一条钉的是 1.9.3 那个静默失效：查询字段名和驱动对不上时，
+#    nvidia-smi 把报错打到 **stdout**，于是 CSV 里躺着一行英文。
+#    它必须被当成"没读到"（有效卡数 0 -> SKIP），绝不能被解析成一张卡。
+printf 'Field "index" is not a valid field to query.\n' > "$TMP/remap-err.csv"
+check "驱动把「字段名不认识」打进 CSV 时不许当成一张卡" "0 0 0 0" \
+      "$(gpu_remap_scan "$TMP/remap-err.csv")"
+# 查询里**只能**有那四个字段 —— 多一个 index，A100/H100 上这一项就会
+# 静悄悄判 SKIP，并对客户断言"该型号无此机制"（一句假话）。
+check "check_gpu_remap 的查询里不许再出现 index 字段" "0" \
+      "$(grep -c -- '--query-remapped-rows=index' "$LIB/conformance.sh" || true)"
+check "上面那条判据本身有能力变红" "1" \
+      "$(printf -- '--query-remapped-rows=index,remapped_rows.pending\n' \
+         | grep -c -- '--query-remapped-rows=index' || true)"
 
 echo
 echo "=== 硬盘型号一致性的分组键 ==="

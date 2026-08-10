@@ -450,12 +450,15 @@ check_gpu_ecc() {
 #   pending = Yes      有行等着重映射，需要复位/重启才生效
 #
 # gpu_remap_scan <csv> -> "<有效卡数> <uncorrectable总数> <pending卡数> <failure卡数>"
+#
+# 列序就是下面 --query-remapped-rows 里写的那四个，**改查询就得改这里**：
+#   $1 correctable   $2 uncorrectable   $3 pending   $4 failure
 gpu_remap_scan() {
   local f="${1:-}"
   [[ -s "$f" ]] || { printf '0 0 0 0'; return; }
   awk -F, '
     {
-      unc = $3; pend = $4; fail = $5
+      unc = $2; pend = $3; fail = $4
       gsub(/[[:space:]]/, "", unc); gsub(/[[:space:]]/, "", pend); gsub(/[[:space:]]/, "", fail)
       if (unc !~ /^[0-9]+$/) next
       n++
@@ -469,16 +472,32 @@ gpu_remap_scan() {
 check_gpu_remap() {
   (( ${GPU_USABLE:-0} > 0 )) || return 0
   local f="$RAW_DIR/gpu-remapped-rows.csv"
+  # ⚠️⚠️ **只能查 remapped_rows.* 这几个字段，别再往里加 `index`。**
+  #
+  # 1.9.3 之前第一个字段写的是 `index`，而 `--query-remapped-rows` 不认它。
+  # 驱动在碰显卡之前就把整条查询否掉，往 stdout 打一行
+  #     Field "index" is not a valid field to query.
+  # 于是 gpu_remap_scan 数出 0 张卡，这一项**每一台机器都判 SKIP**，
+  # 文案还写着「本机显卡不提供显存行重映射状态（该型号无此机制）」。
+  #
+  # 在 1.9.3 那台 RTX 4090 上结论碰巧是对的（消费级卡确实没有行重映射），
+  # 所以没人发现 —— 但**在真正需要这一项的 A100/H100 上，它同样会静悄悄
+  # 判 SKIP 并对客户断言"该型号无此机制"**。那是一句假话，而且丢掉的正好是
+  # 验收单上点名要的那一条。这就是"读不出来被当成机器坏了"的镜像版本：
+  # 读不出来被当成了"这台机器本来就没有"。
   timeout 60 nvidia-smi \
-    --query-remapped-rows=index,remapped_rows.correctable,remapped_rows.uncorrectable,remapped_rows.pending,remapped_rows.failure \
+    --query-remapped-rows=remapped_rows.correctable,remapped_rows.uncorrectable,remapped_rows.pending,remapped_rows.failure \
     --format=csv,noheader,nounits > "$f" 2>/dev/null || true
 
   local n unc pend failn
   read -r n unc pend failn < <(gpu_remap_scan "$f")
   if (( n == 0 )); then
+    # ⚠️ 只说"没读到"，别断言"该型号无此机制"。走到这里有两种可能：
+    #    这张卡确实没有行重映射（消费级卡），或者驱动没给我们这几个字段 ——
+    #    两者分不开，而分不开的东西不该去替客户下结论（report-policy 二-5）。
     result_add "check_gpu_remap" "显存行重映射" "$ST_SKIP" \
-      "本机显卡不提供显存行重映射状态（该型号无此机制），本项未做核对。\
-此项不影响整机结论。" ""
+      "本机显卡未提供显存行重映射状态（该机制一般只有数据中心级显卡具备），\
+本项未做核对。此项不影响整机结论。" ""
     return 0
   fi
 

@@ -949,10 +949,17 @@ check "硬件清单必须有 8 个小节（没装的硬件标未安装，不是�
 #    是**故意**不渲染的。期望值按和 generate_report.py 同一条规则从
 #    results.jsonl 算出来，**不写死数字** —— 写死的话以后 fixture 多加一条判定，
 #    这条守卫就悄悄变成摆设了。规则算错也不会静悄悄：算成 0 就当场红。
+#    1.9.4 起又多两类：
+#      - `check_sn_consistency`（序列号一致性）—— 查的是文书对不对得上，
+#        不是硬件有没有毛病，和 collect_deep 同一把尺子，无条件藏
+#      - **带 `"origin":"self"` 的 SKIP** —— "我们没带那个程序 / 没量到"，
+#        跟被测机器毫无关系（1.9.3 印出去过，客户当场发火）
 HIDE_RE='"id":"(stress_disk|verify_smart)","name":"[^"]*","status":"(PASS|SKIP)"'
-INTERNAL_RE='"id":"(collect_deep|collect_fwts)"'
+INTERNAL_RE='"id":"(collect_deep|collect_fwts|check_sn_consistency)"'
+SELF_RE='"status":"SKIP".*"origin":"self"'
 disk_skipped() { grep -qE '"id":"stress_disk","name":"[^"]*","status":"SKIP"' "$1"; }
 n_hidden="$(grep -cE "$INTERNAL_RE" "$RD/results.jsonl" || true)"
+n_hidden=$(( n_hidden + $(grep -cE "$SELF_RE" "$RD/results.jsonl" || true) ))
 if disk_skipped "$RD/results.jsonl"; then
   n_hidden=$(( n_hidden + $(grep -cE "$HIDE_RE" "$RD/results.jsonl" || true) ))
 fi
@@ -967,6 +974,9 @@ check "报告里的判定条数 = results.jsonl 条数 - 故意藏起来的（�
 for st in PASS FAIL SKIP WARN; do
   want="$(grep -c "\"status\":\"$st\"" "$RD/results.jsonl" || true)"
   want=$(( want - $(grep -cE "$INTERNAL_RE.*\"status\":\"$st\"" "$RD/results.jsonl" || true) ))
+  if [[ "$st" == "SKIP" ]]; then
+    want=$(( want - $(grep -cE "$SELF_RE" "$RD/results.jsonl" || true) ))
+  fi
   if disk_skipped "$RD/results.jsonl" && [[ "$st" == "PASS" || "$st" == "SKIP" ]]; then
     h="$(grep -cE "\"id\":\"(stress_disk|verify_smart)\",\"name\":\"[^\"]*\",\"status\":\"$st\"" \
          "$RD/results.jsonl" || true)"
@@ -980,7 +990,9 @@ done
 # （collect_deep 是无条件藏的，所以期望值里照样要扣掉它）
 if [[ -f "$OUT2" ]]; then
   check "跑过硬盘压测时硬盘那几条要全在（藏的规则不许扩大化）" \
-        "$(( $(grep -c . "$RD2/results.jsonl") - $(grep -cE "$INTERNAL_RE" "$RD2/results.jsonl" || true) ))" \
+        "$(( $(grep -c . "$RD2/results.jsonl") \
+             - $(grep -cE "$INTERNAL_RE" "$RD2/results.jsonl" || true) \
+             - $(grep -cE "$SELF_RE" "$RD2/results.jsonl" || true) ))" \
         "$(cnt "$OUT2" '<div class="result-row r-[A-Z]+"')"
 fi
 
@@ -1095,7 +1107,10 @@ has "$OUTA" "不做合格与否的判断" "要明写这一节不判合格"
 # **最要紧的一条**：分组只决定"印在哪一节"，绝不能让哪条判定漏印。
 # 分组表里漏登记一个 id 时，它应当落到"压测与复查"那一段，而不是消失。
 check "分成三节之后，判定总条数一条都不许少" \
-      "$(( $(grep -c . "$RDA/results.jsonl") - $(grep -cE "$INTERNAL_RE" "$RDA/results.jsonl" || true) - $(grep -cE "$HIDE_RE" "$RDA/results.jsonl" || true) ))" \
+      "$(( $(grep -c . "$RDA/results.jsonl") \
+           - $(grep -cE "$INTERNAL_RE" "$RDA/results.jsonl" || true) \
+           - $(grep -cE "$SELF_RE" "$RDA/results.jsonl" || true) \
+           - $(grep -cE "$HIDE_RE" "$RDA/results.jsonl" || true) ))" \
       "$(cnt "$OUTA" '<div class="result-row r-[A-Z]+"')"
 # 性能数字**不参与**整机结论 —— 基准项永远不会是 FAIL/WARN。
 #
@@ -1123,6 +1138,60 @@ PYEOF
 # 就不该再出现在「其他实测指标」那张大表里
 check "已经有专属小节的指标不再进「其他实测指标」" "0" \
       "$(grep -oE '<td>平台设置</td>|<td>配置核对</td>|<td>性能基准</td>' "$OUTA" | grep -c . || true)"
+
+# ================================================================
+echo
+echo "=== 「我们没测到」的 SKIP 不进交付报告（origin=self，1.9.4）==="
+#
+# 1.9.3 的交付报告里印过这么两行：
+#     SKIP  CPU 计算正确性   当前测试环境未包含处理器计算正确性诊断程序
+#     SKIP  显卡专项诊断     当前测试环境未包含显卡厂商诊断程序
+# 客户读到的不是"这台机器没问题"，是"这家供应商的工具箱是破的"。
+# 这一组钉三头，缺一头另外两头都能装成绿的：
+#   ① 交付报告里那两行没了            ② 内部报告里一个字都不少
+#   ③ **不带 origin 的 SKIP 照常印**（"藏"的规则不许扩大化）
+RDS="$TMP/run-selfskip"
+cp -r "$RD" "$RDS"
+cat >> "$RDS/results.jsonl" <<'EOF'
+{"id":"validate_cpu_sdc","name":"CPU 计算正确性","status":"SKIP","detail":"当前测试环境未包含处理器计算正确性诊断程序，本项未做核对。此项不影响整机结论。","ref":"","time":"t","origin":"self"}
+{"id":"validate_gpu_diag","name":"显卡专项诊断","status":"SKIP","detail":"当前测试环境未包含显卡厂商诊断程序，本项未做核对。此项不影响整机结论。","ref":"","time":"t","origin":"self"}
+{"id":"bench_gpu_p2p","name":"显卡间互联带宽","status":"SKIP","detail":"本机只安装了 1 张显卡，没有卡与卡之间的互联通道可测，本项未做测试。此项不影响整机结论。","ref":"","time":"t"}
+{"id":"validate_cpu_sdc_fail_probe","name":"部件自己报的故障","status":"FAIL","detail":"处理器在计算正确性诊断中出现了错误的运算结果。","ref":"","time":"t","origin":"self"}
+EOF
+OUTS="$TMP/report-selfskip.html"
+"$GEN" --run-dir "$RDS" --out "$OUTS" >/dev/null 2>&1
+has_no "$OUTS" "当前测试环境未包含处理器计算正确性诊断程序" \
+       "没带程序的 SKIP 不许印给客户"
+has_no "$OUTS" "当前测试环境未包含显卡厂商诊断程序" \
+       "没带程序的 SKIP 不许印给客户（显卡这条同理）"
+# ② **"这台机器上没有可测的东西"不是 self**，照常印 —— 客户有权知道哪些没测。
+has "$OUTS" "本机只安装了 1 张显卡" \
+    "机器本身的事实照常印（藏的规则不许扩大化到所有 SKIP）"
+# ③ origin=self **只对 SKIP 有意义**。部件自己给的 FAIL 是真故障，
+#    一条都不许藏 —— 这一条是整组里最要紧的。
+has "$OUTS" "处理器在计算正确性诊断中出现了错误的运算结果" \
+    "带 origin 的 FAIL 一条都不许藏（那是部件自己说的真故障）"
+
+# ================================================================
+echo
+echo "=== 序列号一致性不进交付报告（1.9.4）==="
+#
+# 它查的是**文书**对不对得上（主板 BIOS / BMC / 机身标签），不是硬件有没有毛病。
+# 组装机上 BIOS 那一格本来就没人填、也没地方填，报告于是每台都挂一条黄的
+# 「主板 BIOS 未填写整机序列号，建议出货前补写」——
+# 客户读到的是"这台机器有问题"，而它连硬件都不是。
+RDN="$TMP/run-sn"
+cp -r "$RD" "$RDN"
+cat >> "$RDN/results.jsonl" <<'EOF'
+{"id":"check_sn_consistency","name":"序列号一致性","status":"WARN","detail":"主板 BIOS 未填写整机序列号，管理控制器记录为 24003702CHK04234。建议出货前在 BIOS 中补写，使系统内、管理控制器与机身标签三处一致。","ref":"raw/ipmi-fru.txt","time":"t"}
+EOF
+OUTN="$TMP/report-sn.html"
+"$GEN" --run-dir "$RDN" --out "$OUTN" >/dev/null 2>&1
+has_no "$OUTN" "建议出货前在 BIOS 中补写" "序列号那条告警不进交付报告"
+has_no "$OUTN" "序列号一致性"             "整条判定都不进交付报告"
+# ⚠️ **藏的只是那条判定，序列号本身照常印**（抬头 + 1.1 整机那张表）——
+#    把序列号一起藏掉的话，这份报告就对不上机器了，那是另一种翻车。
+has "$OUTN" "整机序列号" "整机序列号本身照常出现在报告里"
 
 # ---------------------------------------------------------------- 指路不许指空
 #

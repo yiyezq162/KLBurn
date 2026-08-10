@@ -437,6 +437,97 @@ check "MB/s 表头要换算成 GB/s（否则同一台机器两个数量级）" "
 check "日志不存在时给 0，不能报错" "0.00 0.00 0.00" \
       "$(bw_parse_bandwidthtest "$TMP/nope-bw.log")"
 
+# ---------------------------------------------------------------- 显存带宽的块大小
+#
+# 1.9.3 真机翻车：一台 RTX 4090 的显存带宽报出 3622.7 GB/s，而标称值是 1008。
+# 原因是 quick 档只搬 32MB，而 AD102 有 72MB L2 —— 整个拷贝都在缓存里。
+#
+# ⚠️ 这一组钉的不是"块要多大"，而是**"块不够大的时候必须能自己发现"**。
+#    钉一个固定尺寸等于拿今天的卡去赌明天的卡：AMD 已经有 256MB 的
+#    Infinity Cache 了，NVIDIA 堆到那个量级只是时间问题。
+echo
+echo "=== 性能基准：显存带宽的块大小与「曲线压平」判据 ==="
+
+# H2D/D2H：受主机锁页内存限制，封顶 256MiB
+check "显存够大、主机内存够多 -> 封顶 256MiB" "268435456" "$(gpu_bw_bytes 24564 33554432)"
+check "主机可用内存只有 1GB -> 压到八分之一（128MiB）" "134217728" \
+      "$(gpu_bw_bytes 24564 1048576)"
+check "主机可用内存极少也不许低于 32MiB（低于就没意义了）" "33554432" \
+      "$(gpu_bw_bytes 24564 65536)"
+check "显存很小时按显存的四分之一让步" "134217728" "$(gpu_bw_bytes 512 33554432)"
+check "读不到显存容量也要给得出一个能跑的块" "268435456" "$(gpu_bw_bytes "" 33554432)"
+
+# D2D：**只受显存限制**，主机内存再紧张也不许把它压小 ——
+# 压小就等于悄悄退回缓存里，正是 1.9.3 那个坑。
+check "24GB 卡 -> 大块封顶 2GiB、小块 1GiB" "1073741824 2147483648" \
+      "$(gpu_d2d_bytes 24564)"
+check "80GB 卡 -> 同样封顶 2GiB（再大也没意义）" "1073741824 2147483648" \
+      "$(gpu_d2d_bytes 81920)"
+check "8GB 卡 -> 显存的八分之一（1GiB），小块 512MiB" "536870912 1073741824" \
+      "$(gpu_d2d_bytes 8192)"
+check "2GB 卡 -> 大块 256MiB、小块 128MiB" "134217728 268435456" "$(gpu_d2d_bytes 2048)"
+check "显存太小（512MB）-> 给不出可信的块，输出空（那一项不出数）" "" \
+      "$(gpu_d2d_bytes 512)"
+# 大块的工作集（大块 × 2）必须远大于目前最大的显卡末级缓存（MI300X 的 256MB）。
+# 这一条钉的是"余量还在不在"，以后有人把封顶调小会当场红。
+check "常见卡的 D2D 工作集要有 1GiB 以上（缓存最大的卡也只有 256MB）" "yes" \
+      "$(awk -v b="$(gpu_d2d_bytes 24564 | awk '{print $2}')" \
+          'BEGIN{print (b * 2 >= 1073741824) ? "yes" : "no"}')"
+check "读不到显存容量 -> 输出空，不许瞎猜一个" "" "$(gpu_d2d_bytes "")"
+# 这一条是本组的重点：D2D 的块大小函数**根本不接受主机内存参数**，
+# 所以主机内存再紧张也影响不到它。多传一个参数也不该改变结果。
+check "D2D 的块大小和主机内存无关（多传参数也不许变）" "$(gpu_d2d_bytes 24564)" \
+      "$(gpu_d2d_bytes 24564 65536)"
+
+# 曲线压平判据：两个块大小各一行，**必须按块大小取**，不能取最大值 ——
+# 取最大值挑中的正好是被缓存喂出来的那个小块，这道判据就白做了。
+cat > "$TMP/d2d-flat.log" <<'EOF'
+ Device to Device Bandwidth, 1 Device(s)
+ PINNED Memory Transfers
+   Transfer Size (Bytes)	Bandwidth(GB/s)
+   536870912			872.4
+   1073741824			881.9
+EOF
+check "落到显存上：两个块的读数贴在一起" "872.40 881.90" \
+      "$(bw_parse_d2d_curve "$TMP/d2d-flat.log")"
+
+cat > "$TMP/d2d-cache.log" <<'EOF'
+ Device to Device Bandwidth, 1 Device(s)
+ PINNED Memory Transfers
+   Transfer Size (Bytes)	Bandwidth(GB/s)
+   536870912			3622.7
+   1073741824			1204.3
+EOF
+check "还在缓存里：小块明显更快，两个数都要如实取回来" "3622.70 1204.30" \
+      "$(bw_parse_d2d_curve "$TMP/d2d-cache.log")"
+
+# **绝不能取最大值**：取最大值的话上面那份缓存样本会给出 3622.70，
+# 而那正是 1.9.3 印给客户的那个数。
+check "取的是最大块那一行，不是最快那一行" "1204.30" \
+      "$(bw_parse_d2d_curve "$TMP/d2d-cache.log" | awk '{print $2}')"
+
+# H2D/D2H 那两段的数字不许混进来（同一份日志里三段并存）
+cat > "$TMP/d2d-mixed.log" <<'EOF'
+ Host to Device Bandwidth, 1 Device(s)
+ PINNED Memory Transfers
+   Transfer Size (Bytes)	Bandwidth(GB/s)
+   268435456			25.2
+
+ Device to Device Bandwidth, 1 Device(s)
+ PINNED Memory Transfers
+   Transfer Size (Bytes)	Bandwidth(GB/s)
+   1073741824			881.9
+EOF
+check "只认 Device to Device 那一段" "881.90 881.90" \
+      "$(bw_parse_d2d_curve "$TMP/d2d-mixed.log")"
+
+sed 's|Bandwidth(GB/s)|Bandwidth(MB/s)|; s|872\.4|872400|; s|881\.9|881900|' \
+  "$TMP/d2d-flat.log" > "$TMP/d2d-mb.log"
+check "老版本的 MB/s 表头同样要换算" "872.40 881.90" \
+      "$(bw_parse_d2d_curve "$TMP/d2d-mb.log")"
+check "日志不存在时输出空（-> 那一项不出数，不是出个 0）" "" \
+      "$(bw_parse_d2d_curve "$TMP/nope-d2d.log")"
+
 echo
 echo "=== 性能基准：显卡间互联带宽（P2P 矩阵）==="
 cat > "$TMP/p2p.log" <<'EOF'

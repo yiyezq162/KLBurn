@@ -26,6 +26,11 @@
 #    随我们重新分发，要构建时手工放进 vendor/。没放就是**我们这张盘**的
 #    能力缺口，跟被测机器好不好毫无关系（一号红线）。
 #
+#    ⚠️ 而且这种 SKIP **不进交付报告** —— 传 `origin=self`（见 core.sh 的
+#    result_add）。客户读到「当前测试环境未包含显卡厂商诊断程序」，
+#    得到的信息不是"这台机器没问题"，是"这家供应商的工具箱是破的"。
+#    1.9.4 之前这两行是真印出去过的，被当面骂过一次。
+#
 # 3. **跑了但没跑成 ≠ 机器有问题。**工具非零退出、日志里却找不到任何一条
 #    "某项测试失败"的证据时，一律 SKIP —— 那可能是环境、参数、驱动版本的事，
 #    分不清的东西不该去染客户的结论（report-policy 二-5）。
@@ -69,8 +74,11 @@ validate_cpu_sdc() {
   # bench_tool 定义在 lib/bench.sh：先找 /opt/klburn/tools/bench/<子目录>/，
   # 再找 tools/，最后 PATH。这里复用它，免得再写一份查找逻辑。
   if ! exe="$(bench_tool opendcdiag sandstone)"; then
+    # origin=self：没带程序是**我们这张盘**的能力缺口，跟被测机器无关，
+    # 所以这一行只落 results.jsonl 和内部报告，不进交付报告（见 core.sh 的 result_add）。
     result_add "validate_cpu_sdc" "CPU 计算正确性" "$ST_SKIP" \
-      "当前测试环境未包含处理器计算正确性诊断程序，本项未做核对。此项不影响整机结论。" ""
+      "当前测试环境未包含处理器计算正确性诊断程序，本项未做核对。此项不影响整机结论。" \
+      "" "self"
     return 0
   fi
 
@@ -95,7 +103,7 @@ validate_cpu_sdc() {
     *)
       result_add "validate_cpu_sdc" "CPU 计算正确性" "$ST_SKIP" \
         "本轮未取得处理器计算正确性诊断的有效结论，本项未做核对。此项不影响整机结论。" \
-        "raw/validate/cpu-sdc.log" ;;
+        "raw/validate/cpu-sdc.log" "self" ;;
   esac
 }
 
@@ -119,7 +127,8 @@ validate_gpu_diag() {
   local exe
   if ! exe="$(bench_tool dcgmi)"; then
     result_add "validate_gpu_diag" "显卡专项诊断" "$ST_SKIP" \
-      "当前测试环境未包含显卡厂商诊断程序，本项未做核对。此项不影响整机结论。" ""
+      "当前测试环境未包含显卡厂商诊断程序，本项未做核对。此项不影响整机结论。" \
+      "" "self"
     return 0
   fi
 
@@ -143,7 +152,7 @@ validate_gpu_diag() {
     *)
       result_add "validate_gpu_diag" "显卡专项诊断" "$ST_SKIP" \
         "本轮未取得显卡厂商诊断的有效结论（诊断程序与当前驱动或显卡型号不匹配），\
-本项未做核对。此项不影响整机结论。" "raw/validate/gpu-diag.log" ;;
+本项未做核对。此项不影响整机结论。" "raw/validate/gpu-diag.log" "self" ;;
   esac
 }
 

@@ -113,14 +113,38 @@ count_lines() {
 }
 
 # ---------------------------------------------------------------- 结果记录
-# result_add <id> <显示名(中文)> <状态> <一句话结论(中文)> [详情文件相对路径]
+# result_add <id> <显示名(中文)> <状态> <一句话结论(中文)> [详情文件相对路径] [origin]
+#
+# 第六个参数 `origin` 只有一个合法值：**self**，意思是
+# 「这条 SKIP 的原因在我们这边，不在被测机器上」——
+# 盘里没带某个基准/诊断程序、程序跑了没给出有效结果，都属于这一类。
+#
+# ⚠️ 它**只对 SKIP 有意义**，而且**只影响交付报告印不印这一行**：
+#    `results.jsonl`、内部工程报告、屏幕输出全都一个字不少。
+#
+# 为什么要有它（1.9.4，客户当面骂过一次）：交付报告里印一行
+#    「SKIP  显卡专项诊断  当前测试环境未包含显卡厂商诊断程序」
+# 客户读到的不是"这台机器没问题"，是"这家供应商的工具箱是破的"。
+# 我们没带程序，跟他这台机器好不好毫无关系，那一行对他做"收还是不收"
+# 的决定没有任何帮助 —— 属于 report-policy 二-5 那把尺子
+# （判的是我们、不是机器）。
+#
+# **判据写在产生这条结论的地方，不写在报告生成器里。**
+# 报告那边只认 origin，不去猜文案 —— 猜文案的做法（"看看句子里有没有
+# '未包含'"）在改一次措辞之后就会静悄悄失效，而失效的方向是漏出去。
+#
+# 反过来一样要守住：**「这台机器上没有可测的东西」不是 self**。
+# 「本机只安装了 1 张显卡，没有卡间互联可测」「未发现可测试的本机硬盘」
+# 讲的是被测机器的事实，客户有权知道，照常进报告。
 result_add() {
-  local id="$1" name="$2" status="$3" detail="$4" ref="${5:-}"
+  local id="$1" name="$2" status="$3" detail="$4" ref="${5:-}" origin="${6:-}"
   mkdir -p "$RUN_DIR"
   jq -cn \
     --arg id "$id" --arg name "$name" --arg status "$status" \
     --arg detail "$detail" --arg ref "$ref" --arg t "$(ts)" \
-    '{id:$id,name:$name,status:$status,detail:$detail,ref:$ref,time:$t}' \
+    --arg origin "$origin" \
+    '{id:$id,name:$name,status:$status,detail:$detail,ref:$ref,time:$t}
+     + (if $origin == "" then {} else {origin:$origin} end)' \
     >> "$RUN_DIR/results.jsonl"
 
   # 屏幕上只打 id 和状态，绝不打 detail —— detail 是给报告用的中文，

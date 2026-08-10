@@ -155,15 +155,143 @@ bench_report() {
 }
 
 # 统一的"没带这个程序"文案。**不许出现程序名**（§6-2：盘里带了什么工具是内部实现）。
+#
+# origin=self：这是**我们这张盘**的能力缺口，跟被测机器毫无关系，
+# 所以这一行不进交付报告（留在 results.jsonl 和内部报告里）。见 core.sh 的 result_add。
 bench_skip_no_tool() {
   result_add "$1" "$2" "$ST_SKIP" \
-    "本次测试环境未包含${3}基准测试程序，本项未做测试。此项不影响整机结论。" ""
+    "本次测试环境未包含${3}基准测试程序，本项未做测试。此项不影响整机结论。" "" "self"
+}
+
+# 同上，另一半："程序带了，但这一轮没给出有效结果"。
+# 原因可能是参数不合、平台不支持（Intel 的 LINPACK 在非 Intel CPU 上直接罢工）、
+# 被超时打断 —— 每一种都是我们这边的事，同样不该印给客户看。
+bench_skip_no_result() {
+  result_add "$1" "$2" "$ST_SKIP" \
+    "本次未能测得${3}（测试程序未返回有效结果）。此项不影响整机结论。" "${4:-}" "self"
 }
 
 # ================================================================
 # 显卡：主机与显卡之间、以及显卡内部的数据传输带宽
 # ================================================================
 #
+# ⚠️⚠️ **绝不能用 bandwidthTest 的 `--mode=quick`（32MB）去量显存带宽。**
+#
+# 1.9.3 真机踩到：一台 RTX 4090 的「显存内部带宽」报出 **3622.7 GB/s**，
+# 而这张卡标称的显存带宽是 1008 GB/s —— 报出来的数是标称值的三倍半。
+# 两个原因叠在一起：
+#
+#   1. **32MB 装得进显卡的末级缓存。** AD102（4090）有 72MB L2，
+#      源、目标两块缓冲区加起来 64MB，整个拷贝根本没碰到 GDDR ——
+#      量到的是 L2 带宽，不是显存带宽。
+#   2. bandwidthTest 的 D2D 那一格算的是 `2 × 块大小 / 用时`：一次拷贝
+#      要读一遍、写一遍，它报的是**读写合计的显存流量**。这个口径本身没错
+#      （显卡标称的显存带宽就是总线峰值，同样是读写合计），
+#      但前提是这些流量真的走到了显存上。
+#
+# ⚠️⚠️ **而"块开大一点就行了"是靠不住的。**
+#
+# 第一版这里钉的是"256MiB 起、512MiB 封顶，因为目前最大的显卡末级缓存是
+# Blackwell 的 126MB"。那是拿**今天的卡**去赌明天的卡，赌输了不会报错 ——
+# 只会再印一个高得离谱的数出去，和 1.9.3 一模一样。
+# 而且 AMD 那边已经有 256MB 的 Infinity Cache 了（MI300X），
+# NVIDIA 下一代堆到 256MB 以上完全不需要什么想象力。
+#
+# 所以块大小不是判据，**曲线压没压平才是**：
+# 同一张卡量两个块大小（S 和 2S）。缓存放得下的时候小块必然明显更快；
+# 两个数贴在一起，才说明流量真的落到显存上了。
+# 压不平就**这一项不出数**（见 bench_gpu_bandwidth 里的 d2d_trustworthy）——
+# 宁可不报，也不能报一个比标称值高几倍的数。
+# 这条判据不看卡的型号、不看缓存多大，以后出什么卡都成立。
+
+# gpu_bw_bytes <显存MiB> [可用主机内存KiB] -> H2D/D2H 用多大的块（字节）
+#
+# 这两个方向的瓶颈是 PCIe 链路，32MB 就已经跑到平台期了，块大小几乎不影响结果。
+# 这里唯一要当心的是**锁页主机内存**：申请不下来的话整个 bandwidthTest 直接失败，
+# 连带 H2D/D2H 一起没有。所以压在可用内存的八分之一以内，并且封顶 256MiB。
+# 两个参数只为脱机回归用（tests/test-log-parsing.sh），现场不传、自己去读。
+gpu_bw_bytes() {
+  local vram_mib="${1:-}" avail_kib="${2:-}"
+  [[ "$vram_mib" =~ ^[0-9]+$ ]] || vram_mib=0
+  [[ "$avail_kib" =~ ^[0-9]+$ ]] || \
+    avail_kib="$(awk '/MemAvailable/{print $2; exit}' /proc/meminfo 2>/dev/null)"
+  [[ "$avail_kib" =~ ^[0-9]+$ ]] || avail_kib=0
+  awk -v vm="$vram_mib" -v ak="$avail_kib" 'BEGIN{
+    MiB = 1048576
+    s = 256 * MiB
+    if (ak > 0 && s > ak * 1024 * 0.125) s = ak * 1024 * 0.125   # 锁页主机内存
+    if (vm > 0 && s > vm * MiB * 0.25)   s = vm * MiB * 0.25     # 显存那一头
+    if (s < 32 * MiB) s = 32 * MiB               # 兜底：quick 档就是 32MB，够用
+    printf "%d", int(s / MiB) * MiB              # 取整到 MiB，日志好认
+  }'
+}
+
+# gpu_d2d_bytes <显存MiB> -> "<小块> <大块>"（字节）；显存太小给不出就打印空
+#
+# **只受显存约束**，和主机内存无关 —— D2D 的两块缓冲区都在显卡上。
+# 第一版把这两件事混在一个尺寸里算，于是一台可用内存紧张的机器会把块压小，
+# 把好不容易避开的缓存又踩回去，而且**一声不响**。分开算就没有这条暗路。
+#
+# 大块取显存的八分之一（D2D 要两块，合起来占到显存四分之一为止）、**封顶 2GiB**；
+# 小块正好是大块的一半 —— 两个点就够判断曲线压没压平了。
+#
+# 封顶为什么敢开到 2GiB：**D2D 不花时间**。100 遍 × 2GiB × 读写两趟 ≈ 400GiB 流量，
+# 一张正常的卡半秒就跑完了 —— 真正耗时的是 H2D/D2H（卡在 PCIe 上）。
+# 既然不花钱，余量就一次留够：2GiB 的块 = 4GiB 的工作集，
+# 是目前**所有**显卡末级缓存（最大的是 AMD MI300X 的 256MB）的十几倍。
+gpu_d2d_bytes() {
+  local vram_mib="${1:-}"
+  [[ "$vram_mib" =~ ^[0-9]+$ ]] || return 0
+  (( vram_mib > 0 )) || return 0
+  awk -v vm="$vram_mib" 'BEGIN{
+    MiB = 1048576
+    big = vm * MiB * 0.125
+    if (big > 2048 * MiB) big = 2048 * MiB
+    big = int(big / (128 * MiB)) * 128 * MiB     # 取整到 128MiB，日志好认
+    # 小块要留得住意义：再小就和 quick 档没区别，两点比对也就失去了分辨力
+    if (big < 128 * MiB) exit 0
+    printf "%d %d", big / 2, big
+  }'
+}
+
+# gpu_vram_mib <卡号> -> 这张卡的显存容量（MiB）；读不到打印空
+gpu_vram_mib() {
+  local idx="${1:-0}" v
+  v="$(timeout 30 nvidia-smi --query-gpu=memory.total --format=csv,noheader,nounits \
+       -i "$idx" 2>/dev/null | tr -d ' \r')"
+  [[ "$v" =~ ^[0-9]+$ ]] && printf '%s' "$v"
+}
+
+# bw_parse_d2d_curve <日志> -> "<最小块的带宽> <最大块的带宽>"，GB/s；读不到打印空
+#
+# 专给上面那条"曲线压没压平"的判据用，所以**必须按传输块大小取**，
+# 不能像 bw_parse_bandwidthtest 那样取最大值 —— 取最大值的话，
+# 挑中的正好是被缓存喂出来的那个小块，等于这道判据白做。
+#
+# 数据行长这样（第一个数是块大小，最后一个数是带宽）：
+#     268435456			3622.7
+bw_parse_d2d_curve() {
+  local log="${1:-}"
+  [[ -f "$log" ]] || return 0
+  awk '
+    /Device to Device Bandwidth/ { ind = 1; next }
+    /Host to Device Bandwidth/   { ind = 0; next }
+    /Device to Host Bandwidth/   { ind = 0; next }
+    /Bandwidth\(MB\/s\)/         { div = 1000; next }
+    /Bandwidth\(GB\/s\)/         { div = 1;    next }
+    ind && div != "" {
+      if ($1 !~ /^[0-9]+$/) next
+      v = ""
+      for (i = NF; i >= 2; i--) if ($i ~ /^[0-9]+\.?[0-9]*$/) { v = $i; break }
+      if (v == "") next
+      sz = $1 + 0; bw = v / div
+      if (lo == "" || sz < lo) { lo = sz; lobw = bw }
+      if (hi == "" || sz > hi) { hi = sz; hibw = bw }
+    }
+    END { if (hi != "") printf "%.2f %.2f", lobw, hibw }
+  ' "$log" 2>/dev/null
+}
+
 # bw_parse_bandwidthtest <日志> -> "<H2D> <D2H> <D2D>"，单位 GB/s，缺的给 0
 #
 # ⚠️ 单位随版本变：老版本表头是 Bandwidth(MB/s)，新版本是 Bandwidth(GB/s)。
@@ -211,30 +339,98 @@ bench_gpu_bandwidth() {
   # 不用 --device=all 有两个原因：一是不同 CUDA 版本对"多卡时怎么汇总"的处理
   # 不一样（有的给一行合计，有的逐卡分块），解析口径不稳；二是验收要的是
   # 逐卡的数才有意义，把八张卡混成一个数字的话，一张慢卡会被另外七张平均掉。
-  local idx h2d d2h d2d mh="" md="" mdd=""
+  #
+  # **H2D/D2H 和 D2D 分两次跑**，因为约束完全不同：
+  #   H2D/D2H  受**主机锁页内存**限制，块大小对结果几乎没有影响（瓶颈在 PCIe）
+  #   D2D      受**显存**限制，块大小直接决定量到的是显存还是显卡缓存
+  # 混在一次跑的话，主机内存紧张就会把块压小，把 D2D 又踩回缓存里 ——
+  # 而且一声不响。分开之后这条暗路不存在。
+  #
+  # d2d_ok：这一轮的显存数**可不可信**。只要有一张卡判不出可信，
+  # 显存那一项整项就不报 —— 宁可不报，也不能报一个比标称值高几倍的数出去。
+  local idx h2d d2h d2d mh="" md="" mdd="" d2d_ok=1
   for (( idx = 0; idx < GPU_USABLE; idx++ )); do
     local one="$BENCH_LOG_DIR/gpu-bandwidth-${idx}.log"
-    # --dtod 才会跑显卡内部（Device to Device）那一段；不加的话只有 H2D/D2H。
-    bench_run "$one" "$exe" "--device=$idx" --memory=pinned --mode=quick --htod --dtoh --dtod || true
-    { printf '===== GPU %d =====\n' "$idx"; cat "$one"; printf '\n'; } >> "$log"
-    read -r h2d d2h d2d < <(bw_parse_bandwidthtest "$one")
+    local vram; vram="$(gpu_vram_mib "$idx")"
+
+    # ---- 主机 <-> 显存两个方向 ----
+    local bytes; bytes="$(gpu_bw_bytes "$vram")"
+    dbg "gpu $idx host<->device transfer size: $bytes bytes"
+    # --mode=range 三个参数取同一个值 = 只跑这一个块大小（--increment 不能是 0，
+    # 它是 for 循环的步进，给 0 就是死循环）。
+    bench_run "$one" "$exe" "--device=$idx" --memory=pinned \
+      --mode=range "--start=$bytes" "--end=$bytes" --increment=1 \
+      --htod --dtoh || true
+    read -r h2d d2h _ < <(bw_parse_bandwidthtest "$one")
+    if [[ "$h2d" == "0.00" && "$d2h" == "0.00" ]]; then
+      # 这个版本的 bandwidthTest 不认上面那组参数，或者锁页内存申请不下来。
+      # 退回快速档 —— 这两个方向的瓶颈是 PCIe 链路，32MB 已经跑到平台期，
+      # 块大小对它们没有影响，退回去不损失准确性。
+      dbg "gpu $idx: range mode gave nothing for h2d/d2h, falling back to quick"
+      bench_run "$one" "$exe" "--device=$idx" --memory=pinned --mode=quick \
+        --htod --dtoh || true
+      read -r h2d d2h _ < <(bw_parse_bandwidthtest "$one")
+    fi
+    { printf '===== GPU %d  host<->device (transfer size %s bytes) =====\n' "$idx" "$bytes"
+      cat "$one"; printf '\n'; } >> "$log"
+
+    # ---- 显存内部 ----
+    # 两个块大小各量一次，靠"曲线压没压平"判这个数可不可信（见文件上面那段）。
+    d2d="0.00"
+    # ⚠️ 这几个纯函数都是 `printf` 不带换行的（全项目统一），所以
+    #    **不能拿 `read` 的退出码当判据** —— 它读到了内容照样因为 EOF 返回 1。
+    #    先整串接下来，再看串是不是空的。
+    local sizes dsmall dbig ddlog="$BENCH_LOG_DIR/gpu-bandwidth-${idx}-d2d.log"
+    sizes="$(gpu_d2d_bytes "$vram")"
+    if [[ -n "$sizes" ]]; then
+      read -r dsmall dbig <<<"$sizes"
+      dbg "gpu $idx d2d transfer sizes: $dsmall / $dbig bytes"
+      bench_run "$ddlog" "$exe" "--device=$idx" --memory=pinned \
+        --mode=range "--start=$dsmall" "--end=$dbig" "--increment=$dsmall" --dtod || true
+      { printf '===== GPU %d  device<->device (transfer sizes %s / %s bytes) =====\n' \
+          "$idx" "$dsmall" "$dbig"; cat "$ddlog"; printf '\n'; } >> "$log"
+      local curve lobw hibw
+      curve="$(bw_parse_d2d_curve "$ddlog")"
+      if [[ -n "$curve" ]]; then
+        read -r lobw hibw <<<"$curve"
+        # ⚠️ 这**不是合格线**（本文件里没有合格线，见文件头第 1 条）。
+        #    它判的是"这个读数本身算不算数"，和"程序没返回有效结果"同一类：
+        #    块加倍之后带宽掉了一大截 = 小块那次是显卡缓存在帮忙，
+        #    说明连大块都还没完全跳出缓存，这张卡的数不能用。
+        #    真的落到显存上时，两个块大小的读数只差百分之几。
+        if num_ge "$hibw" "$(awk -v v="$lobw" 'BEGIN{printf "%.4f", v * 0.9}')"; then
+          d2d="$hibw"
+        else
+          dbg "gpu $idx: d2d curve not flat ($lobw -> $hibw), still cache-resident; dropping"
+          d2d_ok=0
+        fi
+      else
+        d2d_ok=0
+      fi
+    else
+      dbg "gpu $idx: vram too small (${vram:-?} MiB) for a cache-proof d2d buffer"
+      d2d_ok=0
+    fi
+
     [[ "$h2d" == "0.00" && "$d2h" == "0.00" && "$d2d" == "0.00" ]] && continue
     if [[ -z "$mh"  ]] || num_ge "$mh"  "$h2d"; then mh="$h2d";  fi
     if [[ -z "$md"  ]] || num_ge "$md"  "$d2h"; then md="$d2h";  fi
-    if [[ -z "$mdd" ]] || num_ge "$mdd" "$d2d"; then mdd="$d2d"; fi
+    if [[ "$d2d" != "0.00" ]] && { [[ -z "$mdd" ]] || num_ge "$mdd" "$d2d"; }; then
+      mdd="$d2d"
+    fi
   done
   h2d="${mh:-0.00}"; d2h="${md:-0.00}"; d2d="${mdd:-0.00}"
+  [[ "$d2d" == "0.00" ]] && d2d_ok=0
 
   if [[ "$h2d" == "0.00" && "$d2h" == "0.00" && "$d2d" == "0.00" ]]; then
-    result_add "bench_gpu_bw" "显卡数据传输带宽" "$ST_SKIP" \
-      "本次未能测得显卡的数据传输带宽（测试程序未返回有效结果）。此项不影响整机结论。" \
+    bench_skip_no_result "bench_gpu_bw" "显卡数据传输带宽" "显卡的数据传输带宽" \
       "raw/bench/gpu-bandwidth.log"
     return 0
   fi
 
   metric_add "bench" "主机到显卡带宽（GB/s，取最低的一张卡）" "$h2d"
   metric_add "bench" "显卡到主机带宽（GB/s，取最低的一张卡）" "$d2h"
-  metric_add "bench" "显存内部带宽（GB/s，取最低的一张卡）"   "$d2d"
+  (( d2d_ok == 1 )) && metric_add "bench" "显存读写带宽（GB/s，取最低的一张卡）" "$d2d"
 
   local scope="逐卡测量、取其中最低的一张"
   (( GPU_USABLE == 1 )) && scope="本机唯一一张显卡"
@@ -246,9 +442,20 @@ bench_gpu_bandwidth() {
   bench_report "bench_gpu_bw_d2h" "显卡数据传输带宽（显卡→主机）" \
     "$d2h" "GB/s" \
     "显存到主机内存的数据传输带宽（${scope}）" "raw/bench/gpu-bandwidth.log"
-  bench_report "bench_gpu_bw_d2d" "显存内部带宽" \
-    "$d2d" "GB/s" \
-    "显卡内部显存之间的数据传输带宽（${scope}）" "raw/bench/gpu-bandwidth.log"
+  if (( d2d_ok == 1 )); then
+    # ⚠️ **必须写明"读写合计"**。这个数是显存拷贝时读、写两个方向的流量之和 ——
+    #    显卡规格书上的"显存带宽"也是这个口径（总线峰值），两边能直接对。
+    #    不写清楚的话，看报告的人会拿它去和"单向能搬多少"比，然后觉得高了一倍。
+    bench_report "bench_gpu_bw_d2d" "显存读写带宽" \
+      "$d2d" "GB/s" \
+      "显卡内部显存到显存拷贝时的读写合计带宽（与显卡规格书标称的显存带宽同口径，\
+${scope}）" "raw/bench/gpu-bandwidth.log"
+  else
+    # 退回快速档了：块大小小到装得进显卡缓存，量出来的不是显存带宽。
+    # **宁可这一项不出数，也不能报一个比标称值高几倍的数。**
+    bench_skip_no_result "bench_gpu_bw_d2d" "显存读写带宽" "显存的读写带宽" \
+      "raw/bench/gpu-bandwidth.log"
+  fi
 }
 
 # ================================================================
@@ -306,8 +513,7 @@ bench_gpu_p2p() {
 
   local minbw; minbw="$(p2p_parse_min_bw "$log")"
   if [[ -z "$minbw" ]]; then
-    result_add "bench_gpu_p2p" "显卡间互联带宽" "$ST_SKIP" \
-      "本次未能测得显卡之间的互联带宽（测试程序未返回有效结果）。此项不影响整机结论。" \
+    bench_skip_no_result "bench_gpu_p2p" "显卡间互联带宽" "显卡之间的互联带宽" \
       "raw/bench/gpu-p2p.log"
     return 0
   fi
@@ -415,8 +621,12 @@ EOF
   local gflops nruns
   read -r gflops nruns < <(linpack_parse "$log")
   if [[ "$gflops" == "0.0000" ]]; then
-    result_add "bench_cpu_flops" "CPU 浮点算力" "$ST_SKIP" \
-      "本次未能测得 CPU 的浮点算力（测试程序未返回有效结果）。此项不影响整机结论。" \
+    # ⚠️ 非 Intel 的 CPU 会**每一台都走到这里**：手上这个 xlinpack_xeon64 是
+    #    Intel 发布的二进制，在海光/AMD 上第一行就打
+    #    "optimized for and runs on only genuine Intel processors" 然后退出。
+    #    那是**我们这张盘**只带了 Intel 版本，不是那台机器算不动 ——
+    #    所以 origin=self，这一行不进交付报告。
+    bench_skip_no_result "bench_cpu_flops" "CPU 浮点算力" "CPU 的浮点算力" \
       "raw/bench/cpu-linpack.log"
     return 0
   fi
@@ -539,8 +749,7 @@ bench_mem_bandwidth() {
 
   local got; got="$(mlc_parse_all_reads "$log")"
   if [[ -z "$got" ]]; then
-    result_add "bench_mem_bw" "内存读取带宽" "$ST_SKIP" \
-      "本次未能测得内存的读取带宽（测试程序未返回有效结果）。此项不影响整机结论。" \
+    bench_skip_no_result "bench_mem_bw" "内存读取带宽" "内存的读取带宽" \
       "raw/bench/mem-bandwidth.log"
     return 0
   fi
@@ -667,8 +876,12 @@ bench_disk_bandwidth() {
   if (( write_ok == 1 )); then
     result_add "bench_disk_bw" "硬盘读写带宽" "$ST_PASS" "${detail}。" "raw/bench/"
   else
+    # 现场没确认破坏性写入 —— 这一轮**一个字节都没往盘里写**。
+    # 这句话要写死在结论里：客户看到"硬盘带宽"四个字，第一个念头就是
+    # "你们是不是把我盘上的数据冲了"，等他打电话来问就晚了。
     result_add "bench_disk_bw" "硬盘读写带宽" "$ST_PASS" \
-      "${detail}。本次未进行破坏性写入测试，因此只测量了读带宽。" "raw/bench/"
+      "${detail}。本次未进行破坏性写入测试，全程只从硬盘读取、未向硬盘写入任何数据，\
+盘上原有数据不受影响；因此本项只测量了读带宽。" "raw/bench/"
   fi
 }
 

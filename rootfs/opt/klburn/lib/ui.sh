@@ -977,19 +977,27 @@ cfg_platform_body() {
 
   local bmc="not detected"
   [[ "${IPMI_OK:-0}" == "1" ]] && bmc="present (IPMI)"
-  local psus=() line total=0 live=0 loc st n ac
+  local psus=() line total=0 live=0 seq=0 loc st real n ac
   while IFS= read -r line; do [[ -n "$line" ]] && psus+=("$line"); done < <(dmi_psu_list "$raw/dmidecode-psu.txt")
   for line in "${psus[@]:-}"; do
     [[ -n "$line" ]] || continue
-    loc="${line%%|*}"; st="${line#*|}"
-    # ⚠️ **`Not Present` 里含有 `Present` 子串。**只写 *"Present"* 的话，
-    #    DMI 明写"未在位"的空槽位也会被算成在位 —— 海光那台两个槽位全是
-    #    `Status: Not Present`，这一屏却打出「PSU 2/2 present」，
-    #    而同一轮的报告写的是「无法判定电源状态」，现场两处对不上。
-    #    lib/collect.sh 里同样的坑早就补了，**这一处当时漏了**。
+    seq=$(( seq + 1 ))
+    loc="${line%%|*}"; st="${line#*|}"; real="${line##*|}"; st="${st%%|*}"
+    n="$(printf '%s' "$loc" | grep -oE '[0-9]+' | head -1)"; [[ -n "$n" ]] || n="$seq"
+    # ⚠️ **判据必须和 lib/collect.sh 的 check_psu 一模一样，两处对不上就出事。**
+    #
+    #    1.8.2：这里只写 *"Present"*，而 `Not Present` 里含有 `Present` 子串，
+    #    于是海光那台两个"未在位"的槽位被打成「PSU 2/2 present」，
+    #    而同一轮的报告写的是「无法判定电源状态」。
+    #
+    #    1.9.3：这里没有"幽灵槽位"那一层（`real` 位整个没读），
+    #    于是一台四路电源的机器这一屏打「PSU 4/4 present」，
+    #    报告却写「共 3 个电源模块在位」—— 同一个坑换了个字段又踩一次。
+    #
+    #    现在两处共用 psu_is_real（它还会拿 BMC 的读数把被误杀的真电源捞回来）。
+    psu_is_real "$real" "$n" "$raw/ipmi-sensors.txt" "$raw/ipmi-sdr.txt" || continue
     [[ "$st" == *"Present"* && "$st" != *"Not Present"* ]] || continue
     total=$(( total + 1 ))
-    n="$(printf '%s' "$loc" | grep -oE '[0-9]+' | head -1)"; [[ -n "$n" ]] || n="$total"
     ac="$(psu_ac_state_any "$n" "$raw/ipmi-sensors.txt" "$raw/ipmi-sdr.txt")"
     [[ "$ac" == "present" ]] && live=$(( live + 1 ))
   done
