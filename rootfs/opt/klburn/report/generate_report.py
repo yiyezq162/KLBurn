@@ -1795,10 +1795,19 @@ def build_html(data):
     A("<h1>%s</h1>" % E(meta.get("report_title") or "服务器出厂老化测试报告"))
     # 本轮范围排在**最前面**：读这份报告的人要回答的第一个问题是
     # "这台机器到底测了什么"，而不是"它测了多久"。
-    A('<div class="sub">本轮范围 <b>%s</b> ｜ 整机序列号 <b>%s</b> ｜ 测试时间 %s ~ %s ｜ '
-      "测试模式 %s ｜ 实际耗时 %s</div>"
-      % (E(scope_cn(meta)), E(serial), E(meta.get("start_time")), E(meta.get("end_time")),
-         E(profile_text(meta.get("profile"))), E(fmt_dur(meta.get("elapsed_secs")))))
+    #
+    # ⚠️ 「测试模式」（快速/标准/长测…）只在**真的压过**的那几轮里有意义。
+    #    「仅导出硬件信息」那一档压根没有时长菜单，硬印一句「测试模式 不做压测」
+    #    就是和前面那句「本轮范围 仅导出硬件信息」在说同一件事 ——
+    #    同一个信息在同一行里出现两遍（report-policy 二-10）。
+    #    档位本身照常留在 meta.json 和内部报告里。
+    head_bits = ["本轮范围 <b>%s</b>" % E(scope_cn(meta)),
+                 "整机序列号 <b>%s</b>" % E(serial),
+                 "测试时间 %s ~ %s" % (E(meta.get("start_time")), E(meta.get("end_time")))]
+    if scope_of(meta) != "info":
+        head_bits.append("测试模式 %s" % E(profile_text(meta.get("profile"))))
+    head_bits.append("实际耗时 %s" % E(fmt_dur(meta.get("elapsed_secs"))))
+    A('<div class="sub">%s</div>' % " ｜ ".join(head_bits))
     A('<div class="sub">测试工具 %s v%s（%s，构建于 %s）</div>'
       % (E(meta.get("product_name") or "KLBurn"), E(meta.get("klburn_version")),
          E(meta.get("base_os")), E(meta.get("build_date"))))

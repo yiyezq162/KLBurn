@@ -629,16 +629,32 @@ else
   #    基准阶段的滚动日志，仪表盘一张都没截到。**而断言全绿**，因为没有任何
   #    断言在看这张图。这正是这个项目最怕的那种失效。
   #
-  #    改成等压测真的开跑：`stress_cpu` 起来时会记一条 `[CPU] stress-ng ...`，
-  #    它是 info() 打的、会落进 klburn.log，也就会落到"U 盘"镜像上。
-  #    等到它再多给 20 秒，让采样器攒出第一批读数（否则频率/占用率那几格是 --）。
-  if wait_for_log "[CPU] stress-ng" 900 "压测开跑了（下一步截仪表盘）"; then
+  #    改成等压测真的开跑：每个压测阶段起来时都会记一条 info()，它会落进
+  #    klburn.log，也就会落到"U 盘"镜像上。等到它再多给 20 秒，让采样器攒出
+  #    第一批读数（否则频率/占用率那几格是 --）。
+  #
+  # ⚠️ **锚点必须跟着 --scope 走。**写死 `[CPU] stress-ng` 的话，
+  #    `--scope mem/gpu/disk` 那几轮永远等不到它 —— 白等满一整个超时，
+  #    然后截一张没有仪表盘的图。而且不会有任何断言发现这件事。
+  case "$SCOPE" in
+    full|cpu) BURN_ANCHOR="[CPU] stress-ng";   BURN_WAIT=900 ;;
+    mem)      BURN_ANCHOR="[MEM] -> testing";  BURN_WAIT=900 ;;
+    # 这两个"有没有仪表盘"取决于这台机器：QEMU 里没有显卡、硬盘也不会被确认，
+    # 于是根本不进 PHASE 3。等不到就安静地跳过，别把一轮验证拖长 15 分钟。
+    gpu)      BURN_ANCHOR="[GPU] gpu_burn on"; BURN_WAIT=300 ;;
+    disk)     BURN_ANCHOR="Sequential write";  BURN_WAIT=300 ;;
+    info)     BURN_ANCHOR="";                  BURN_WAIT=0   ;;
+  esac
+
+  if [[ -z "$BURN_ANCHOR" ]]; then
+    info "范围 $SCOPE 不做任何压测，没有仪表盘可截"
+  elif wait_for_log "$BURN_ANCHOR" "$BURN_WAIT" "压测开跑了（下一步截仪表盘）"; then
     sleep 20
+    shot "burn-in"
   else
-    info "没等到压测开跑的锚点，还是按老办法等一会儿再截"
-    sleep 60
+    info "这一轮没等到压测开跑（范围 $SCOPE 在这台机器上可能压根没有可压的部件）"
+    shot "burn-in"
   fi
-  shot "burn-in"
 
   # QUICK 10 分钟 + 采集/复查/出报告的余量。用锚点等而不是死等 900 秒。
   #
