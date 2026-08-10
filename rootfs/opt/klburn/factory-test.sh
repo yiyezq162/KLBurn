@@ -508,12 +508,30 @@ render_pdf "$INTERNAL_HTML" "${INTERNAL_HTML%.html}.pdf" "Internal" || true
 #
 # 报告本身也在清单里 —— 所以清单必须在两份 HTML 和 PDF 都出完之后才生成。
 # 用相对路径记，整个目录搬走之后照样能 `sha256sum -c` 校验。
+#
+# ⚠️⚠️ **`klburn.log` 必须排除在外，否则这份清单永远校验不过。**
+#
+# 它是**这一刻还在写的日志**：下面那句 `ok "Checksums: ..."` 自己就会追加一行，
+# 之后还有整机结论、逐项结果、卸载 U 盘……全都往里写。算完哈希文件还在长，
+# `sha256sum -c` 必然报 `./klburn.log: FAILED`。
+#
+# 1.9.6 之前五个范围跑下来**每一轮都是这一条失败**，而清单的用途恰恰是
+# "半年后证明归档的那份和客户手上那份是同一份" —— 一个恒定的 FAILED，
+# 让人分不清是这个已知假阳性还是真被人改过，等于把这份清单作废了。
+#
+# 排除它是对的：日志本来就不是交付物，也不进客户手里，没有"两份要比对"这回事。
+# 清单头上写一行注释说清楚（`sha256sum -c` 会跳过 `#` 开头的行，实测确认）。
 write_checksums() {
   local sums="$RUN_DIR/SHA256SUMS"
   have sha256sum || { dbg "no sha256sum on this media"; return 1; }
-  ( cd "$RUN_DIR" && find . -type f ! -name 'SHA256SUMS' -print0 \
-      | sort -z | xargs -0 sha256sum ) > "$sums" 2>/dev/null || return 1
-  ok "Checksums: $sums ($(count_lines "$sums") files)"
+  {
+    printf '# KLBurn %s  %s\n' "${KLBURN_VERSION:-?}" "$(ts)"
+    printf '# klburn.log 不在清单里：生成这份清单的时候它还在被写入。\n'
+    printf '# 校验方法：在本目录下跑  sha256sum -c SHA256SUMS\n'
+    ( cd "$RUN_DIR" && find . -type f ! -name 'SHA256SUMS' ! -name 'klburn.log' \
+        -print0 | sort -z | xargs -0 sha256sum )
+  } > "$sums" 2>/dev/null || return 1
+  ok "Checksums: $sums ($(( $(count_lines "$sums") - 3 )) files)"
 }
 write_checksums || warn "Checksum manifest failed (reports are unaffected)."
 

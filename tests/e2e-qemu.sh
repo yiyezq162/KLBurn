@@ -870,11 +870,46 @@ else
     [[ "$got_ver" == "$EXPECT_VER" ]] \
       && ok "meta.json 的版本是 $EXPECT_VER" \
       || bad "meta.json 版本对不上：盘里是 [$got_ver]，源码是 [$EXPECT_VER]"
-    grep -q '"profile": *"QUICK"' "$RUNDIR/meta.json" \
-      && ok "档位确实选中了 QUICK（sendkey 生效了）" \
-      || bad "档位不是 QUICK —— 选档按键没打中，实际跑的是默认 STANDARD"
+    # ⚠️ 档位这一条要跟着 --scope 走。
+    #    「仅导出硬件信息」那一档**根本没有时长菜单**（一个部件都不压，
+    #    问"压多久"是句废话），`DURATION_PROFILE` 是 `INVENTORY`。
+    #    无条件断言 QUICK 的话，那一轮会红在"选档按键没打中"——
+    #    而实际上产品的行为完全正确，是这条断言写错了。
+    #    反过来，这一条正好把"info 档必须跳过时长菜单"钉住了。
+    if [[ "$SCOPE" == "info" ]]; then
+      grep -q '"profile": *"INVENTORY"' "$RUNDIR/meta.json" \
+        && ok "info 档跳过了时长菜单（profile=INVENTORY）" \
+        || bad "info 档的 profile 不是 INVENTORY —— 时长菜单没被跳过？"
+    else
+      grep -q '"profile": *"QUICK"' "$RUNDIR/meta.json" \
+        && ok "档位确实选中了 QUICK（sendkey 生效了）" \
+        || bad "档位不是 QUICK —— 选档按键没打中，实际跑的是默认 STANDARD"
+    fi
+    # 目录名后缀已经验过了，这里再验一次 meta 里的 scope —— 两处必须一致，
+    # 报告、批次汇总都读 meta 那个值。
+    grep -q "\"scope\": *\"$SCOPE\"" "$RUNDIR/meta.json" \
+      && ok "meta.json 的 scope 是 $SCOPE" \
+      || bad "meta.json 的 scope 和 --scope $SCOPE 对不上"
   else
     bad "meta.json 不存在"
+  fi
+
+  # --- 校验清单必须真的校验得过 ---
+  #
+  # ⚠️ 这条只有拿**真跑出来的 run-dir** 才验得了，而且 1.9.6 之前它是红的：
+  #    `klburn.log` 在清单生成之后还在被写（"Checksums:"那行自己就会追加），
+  #    于是 `sha256sum -c` 永远报 `./klburn.log: FAILED`。
+  #    一份永远校验不过的清单，和没有这份清单是一回事 ——
+  #    它的用途正是"半年后证明归档的那份和客户手上那份是同一份"。
+  if [[ -s "$RUNDIR/SHA256SUMS" ]]; then
+    if ( cd "$RUNDIR" && sha256sum -c --quiet SHA256SUMS >/dev/null 2>&1 ); then
+      ok "SHA256SUMS 校验通过（清单里 $(grep -c '^[0-9a-f]' "$RUNDIR/SHA256SUMS") 个文件）"
+    else
+      bad "SHA256SUMS 校验不过：$( cd "$RUNDIR" && sha256sum -c SHA256SUMS 2>&1 \
+             | grep -v ': OK$' | head -3 | tr '\n' ' ' )"
+    fi
+  else
+    bad "没有 SHA256SUMS"
   fi
 
   # --- 判定分布：这台"机器"是虚拟的，很多项必然 SKIP，但不该有 FAIL ---

@@ -2643,6 +2643,17 @@ check "那一处必须紧跟在 confirm_disk_write 的成功分支里" "yes" \
 check "破坏性写确认和硬盘压测两段都由 scope_runs stress_disk 管" "2" \
       "$(grep -c 'if scope_runs stress_disk; then' "$FT_SH" || true)"
 
+# ---- 校验清单必须排除还在写的日志 ----
+#
+# `klburn.log` 在清单生成之后还会被写（"Checksums:"那一行自己就会追加，
+# 后面还有整机结论、逐项结果）。不排除的话 `sha256sum -c` 永远报它 FAILED ——
+# 五个范围真跑下来每一轮都红在这一条（1.9.6 修）。
+# 一份永远校验不过的清单，和没有这份清单是一回事。
+check "SHA256SUMS 必须把 klburn.log 排除在外" "1" \
+      "$(grep -c "! -name 'klburn.log'" "$FT_SH" || true)"
+check "清单里要写明为什么排除它（拿到清单的人得看得懂）" "1" \
+      "$(grep -c 'klburn.log 不在清单里' "$FT_SH" || true)"
+
 # ================================================================
 echo
 echo "=== 汇总入口的调用链不能少人（少一个 = 那项结论从报告里消失）==="
