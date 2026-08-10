@@ -1,8 +1,20 @@
 # KLBurn 开发文档
 
-> 这份是**给改代码的人看的**。只想拿来用（出盘、现场跑测试、看报告）请看
-> [`../README.md`](../README.md)；报告文案的红线看
-> [`report-policy.md`](report-policy.md)；出 U 盘的步骤看 [`usb-rufus.md`](usb-rufus.md)。
+> 这份是**给改代码的人看的**：模块地图、判定口径、扩展点，以及一份
+> **改代码前必读的不变量清单**（每一条都对应一次真实翻车）。
+>
+> 只想拿来用的话，按你要干的事挑一份 —— 索引在
+> [`../README.md`](../README.md)：
+>
+> | 你要干的事 | 看 |
+> |---|---|
+> | 现场跑测试 | [`operating.md`](operating.md) |
+> | 看懂跑出来的报告 | [`reports.md`](reports.md) |
+> | 出盘 / 发版 | [`building.md`](building.md) |
+> | 盘里有哪些工具 | [`toolbox.md`](toolbox.md) |
+> | 写报告文案的红线 | [`report-policy.md`](report-policy.md) |
+> | 做 U 盘 | [`usb-rufus.md`](usb-rufus.md) |
+> | 第一次上真机 | [`first-run-checklist.md`](first-run-checklist.md) |
 
 ---
 
@@ -273,26 +285,29 @@ rootfs/opt/klburn/
           报告名.html  ✅交付        raw/INTERNAL_*.html  🔒内部
 ```
 
-一次运行的目录长这样：
+每个文件是什么、哪些交付、六个范围各产出什么形状的报告 ——
+**全在 [`reports.md`](reports.md)**，这里不重复一遍
+（同一份清单维护两处，迟早对不上）。
+
+这里只补两条**改代码时才用得上**的：
+
+**目录名格式**：`日期_时间_CPU型号_内存容量_范围`
 
 ```
-<U盘>\out\20260731_101500_2x-Intel-Xeon-Gold-6530_512GB\
-    20260731_101500_2x-Intel-Xeon-Gold-6530_512GB.html   ← 交给客户的就是这个
-    klburn.log            全程运行日志
-    results.jsonl         每一项判定：id / 名称 / 状态 / 结论 / 证据文件
-    metrics.jsonl         零散实测数值
-    meta.json             版本、git commit、阈值、时间预算、环境标志
-    sys_metrics.csv       每 5 秒：CPU 温度/频率/负载/内存/功耗/逐颗封装温度
-    gpu_metrics.csv       每 5 秒：逐卡温度/功耗/频率/利用率/显存
-    raw\
-        INTERNAL_20260731_101500_....html   ← 内部工程报告，就放在这儿
-        dmidecode.txt  lspci-vv.txt  smart-pre\  smart-post\  nic\  stress\
-        deep\           扩展留档：光模块、NVMe 控制器参数、完整开机日志……
+20260810_202916_2x-INTEL-XEON-GOLD-6530_512GB_Full
+                                              ^^^^ scope_tag()，只能 ASCII
 ```
 
-目录名格式 **`日期_时间_CPU型号_内存容量`**，多路机器 CPU 前带路数（`2x-`）。
-重名会自动加 `_02` 后缀 —— RTC 停摆的机器上连测两次会得到完全相同的时间戳，
-不防一手就会把上一次的报告整个盖掉。
+多路机器 CPU 前带路数（`2x-`）。范围后缀是 1.9.5 加的，六个值
+`Full` / `CPU` / `MEM` / `GPU` / `DISK` / `INFO`（见 `lib/core.sh` 的 `scope_tag`）。
+**重名会自动在最末尾加 `_02`** —— RTC 停摆的机器上连测两次会得到完全相同的
+时间戳，不防一手就会把上一次的报告整个盖掉。顺序是
+`<日期>_<时间>_<CPU>_<内存>_<范围>[_<序号>]`，别把序号插到范围前面。
+
+**哪些产物是"读 raw/ 文件"画出来的，而不是读 `results.jsonl`**：
+逐盘带宽表读 `raw/bench/fio-*.json`，CPU 曲线读 `sys_metrics.csv`，
+GPU 曲线读 `gpu_metrics.csv`。改范围裁剪逻辑时要一起想到它们 ——
+只筛判定行的话，那几节会在"本轮压根没跑这一项"的范围里凭空冒出来。
 
 ### 为什么内部报告放在 `raw/` 里
 
