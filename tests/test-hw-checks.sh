@@ -29,6 +29,10 @@ source "$LIB/network.sh"
 source "$LIB/verify.sh"
 # shellcheck source=/dev/null
 source "$LIB/conformance.sh"
+# gpu.sh 只为了 gpu_temp_limits（显卡自报的温度限值）。它顶上是几个变量赋值，
+# source 进来没有副作用。
+# shellcheck source=/dev/null
+source "$LIB/gpu.sh"
 
 PASS=0; FAIL=0
 ok()   { printf '  \033[32mOK\033[0m   %s\n' "$1"; PASS=$((PASS+1)); }
@@ -2779,6 +2783,67 @@ check "驱动不实现自检 -> unsupported（SKIP，不是这块卡坏了）" "
       "$(nic_selftest_verdict "$TMP/nst-unsup.txt")"
 check "空输出 -> unsupported" "unsupported" "$(nic_selftest_verdict "$TMP/nope-nst.txt")"
 
+# ---- 网卡自检：只有「链路」子项不通过 = 那个口没插网线，不是硬件故障（1.9.3）----
+#
+# ⚠️ 这一组钉的是 1.9.2 现场那台 6530：整机判 FAIL，理由写的是
+#    "该网口存在硬件故障，需更换或返修后复测"，而那个口的报告表格里
+#    同时写着"未连接链路（未接网线）"。原始输出一字不改抄在下面 ——
+#    五个子项里只有 Link test 是 1，另外四个查卡上硬件的全是 0。
+#    `ethtool -t` 的总结论是所有子项的与，所以没插线的口总结论必然 FAIL。
+#    **只读总结论 = 把每一个没插网线的口都判成坏网卡。**（二号红线）
+cat > "$TMP/nst-nolink.txt" <<'EOF'
+The test result is FAIL
+The test extra info:
+Register test  (offline)	 0
+Eeprom test    (offline)	 0
+Interrupt test (offline)	 0
+Loopback test  (offline)	 0
+Link test   (on/offline)	 1
+EOF
+check "只有链路子项没过 -> link_only（不是 fail）" "link_only" \
+      "$(nic_selftest_verdict "$TMP/nst-nolink.txt")"
+check "  这条绝不能判成 fail（好机器会被拦在出货前）" "0" \
+      "$(nic_selftest_verdict "$TMP/nst-nolink.txt" | grep -c '^fail$' || true)"
+check "  子项计数：0 个硬件项失败、1 个链路项失败" "0 1" \
+      "$(nic_selftest_subtests "$TMP/nst-nolink.txt")"
+# 不带括号的写法（mlx5 / bnxt 这一类）也要认，否则换张卡就又漏了
+cat > "$TMP/nst-nolink2.txt" <<'EOF'
+The test result is FAIL
+The test extra info:
+Link Test        1
+Speed Test       0
+Health Test      0
+Interrupt Test   0
+Loopback Test    0
+EOF
+check "不带括号的子项写法也要认" "link_only" \
+      "$(nic_selftest_verdict "$TMP/nst-nolink2.txt")"
+# 反过来：真故障一个都不许放过
+cat > "$TMP/nst-hwbad.txt" <<'EOF'
+The test result is FAIL
+The test extra info:
+Register test  (offline)	 1
+Link test   (on/offline)	 0
+EOF
+check "寄存器子项没过 -> fail（这才是真故障，必须拦住）" "fail" \
+      "$(nic_selftest_verdict "$TMP/nst-hwbad.txt")"
+cat > "$TMP/nst-bothbad.txt" <<'EOF'
+The test result is FAIL
+The test extra info:
+Eeprom test    (offline)	 1
+Link test   (on/offline)	 1
+EOF
+check "硬件项和链路项都没过 -> fail（不许被链路那条捞走）" "fail" \
+      "$(nic_selftest_verdict "$TMP/nst-bothbad.txt")"
+# 拆不出明细时不许替卡开脱：卡自己说失败，我们没有证据说那是网线的事
+printf 'The test result is FAIL\n' > "$TMP/nst-nodetail.txt"
+check "总结论 FAIL 但没有子项明细 -> 仍然 fail" "fail" \
+      "$(nic_selftest_verdict "$TMP/nst-nodetail.txt")"
+# "Loopback" 里没有 "link"，别把回环项误归到链路那一档
+check "Loopback 不许被当成链路项" "fail" \
+      "$(printf 'The test result is FAIL\nThe test extra info:\nLoopback test (offline)\t 1\n' \
+         > "$TMP/nst-lb.txt"; nic_selftest_verdict "$TMP/nst-lb.txt")"
+
 # ---- 发起和读结果必须都挂在链上，而且顺序不能反 ----
 check "collect_all 必须发起硬盘自检" "yes" \
       "$(declare -f collect_all | grep -q '\bdisk_selftest_start\b' && echo yes || echo no)"
@@ -3053,6 +3118,112 @@ check "一个网口都没有时，板载口全部算 inactive" "2" \
       "$(onboard_nic_scan "$TMP/type41.txt" "$TMP/netaddrs-empty.txt" | grep -c ' inactive$')"
 check "主板不提供 type 41 时输出空（不是判成禁用）" "0" \
       "$(onboard_nic_scan "$TMP/nope-41.txt" "$TMP/netaddrs.txt" | grep -c .)"
+
+# ---- 主板压根没填地址：unknown，不是 inactive（1.9.3）----
+#
+# ⚠️ 海光那台的 type 41 两条 LAN 全填 `Bus Address: 0000:00:00.0` —— 那是主桥的
+#    地址，任何网卡都不可能在那儿。1.9.2 拿它去匹配真网口（0000:03:00.0），
+#    一个都对不上，于是报告里写着「板载网口共 2 个，其中 0 个在系统中可用」，
+#    而同一份报告里那两个口的型号/固件/链路状态全都采到了。
+#    **读不出来的标记不是内容**，不能读成"BIOS 里禁用了"。
+cat > "$TMP/type41-placeholder.txt" <<'EOF'
+Handle 0x0019, DMI type 41, 11 bytes
+Onboard Device
+	Reference Designation: LAN1
+	Type: Ethernet
+	Status: Enabled
+	Type Instance: 1
+	Bus Address: 0000:00:00.0
+
+Handle 0x001A, DMI type 41, 11 bytes
+Onboard Device
+	Reference Designation: LAN2
+	Type: Ethernet
+	Status: Enabled
+	Type Instance: 2
+	Bus Address: 0000:00:00.0
+EOF
+printf '0000:03:00.0\n0000:03:00.1\n' > "$TMP/netaddrs-hygon.txt"
+check "占位地址 0000:00:00.0 -> unknown" "2" \
+      "$(onboard_nic_scan "$TMP/type41-placeholder.txt" "$TMP/netaddrs-hygon.txt" \
+         | grep -c ' unknown$')"
+check "  绝不能标成 inactive（那等于说 BIOS 里禁用了）" "0" \
+      "$(onboard_nic_scan "$TMP/type41-placeholder.txt" "$TMP/netaddrs-hygon.txt" \
+         | grep -c ' inactive$')"
+check "  真地址不受影响，照旧 active/inactive" "0" \
+      "$(onboard_nic_scan "$TMP/type41.txt" "$TMP/netaddrs.txt" | grep -c ' unknown$')"
+
+echo
+echo "=== 显卡温度限值：问卡自己要，不是我们定（1.9.3）==="
+#
+# ⚠️ GPU_TEMP_WARN 原来钉死 83°C。1.9.2 现场那张 RTX 4090 满载峰值 84°C，
+#    于是报「温度偏高」—— 而它自己报的最高工作温度就是 84°C，
+#    降频在 86、关机在 91。**83 这个数是我们凭空写的。**
+#    每代卡、每种散热形态的限值都不一样，只能问卡自己（和 BMC 传感器那条同理）。
+#
+# Ada 起 nvidia-smi 给的是"余量"（T.Limit）：基准点 = 当前温度 + T.Limit，
+# 某个限值的绝对温度 = 基准点 - 它自己那个 T.Limit 值。下面这份是真机原样。
+cat > "$TMP/gpu-q-tlimit.txt" <<'EOF'
+GPU 00000000:01:00.0
+    Temperature
+        GPU Current Temp                               : 43 C
+        GPU T.Limit Temp                               : 41 C
+        GPU Shutdown T.Limit Temp                      : -7 C
+        GPU Slowdown T.Limit Temp                      : -2 C
+        GPU Max Operating T.Limit Temp                 : 0 C
+        GPU Target Temperature                         : 84 C
+        Memory Current Temp                            : N/A
+EOF
+check "余量写法（Ada）：降频 86 / 关机 91" "86 91" \
+      "$(gpu_temp_limits "$TMP/gpu-q-tlimit.txt" 0)"
+check "  这张卡跑到 84°C 不该算高（84 < 86）" "yes" \
+      "$( [[ "$(gpu_temp_limits "$TMP/gpu-q-tlimit.txt" 0 | cut -d' ' -f1)" -gt 84 ]] \
+         && echo yes || echo no )"
+cat > "$TMP/gpu-q-abs.txt" <<'EOF'
+GPU 00000000:17:00.0
+    Temperature
+        GPU Current Temp                  : 33 C
+        GPU Shutdown Temp                 : 92 C
+        GPU Slowdown Temp                 : 89 C
+        GPU Max Operating Temp            : 85 C
+EOF
+check "绝对值写法（数据中心卡/老驱动）：89 / 92" "89 92" \
+      "$(gpu_temp_limits "$TMP/gpu-q-abs.txt" 0)"
+# 多卡：按卡号取各自那一段，别串段
+cat "$TMP/gpu-q-abs.txt" "$TMP/gpu-q-tlimit.txt" > "$TMP/gpu-q-2cards.txt"
+check "多卡时卡0取第一段" "89 92" "$(gpu_temp_limits "$TMP/gpu-q-2cards.txt" 0)"
+check "多卡时卡1取第二段" "86 91" "$(gpu_temp_limits "$TMP/gpu-q-2cards.txt" 1)"
+check "问一张不存在的卡 -> 空（退回静态兜底）" "" \
+      "$(gpu_temp_limits "$TMP/gpu-q-2cards.txt" 9)"
+# ⚠️ 算出来的数必须过常识关。拿一个 15°C 的"降频阈值"去判每张卡的话，
+#    每一台带显卡的机器都会被判成散热异常。
+cat > "$TMP/gpu-q-junk.txt" <<'EOF'
+GPU 00000000:17:00.0
+    Temperature
+        GPU Current Temp                  : 33 C
+        GPU Shutdown Temp                 : 20 C
+        GPU Slowdown Temp                 : 15 C
+EOF
+check "限值离谱（15/20）-> 空，绝不拿它去判" "" \
+      "$(gpu_temp_limits "$TMP/gpu-q-junk.txt" 0)"
+cat > "$TMP/gpu-q-na.txt" <<'EOF'
+GPU 00000000:17:00.0
+    Temperature
+        GPU Current Temp                  : 33 C
+        GPU Shutdown Temp                 : N/A
+        GPU Slowdown Temp                 : N/A
+EOF
+check "驱动给 N/A -> 空" "" "$(gpu_temp_limits "$TMP/gpu-q-na.txt" 0)"
+check "文件不存在 -> 空" "" "$(gpu_temp_limits "$TMP/nope-gpuq.txt" 0)"
+# 关机温度必须高于降频温度，反了说明我们把两个字段读串了
+cat > "$TMP/gpu-q-swapped.txt" <<'EOF'
+GPU 00000000:17:00.0
+    Temperature
+        GPU Shutdown Temp                 : 85 C
+        GPU Slowdown Temp                 : 92 C
+EOF
+check "关机温度低于降频温度 -> 空（读串了就别用）" "" \
+      "$(gpu_temp_limits "$TMP/gpu-q-swapped.txt" 0)"
 
 echo
 echo "=== 虚拟设备核对 ==="

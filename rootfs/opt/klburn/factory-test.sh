@@ -347,6 +347,7 @@ cat > "$RUN_DIR/meta.json" <<EOF
   "thresholds": {
     "cpu_temp_warn":  ${CPU_TEMP_WARN},  "cpu_temp_fail":  ${CPU_TEMP_FAIL},
     "gpu_temp_warn":  ${GPU_TEMP_WARN},  "gpu_temp_fail":  ${GPU_TEMP_FAIL},
+    "gpu_temp_from_card": ${GPU_TEMP_FROM_CARD:-0},
     "disk_temp_warn": ${DISK_TEMP_WARN}, "disk_temp_fail": ${DISK_TEMP_FAIL}
   },
   "bench_params": {

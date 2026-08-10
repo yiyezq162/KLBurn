@@ -596,8 +596,15 @@ snc_state() {
 # 及其 PCI 总线地址。地址还能在 /sys/class/net/*/device 下找到 = 这个口在系统里
 # 是活的 = BIOS 里没禁用。
 #
+# ⚠️ **不少主板的 type 41 里根本没填真地址，一律写 `0000:00:00.0`。**
+#    那是主桥（host bridge）的地址，任何网卡都不可能在那儿。照着它去匹配，
+#    结果必然一个都对不上 —— 海光那台就因此在报告里写着"板载网口共 2 个，
+#    其中 0 个在系统中可用"，而那两个口当轮明明采到了型号、固件、还跑了自检。
+#    这类地址标成 unknown（读不出来），绝不能算成"BIOS 里禁用了"。
+#    读不出来的标记不是内容（docs/report-policy.md）。
+#
 # onboard_nic_scan <dmidecode -t 41 文件> <在用网口的 PCI 地址列表文件>
-#   -> 每行 "<PCI 地址> <active|inactive>"
+#   -> 每行 "<PCI 地址> <active|inactive|unknown>"
 onboard_nic_scan() {
   local f="${1:-}" busfile="${2:-}"
   [[ -f "$f" ]] || return 0
@@ -618,7 +625,10 @@ onboard_nic_scan() {
       local short lower
       lower="$(printf '%s' "$bus" | tr '[:upper:]' '[:lower:]')"
       short="${lower#0000:}"
-      if [[ -n "$addrs" ]] && printf '%s\n' "$addrs" | grep -qF -e "$lower" -e "$short"; then
+      # 占位地址：主桥 00:00.0，或者干脆全 0。这两种都是"主板没填"，不是"禁用了"。
+      if [[ "$short" == "00:00.0" || "$lower" =~ ^0+:0+:0+\.0+$ ]]; then
+        printf '%s unknown\n' "$bus"
+      elif [[ -n "$addrs" ]] && printf '%s\n' "$addrs" | grep -qF -e "$lower" -e "$short"; then
         printf '%s active\n' "$bus"
       else
         printf '%s inactive\n' "$bus"
@@ -664,16 +674,21 @@ check_bios_profile() {
   capture -t 30 "deep/dmidecode-onboard.txt" dmidecode -t 41 >/dev/null 2>&1 || true
   local busf="$RAW_DIR/net-pci-addresses.txt"
   net_pci_addresses > "$busf"
-  local onboard_rows onboard_total onboard_active onboard_state
+  local onboard_rows onboard_total onboard_active onboard_unknown onboard_state
   onboard_rows="$(onboard_nic_scan "$t41" "$busf")"
   onboard_total="$(printf '%s\n' "$onboard_rows" | grep -c . || true)"
   onboard_active="$(printf '%s\n' "$onboard_rows" | grep -c ' active$' || true)"
-  [[ "$onboard_total"  =~ ^[0-9]+$ ]] || onboard_total=0
-  [[ "$onboard_active" =~ ^[0-9]+$ ]] || onboard_active=0
+  onboard_unknown="$(printf '%s\n' "$onboard_rows" | grep -c ' unknown$' || true)"
+  [[ "$onboard_total"   =~ ^[0-9]+$ ]] || onboard_total=0
+  [[ "$onboard_active"  =~ ^[0-9]+$ ]] || onboard_active=0
+  [[ "$onboard_unknown" =~ ^[0-9]+$ ]] || onboard_unknown=0
   if (( onboard_total == 0 )); then
     onboard_state="unknown"
   elif (( onboard_active > 0 )); then
     onboard_state="enabled"
+  elif (( onboard_unknown >= onboard_total )); then
+    # 主板一个有效地址都没给 —— 我们无从判断它们是开着还是被禁了
+    onboard_state="unknown"
   else
     onboard_state="disabled"
   fi
@@ -692,15 +707,22 @@ check_bios_profile() {
   metric_add "platform" "处理器 x2APIC" "${cn[$x2]:-未能读取}"
   metric_add "platform" "IO 虚拟化（VT-d/IOMMU）" "${cn[$vtd]:-未能读取}"
   metric_add "platform" "每路 NUMA 节点数" "$snc_cn"
-  metric_add "platform" "板载网口" \
-    "$( (( onboard_total > 0 )) && printf '共 %d 个，其中 %d 个在系统中可用' "$onboard_total" "$onboard_active" || printf '主板未上报板载网口信息' )"
+  local onboard_txt="主板未上报板载网口信息"
+  if (( onboard_total > 0 )); then
+    if (( onboard_unknown >= onboard_total )); then
+      onboard_txt="$(printf '主板上报 %d 个板载网口，但未提供有效的总线地址，无法核对其启用状态' "$onboard_total")"
+    else
+      onboard_txt="$(printf '共 %d 个，其中 %d 个在系统中可用' "$onboard_total" "$onboard_active")"
+    fi
+  fi
+  metric_add "platform" "板载网口" "$onboard_txt"
 
   # 真读到了几项（判定行里报个数就够，值在表里）
   local nread=0
   [[ "$x2"  != "unknown" ]] && nread=$(( nread + 1 ))
   [[ "$vtd" != "unknown" ]] && nread=$(( nread + 1 ))
   [[ "$snc" != "unknown" ]] && nread=$(( nread + 1 ))
-  (( onboard_total > 0 ))   && nread=$(( nread + 1 ))
+  [[ "$onboard_state" != "unknown" ]] && nread=$(( nread + 1 ))
 
   # 一项都没读出来 = 这台机器/这个内核不提供这些信息
   if [[ "$x2" == "unknown" && "$vtd" == "unknown" && "$snc" == "unknown" && "$onboard_state" == "unknown" ]]; then

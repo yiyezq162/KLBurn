@@ -282,11 +282,18 @@ p2p_parse_min_bw() {
 }
 
 bench_gpu_p2p() {
-  (( ${GPU_USABLE:-0} > 1 )) || {
-    # 只有一张卡时根本没有"卡间"可言。这不是缺陷，也不该刷一条 SKIP 让客户去猜，
-    # 所以只在有多张卡时才记这一项。
+  # 一张卡都没有：整台机器没有显卡，性能基准里连显卡这一段都不该出现。
+  (( ${GPU_USABLE:-0} > 0 )) || return 0
+
+  # 只有一张卡时没有"卡间"可言。**但这一项仍然要出现在报告里** ——
+  # 整项消失的话，看报告的人分不清是"这台机器不需要测"还是"我们漏测了"，
+  # 而多卡机器的验收单上就有这一条。所以照实写：本机只有一张卡。
+  if (( GPU_USABLE == 1 )); then
+    result_add "bench_gpu_p2p" "显卡间互联带宽" "$ST_SKIP" \
+      "本机只安装了 1 张显卡，没有卡与卡之间的互联通道可测（此项测的是多张显卡\
+两两直连时显存到显存的传输带宽），本项未做测试。此项不影响整机结论。" ""
     return 0
-  }
+  fi
   local exe
   if ! exe="$(bench_tool p2pBandwidthLatencyTest)"; then
     bench_skip_no_tool "bench_gpu_p2p" "显卡间互联带宽" "显卡间互联"
@@ -308,7 +315,8 @@ bench_gpu_p2p() {
   metric_add "bench" "显卡间双向带宽（GB/s，全部组合中最低的一组）" "$minbw"
   bench_report "bench_gpu_p2p" "显卡间互联带宽" \
     "$minbw" "GB/s" \
-    "${GPU_USABLE} 张显卡两两之间开启双向直连后，全部组合中最低的一组带宽" \
+    "${GPU_USABLE} 张显卡两两之间开启双向直连后，显存到显存的传输带宽，\
+取全部卡对组合中最低的一组" \
     "raw/bench/gpu-p2p.log"
 }
 

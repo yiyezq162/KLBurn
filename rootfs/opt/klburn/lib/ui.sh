@@ -514,8 +514,8 @@ dash_gpu_rows() {
     [[ "$util" =~ ^[0-9]+$ ]] && utiltxt="${util}%"
     local gcolor="none"
     if [[ "$temp" =~ ^[0-9]+$ ]]; then
-      if   (( temp >= ${GPU_TEMP_FAIL:-90} )); then gcolor="bad"
-      elif (( temp >= ${GPU_TEMP_WARN:-83} )); then gcolor="warn"
+      if   (( temp >= ${GPU_TEMP_FAIL:-95} )); then gcolor="bad"
+      elif (( temp >= ${GPU_TEMP_WARN:-90} )); then gcolor="warn"
       else gcolor="ok"; fi
     fi
     box_row "$w" "$(printf '   %-3s  %-26.26s %-16s %4s C  %5s W  %4s' \
@@ -982,7 +982,12 @@ cfg_platform_body() {
   for line in "${psus[@]:-}"; do
     [[ -n "$line" ]] || continue
     loc="${line%%|*}"; st="${line#*|}"
-    [[ "$st" == *"Present"* ]] || continue
+    # ⚠️ **`Not Present` 里含有 `Present` 子串。**只写 *"Present"* 的话，
+    #    DMI 明写"未在位"的空槽位也会被算成在位 —— 海光那台两个槽位全是
+    #    `Status: Not Present`，这一屏却打出「PSU 2/2 present」，
+    #    而同一轮的报告写的是「无法判定电源状态」，现场两处对不上。
+    #    lib/collect.sh 里同样的坑早就补了，**这一处当时漏了**。
+    [[ "$st" == *"Present"* && "$st" != *"Not Present"* ]] || continue
     total=$(( total + 1 ))
     n="$(printf '%s' "$loc" | grep -oE '[0-9]+' | head -1)"; [[ -n "$n" ]] || n="$total"
     ac="$(psu_ac_state_any "$n" "$raw/ipmi-sensors.txt" "$raw/ipmi-sdr.txt")"

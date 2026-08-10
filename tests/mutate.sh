@@ -132,6 +132,9 @@ MUTATIONS=(
 "selftest-fail-as-pass${S}硬盘自检「Completed: read failure」被当成通过（坏盘拿着干净报告出厂）${S}test-hw-checks${S}$RT/lib/verify.sh${S}mut_selftest_fail_as_pass"
 "selftest-never-read${S}发起了硬盘自检却没人读结果（盘在后台白跑一遍）${S}test-hw-checks${S}$RT/lib/verify.sh${S}mut_selftest_never_read"
 "nic-selftest-after-linkup${S}网卡自检排到拉链路之后（自检把链路踢掉，好机器被判成网口不通）${S}test-hw-checks${S}$RT/lib/collect.sh${S}mut_nic_selftest_after_linkup"
+"nic-selftest-link-as-fail${S}网卡自检只读总结论、不拆子项（没插网线的口被判成「网口硬件故障，需返修」）${S}test-hw-checks${S}$RT/lib/network.sh${S}mut_nic_selftest_link_as_fail"
+"gpu-temp-limit-ignored${S}显卡温度限值不问卡自己要（回到凭空钉死的那个数，好卡每轮刷黄）${S}test-hw-checks${S}$RT/lib/gpu.sh${S}mut_gpu_temp_limit_ignored"
+"onboard-nic-placeholder-as-off${S}板载网口把主板没填的占位地址读成「BIOS 里禁用了」${S}test-hw-checks${S}$RT/lib/conformance.sh${S}mut_onboard_nic_placeholder_as_off"
 "fwts-to-customer${S}固件自检漏进客户报告（好机器上 ACPI 告警极常见，每台都刷一片黄）${S}test-internal-report${S}$RT/report/generate_report.py${S}mut_fwts_to_customer"
 "memtest-first-entry${S}memtest 菜单项插到第一条（插上盘开机跑的是内存测试，不是我们的测试）${S}test-batch-tools${S}build/lib/patch-grub.py${S}mut_memtest_first_entry"
 "summary-empty-as-pass${S}批次汇总把「一条判定都没有」算成 PASS（第四处口径自成一套）${S}test-batch-tools${S}tools/klburn-summary.py${S}mut_summary_empty_as_pass"
@@ -867,7 +870,7 @@ mut_vtd_empty_fallthrough() {
 # VT-d 的内核日志判据退回 1.9.0 那两句。它们在十份真机 run-dir 上
 # **一台都没命中过**（6.8 内核不打那两句），也就是说那条兜底路是死的。
 # 逐卡满载读数又拆进「其他实测指标」。同一个数在一页上出现两遍，
-# 而且拆进表格之后单位就丢了：一格「距降频阈值最小余量 8」，
+# 而且拆进表格之后单位就丢了：一格「距温度上限最小余量 8」，
 # 客户既不知道是 8 度还是 8%，也不知道 8 是多是少。
 mut_gpu_load_metric_dup() {
   replace_line "$RT/report/generate_report.py" \
@@ -931,6 +934,33 @@ mut_selftest_never_read() {
 # 是一个刚被自己踢掉的链路 —— 一台网口完全正常的机器被判成"网口不通"。
 mut_nic_selftest_after_linkup() {
   delete_line "$RT/lib/collect.sh" '  check_nic_selftest  # 定义在 lib/network.sh'
+}
+
+# 网卡自检只读总结论、不拆子项 —— 1.9.3 之前就是这样。
+# `ethtool -t` 的总结论是所有子项的与，而「链路」那一项依赖网线：
+# 没插线的口总结论必然 FAIL，于是每一个没接网线的口都被判成
+# "该网口存在硬件故障，需更换或返修后复测"。6530 那台就是这么被拦下的。
+mut_nic_selftest_link_as_fail() {
+  replace_line "$RT/lib/network.sh" \
+    '    (( link_bad > 0 )) && { printf '"'"'link_only'"'"'; return; }' \
+    '    (( link_bad > 0 )) && { printf '"'"'fail'"'"'; return; }'
+}
+
+# 显卡温度限值不问卡自己要。回到"我们凭空钉一个数"那条老路上：
+# RTX 4090 自报的最高工作温度就是 84°C，钉 83 的话每一张好卡都刷一条黄。
+mut_gpu_temp_limit_ignored() {
+  replace_line "$RT/lib/gpu.sh" \
+    '      if (slow == "" || shut == "") exit' \
+    '      exit'
+}
+
+# 板载网口把"主板没填地址"读成"BIOS 里禁用了"。海光那台 type 41 的两条 LAN
+# 全填 0000:00:00.0（主桥地址），照着它匹配必然一个都对不上 ——
+# 报告于是写着"共 2 个，其中 0 个在系统中可用"，而那两个口当轮全都采到了。
+mut_onboard_nic_placeholder_as_off() {
+  replace_line "$RT/lib/conformance.sh" \
+    '      if [[ "$short" == "00:00.0" || "$lower" =~ ^0+:0+:0+\.0+$ ]]; then' \
+    '      if [[ "$short" == "ZZ_NEVER_MATCHES_ZZ" ]]; then'
 }
 
 # 传感器读数恰好为 0 时不再降级。0 既可能是"这个位置没装部件"，也可能是

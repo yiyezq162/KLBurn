@@ -1878,7 +1878,15 @@ def build_html(data):
 
     # ---------------- CPU 曲线 ----------------
     CPU_TEMP_WARN, CPU_TEMP_FAIL = thr("cpu_temp_warn", 95), thr("cpu_temp_fail", 100)
-    GPU_TEMP_WARN, GPU_TEMP_FAIL = thr("gpu_temp_warn", 83), thr("gpu_temp_fail", 90)
+    GPU_TEMP_WARN, GPU_TEMP_FAIL = thr("gpu_temp_warn", 90), thr("gpu_temp_fail", 95)
+    # 显卡那两条线正常情况下是**卡自己报的**降频/关机温度（见 lib/gpu.sh）。
+    # 报告里出现一条线，看的人第一个问题就是"这条线哪来的"，所以要说清楚。
+    gpu_thr_src = ""
+    try:
+        if int((meta.get("thresholds") or {}).get("gpu_temp_from_card") or 0) == 1:
+            gpu_thr_src = "，两条线均取自显卡自身上报的限值"
+    except (TypeError, ValueError):
+        gpu_thr_src = ""
     temps, freqs, powers = data.sys_series()
     if temps or freqs or powers:
         A(SUB("CPU 温度 / 频率 / 功耗曲线"))
@@ -1913,8 +1921,8 @@ def build_html(data):
             if gs[idx]["power"]:
                 peak_p.append("GPU%s %dW" % (idx, max(gs[idx]["power"])))
         if peak_t:
-            A('<p class="sub">逐卡温度峰值：%s（告警线 %s°C，判故障线 %s°C）</p>'
-              % (E("、".join(peak_t)), GPU_TEMP_WARN, GPU_TEMP_FAIL))
+            A('<p class="sub">逐卡温度峰值：%s（告警线 %s°C，判故障线 %s°C%s）</p>'
+              % (E("、".join(peak_t)), GPU_TEMP_WARN, GPU_TEMP_FAIL, gpu_thr_src))
         A(svg_line_chart(temp_series, y_label="°C", y_suffix="°C"))
         if peak_p:
             A('<p class="sub">逐卡功耗峰值：%s</p>' % E("、".join(peak_p)))
@@ -1958,15 +1966,20 @@ def build_html(data):
     # 测出来的 —— 藏它们的理由只有一条：`check_gpu_load` 那条结论已经把同样的
     # 五个数**连同单位和上下文**写成了一句话
     #     「GPU0 平均频率 2520MHz（最低 2490MHz），平均功耗 430W，
-    #       风扇最高 62%，距降频阈值最少还有 8°C」
+    #       风扇最高 62%，距显卡自报的温度上限最少还有 8°C」
     # 表里再印一遍就是同一个数在一页上出现两遍（report-policy 二-10）。
-    # 而且拆进表格之后单位就没了：一格「距降频阈值最小余量 8」，客户既不知道
+    # 而且拆进表格之后单位就没了：一格「距温度上限最小余量 8」，客户既不知道
     # 是 8 度还是 8%，也不知道 8 是多是少 —— 那句话里写着「还有 8°C」。
     #
     # 卡号是变的（gpu0 / gpu1 / …），所以按**键名**过滤，不按 (组, 键)。
+    #
+    # ⚠️ 1.9.3 把这个键从「距降频阈值最小余量」改名成「距温度上限最小余量」
+    #    （tlimit 归零的点是厂家标的最高工作温度，降频还要再高几度）。
+    #    **旧名字留着**：拿一份 1.9.2 的 run-dir 重新出报告时，这一格
+    #    还是要被挡在客户报告外面。
     INTERNAL_ONLY_GPU_LOAD_KEYS = {
         "满载最低频率MHz", "满载平均频率MHz", "满载平均功耗W",
-        "峰值风扇转速%", "距降频阈值最小余量",
+        "峰值风扇转速%", "距温度上限最小余量", "距降频阈值最小余量",
     }
 
     def _internal_only(m):

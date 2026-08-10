@@ -752,7 +752,8 @@ import json, sys
 p = sys.argv[1]
 m = json.load(open(p, encoding="utf-8"))
 m["thresholds"] = {"cpu_temp_warn": 95, "cpu_temp_fail": 100,
-                   "gpu_temp_warn": 83, "gpu_temp_fail": 90,
+                   "gpu_temp_warn": 86, "gpu_temp_fail": 91,
+                   "gpu_temp_from_card": 1,
                    "disk_temp_warn": 70, "disk_temp_fail": 80}
 json.dump(m, open(p, "w", encoding="utf-8"), ensure_ascii=False)
 PYEOF
@@ -791,7 +792,10 @@ PY
   has "$OUT3" "GPU1 75°C"           "逐卡温度峰值 - 第 1 张"
   has "$OUT3" "GPU0 449W"           "逐卡功耗峰值"
   has "$OUT3" "告警线 95°C，判故障线 100°C" "CPU 阈值要取 meta.json 里实际生效的值"
-  has "$OUT3" "告警线 83°C，判故障线 90°C"  "GPU 阈值同理"
+  has "$OUT3" "告警线 86°C，判故障线 91°C"  "GPU 阈值同理"
+  # 1.9.3 起显卡那两条线正常是**卡自己报的**。报告里出现一条线，
+  # 看的人第一个问题就是"这条线哪来的" —— 这句必须印出来。
+  has "$OUT3" "两条线均取自显卡自身上报的限值" "GPU 阈值要说明出处"
   # 两张卡的图例都要在，否则多卡机器看不出是哪张卡
   has "$OUT3" "GPU0 NVIDIA GeForce RTX 4090" "图例要带卡号和型号"
   has "$OUT3" "GPU1 NVIDIA GeForce RTX 4090" "第二张卡的图例"

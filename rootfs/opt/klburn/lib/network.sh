@@ -319,13 +319,68 @@ nic_current_mbps() {
 #    驱动不实现自检的很常见（virtio、部分国产卡），一律 SKIP —— 那是
 #    驱动的能力问题，不是这块卡坏了（一号红线）。
 #
-# nic_selftest_verdict <ethtool -t 的输出文件> -> pass | fail | unsupported
+# ⚠️⚠️ **总结论是所有子项的"与"，而其中的「链路」子项依赖网线。**
+#    没插网线的口，Link test 必然不通过，于是总结论就是 FAIL —— 而真正查
+#    卡上硬件的那几项（寄存器 / EEPROM / 中断 / 回环）全是 0（通过）。
+#    1.9.2 现场那台 6530 就是这么被判成"该网口存在硬件故障，需更换或返修"的：
+#
+#        ens9f1（没插网线）        ens9f0（插着网线）
+#        The test result is FAIL   The test result is PASS
+#        Register test  (offline) 0    Register test  (offline) 0
+#        Eeprom test    (offline) 0    Eeprom test    (offline) 0
+#        Interrupt test (offline) 0    Interrupt test (offline) 0
+#        Loopback test  (offline) 0    Loopback test  (offline) 0
+#        Link test   (on/offline) 1    Link test   (on/offline) 0
+#                                 ^ 唯一不同的就是这一项
+#
+#    所以这里必须把子项拆开看：**只有非 link 子项不通过才算硬件故障**。
+#    「现场没接网线」是二号红线点名的场景，判 FAIL 就是把好机器拦在出货前。
+#
+# nic_selftest_subtests <ethtool -t 的输出文件>
+#   -> "<非 link 子项失败数> <link 子项失败数>"
+#
+# 子项明细的格式各家驱动不完全一样，共同点是"名字在前、数值在最后一个字段，
+# 0 表示这一项通过"：
+#     Register test  (offline)\t 0     ← intel ixgbe / igb / i40e / e1000e
+#     Link Test                  0     ← mlx5 / bnxt 这类不带括号的
+# 所以按"最后一个字段是数值"来认，名字里带 link 的归到 link 那一档。
+nic_selftest_subtests() {
+  local f="${1:-}"
+  [[ -s "$f" ]] || { printf '0 0'; return; }
+  awk '
+    /[Tt]he test extra info/ { inx = 1; next }
+    !inx { next }
+    {
+      line = $0
+      sub(/\r$/, "", line)
+      gsub(/\t/, " ", line)
+      gsub(/^ +| +$/, "", line)
+      if (line == "" || line !~ / /) next
+      v = line; sub(/^.* /, "", v)
+      if (v !~ /^-?[0-9]+$/) next          # 读不出数值的行让开，不猜
+      if (v + 0 == 0) next                 # 0 = 这一子项通过
+      name = line; sub(/ [^ ]*$/, "", name)
+      if (tolower(name) ~ /link/) link++; else hw++
+    }
+    END { printf "%d %d", hw + 0, link + 0 }
+  ' "$f" 2>/dev/null
+}
+
+# nic_selftest_verdict <ethtool -t 的输出文件> -> pass | fail | link_only | unsupported
 nic_selftest_verdict() {
   local f="${1:-}"
   [[ -s "$f" ]] || { printf 'unsupported'; return; }
   # 先认 FAIL：`The test result is FAIL` 里也有 "test result is"，
   # 顺序反了会把失败读成通过。
   if grep -aqiE 'The test result is[[:space:]]+FAIL' "$f" 2>/dev/null; then
+    local hw_bad link_bad
+    read -r hw_bad link_bad < <(nic_selftest_subtests "$f")
+    [[ "$hw_bad"   =~ ^[0-9]+$ ]] || hw_bad=0
+    [[ "$link_bad" =~ ^[0-9]+$ ]] || link_bad=0
+    (( hw_bad   > 0 )) && { printf 'fail'; return; }
+    (( link_bad > 0 )) && { printf 'link_only'; return; }
+    # 卡自己说失败，但一条子项明细都拆不出来（驱动没打那一段）——
+    # 这时我们没有任何证据说明那是网线的事，照卡自己的结论走。
     printf 'fail'; return
   fi
   if grep -aqiE 'The test result is[[:space:]]+PASS' "$f" 2>/dev/null; then
@@ -347,7 +402,7 @@ check_nic_selftest() {
   info "Running on-NIC self-test on ${#ifaces[@]} port(s) ..."
   mkdir -p "$RAW_DIR/nic" 2>/dev/null || true
 
-  local n_pass=0 n_fail=0 n_unsup=0 bad="" v f
+  local n_pass=0 n_fail=0 n_unsup=0 n_link=0 bad="" nolink="" v f
   for ifn in "${ifaces[@]}"; do
     f="$RAW_DIR/nic/${ifn}-selftest.txt"
     # 有的驱动只实现 online 自检；offline 不支持时退一步再试一次。
@@ -359,19 +414,29 @@ check_nic_selftest() {
     fi
     v="$(nic_selftest_verdict "$f")"
     case "$v" in
-      pass) n_pass=$(( n_pass + 1 )) ;;
-      fail) n_fail=$(( n_fail + 1 )); bad="${bad}${bad:+、}${ifn}" ;;
-      *)    n_unsup=$(( n_unsup + 1 )) ;;
+      pass)      n_pass=$(( n_pass + 1 )) ;;
+      link_only) n_link=$(( n_link + 1 )); nolink="${nolink}${nolink:+、}${ifn}" ;;
+      fail)      n_fail=$(( n_fail + 1 )); bad="${bad}${bad:+、}${ifn}" ;;
+      *)         n_unsup=$(( n_unsup + 1 )) ;;
     esac
   done
+
+  local extra=""
+  (( n_unsup > 0 )) && extra="；另有 ${n_unsup} 个网口的驱动不提供自检功能，不影响整机结论"
 
   if (( n_fail > 0 )); then
     result_add "check_nic_selftest" "网卡自检" "$ST_FAIL" \
       "${n_fail} 个网口自带的自检未通过（${bad}）。这是网卡自身给出的结论，\
-说明该网口存在硬件故障，需更换或返修后复测。" "raw/nic/"
+且未通过的不是依赖网线的链路项，说明该网口存在硬件故障，需更换或返修后复测。" "raw/nic/"
+  elif (( n_link > 0 )); then
+    # 卡上的硬件项全过了，只有「链路」这一子项没过 = 那个口没接网线。
+    # 二号红线：现场没接网线不是硬件故障。
+    result_add "check_nic_selftest" "网卡自检" "$ST_PASS" \
+      "$(( n_pass + n_link )) 个网口的卡上自检项（寄存器 / EEPROM / 中断 / 回环）全部通过，\
+未发现硬件故障。其中 ${n_link} 个网口（${nolink}）的「链路」子项未通过 —— \
+该子项查的是网线与对端设备，现场未接网线时必然不通过，与网卡本身好坏无关${extra}" \
+      "raw/nic/"
   elif (( n_pass > 0 )); then
-    local extra=""
-    (( n_unsup > 0 )) && extra="；另有 ${n_unsup} 个网口的驱动不提供自检功能，不影响整机结论"
     result_add "check_nic_selftest" "网卡自检" "$ST_PASS" \
       "${n_pass} 个网口自带的自检全部通过（由网卡自身完成并给出结论，不依赖网线与对端设备）${extra}" \
       "raw/nic/"

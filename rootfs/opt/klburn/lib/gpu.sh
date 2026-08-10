@@ -19,9 +19,101 @@ GPU_PRESENT=0        # lspci 看到的 NVIDIA 显卡数量
 GPU_USABLE=0         # nvidia-smi 能正常读到的数量
 GPU_PCI_LIST=""
 GPU_MISMATCH=0       # 驱动版本与显卡不匹配（内部报告要用）
+GPU_TEMP_FROM_CARD=0 # 温度判据取自显卡自己上报的限值（0 = 用的静态兜底）
 # 逐卡的满载运行读数，压测过程中攒起来，收尾时统一出一条结论。
-# 每项 "卡号|最低频率|平均频率|峰值风扇%|距降频阈值余量|平均功耗W"，读不到的位置是 "-"。
+# 每项 "卡号|最低频率|平均频率|峰值风扇%|距温度上限余量|平均功耗W"，读不到的位置是 "-"。
 GPU_LOAD_ROWS=()
+
+# ---------------------------------------------------------------- 显卡自己的温度限值
+#
+# **别凭空写一个"显卡多少度算高"。**GPU_TEMP_WARN 原来钉死 83°C，而 1.9.2 现场
+# 那张 RTX 4090 自己报的最高工作温度就是 84°C —— 一张跑在设计工作点上的好卡，
+# 每一轮都要刷一条"温度偏高"的黄。每一代卡、每一种散热形态（涡轮 / 被动 / 水冷）
+# 的限值都不一样，这个数只有卡自己知道，问它就是了。BMC 传感器那边早就是这么做的。
+#
+# `nvidia-smi -q` 的温度段有两种写法，都要认：
+#
+#   绝对值（数据中心卡 / 老驱动）      余量值（Ada 起改成了 T.Limit 写法）
+#     GPU Current Temp      : 33 C       GPU Current Temp           : 43 C
+#     GPU Shutdown Temp     : 92 C       GPU T.Limit Temp           : 41 C
+#     GPU Slowdown Temp     : 89 C       GPU Shutdown T.Limit Temp  : -7 C
+#     GPU Max Operating Temp: 85 C       GPU Slowdown T.Limit Temp  : -2 C
+#                                        GPU Max Operating T.Limit Temp : 0 C
+#
+# 余量那种给的是"离限值还差几度"：基准点 = 当前温度 + T.Limit，
+# 某个限值的绝对温度 = 基准点 - 它自己那个 T.Limit 值。
+# 上面这张实测的 4090：基准 43+41 = 84，降频 84-(-2) = 86，关机 84-(-7) = 91。
+# 也就是说它满载压到 84°C 正是厂家标的工作点，不是"温度偏高"。
+#
+# ⚠️ 算出来的数必须过一遍常识关（60~130 且关机温度高于降频温度）。驱动/固件
+#    给的数不对时宁可退回静态兜底，也绝不能拿一个 20°C 的"降频阈值"去判每张卡。
+#
+# gpu_temp_limits <nvidia-smi -q 的输出文件> <卡号> -> "<降频温度> <关机温度>"
+#   读不出来什么都不输出（调用方退回静态兜底）
+gpu_temp_limits() {
+  local f="${1:-}" idx="${2:-0}"
+  [[ -s "$f" ]] || return 0
+  awk -v want="$idx" '
+    BEGIN { n = -1; cur = 0 }
+    # 每张卡一段，段头是顶格的 "GPU 00000000:27:00.0"（缩进行都是段内内容）
+    /^GPU [0-9A-Fa-f]+:/ { n++; cur = (n == want + 0); next }
+    !cur { next }
+    {
+      line = $0; sub(/\r$/, "", line)
+      i = index(line, ":")
+      if (i == 0) next
+      key = substr(line, 1, i - 1)
+      val = substr(line, i + 1)
+      gsub(/^[ \t]+|[ \t]+$/, "", key)
+      sub(/[ \t]*[Cc][ \t]*$/, "", val)          # 去掉单位
+      gsub(/^[ \t]+|[ \t]+$/, "", val)
+      if (val !~ /^-?[0-9]+$/) next               # N/A 之类一律让开
+      v[key] = val + 0
+    }
+    END {
+      slow = ""; shut = ""
+      if ("GPU Slowdown Temp" in v) slow = v["GPU Slowdown Temp"]
+      if ("GPU Shutdown Temp" in v) shut = v["GPU Shutdown Temp"]
+      if ((slow == "" || shut == "") \
+          && ("GPU Current Temp" in v) && ("GPU T.Limit Temp" in v)) {
+        ref = v["GPU Current Temp"] + v["GPU T.Limit Temp"]
+        if (slow == "" && ("GPU Slowdown T.Limit Temp" in v))
+          slow = ref - v["GPU Slowdown T.Limit Temp"]
+        if (shut == "" && ("GPU Shutdown T.Limit Temp" in v))
+          shut = ref - v["GPU Shutdown T.Limit Temp"]
+      }
+      if (slow == "" || shut == "") exit
+      if (slow < 60 || slow > 130) exit
+      if (shut < 60 || shut > 130) exit
+      if (shut <= slow) exit
+      printf "%d %d", slow, shut
+    }
+  ' "$f" 2>/dev/null
+}
+
+# 把温度判据换成"这几张卡自己报的限值"。
+#
+# ⚠️ 全局只有 GPU_TEMP_WARN / GPU_TEMP_FAIL 这一对数：压测判定、报告里曲线图的
+#    图注、现场界面的配色三处共用它。所以多卡时取**最保守的一组**（各取最小），
+#    分卡去判就会出现"图注写 86、判定按 91"这种同一页自相矛盾的报告。
+gpu_resolve_temp_thresholds() {
+  local f="$RAW_DIR/gpu-smi-full.txt"
+  local idx slow shut w="" ff=""
+  for (( idx = 0; idx < GPU_USABLE; idx++ )); do
+    read -r slow shut < <(gpu_temp_limits "$f" "$idx")
+    [[ "$slow" =~ ^[0-9]+$ && "$shut" =~ ^[0-9]+$ ]] || continue
+    if [[ -z "$w"  ]] || (( slow < w  )); then w="$slow";  fi
+    if [[ -z "$ff" ]] || (( shut < ff )); then ff="$shut"; fi
+  done
+  if [[ -z "$w" || -z "$ff" ]]; then
+    dbg "[GPU] cards report no usable temperature limits - keeping defaults ${GPU_TEMP_WARN}/${GPU_TEMP_FAIL}"
+    return 0
+  fi
+  GPU_TEMP_WARN="$w"
+  GPU_TEMP_FAIL="$ff"
+  GPU_TEMP_FROM_CARD=1
+  info "[GPU] temperature limits read from the cards: warn ${w}C / fail ${ff}C"
+}
 
 # ---------------------------------------------------------------- 日志判读
 # gpu_burn 日志 -> "<FAULTY卡数> <累计计算错误数>"
@@ -105,7 +197,7 @@ gpu_burn_progress_steps() {
 
 # ---------------------------------------------------------------- 满载运行读数
 # gpu_load_stats <gpu_metrics.csv> <卡号>
-#   -> "<最低SM频率> <平均SM频率> <峰值风扇%> <距降频阈值最小余量> <平均功耗W>"
+#   -> "<最低SM频率> <平均SM频率> <峰值风扇%> <距温度上限最小余量> <平均功耗W>"
 #
 # 列序（表头在 gpu_monitor_start）：
 #   1 time  2 index  3 name  4 temp_c  5 power_w  6 clock_sm_mhz
@@ -132,7 +224,7 @@ gpu_load_stats() {
   [[ -f "$csv" ]] || { printf -- '- - - - -'; return; }
   awk -F, -v i="$idx" '
     # 按**这张卡的第几次采样**存，频率和功耗共用同一个下标 —— 跳前两个点的
-    # 时候两样才会一起跳。风扇取峰值、距降频阈值取最小余量，这两个是极值，
+    # 时候两样才会一起跳。风扇取峰值、距温度上限取最小余量，这两个是极值，
     # 跳不跳都不会自相矛盾，所以照旧边读边算。
     NR > 1 && $2 == i {
       n++
@@ -260,6 +352,10 @@ gpu_detect() {
   capture "gpu-driver-modinfo.txt" modinfo nvidia
 
   GPU_USABLE="$(nvidia-smi --query-gpu=index --format=csv,noheader 2>/dev/null | grep -c . || true)"
+
+  # 温度判据换成卡自己报的限值。**必须排在这里** —— meta.json / 报告图注 /
+  # 现场界面配色都读同一对变量，晚于它们定下来就来不及了。
+  gpu_resolve_temp_thresholds
 
   # 认不全的时候先问一句内核：是卡的问题，还是我们带的驱动不认这张卡？
   local missing=$(( GPU_PRESENT - GPU_USABLE ))
@@ -428,7 +524,11 @@ gpu_stress() {
     gpu_stat_ok "$clk_avg" && metric_add "gpu${idx}" "满载平均频率MHz" "$clk_avg"
     gpu_stat_ok "$pow_avg" && metric_add "gpu${idx}" "满载平均功耗W"   "$pow_avg"
     gpu_stat_ok "$fan_max" && metric_add "gpu${idx}" "峰值风扇转速%"   "$fan_max"
-    gpu_stat_ok "$tl_min"  && metric_add "gpu${idx}" "距降频阈值最小余量" "$tl_min"
+    # ⚠️ 这一列（nvidia-smi 的 temperature.gpu.tlimit）是"离**厂家标的温度上限**
+    #    还差几度"，不是"离降频还差几度"：同一张 4090 的 -q 输出里，tlimit 归零
+    #    的那个点是 Max Operating Temp（84°C），降频还要再高 2°C。原来标成
+    #    「距降频阈值」，于是一张跑在设计工作点上的卡在报告里写着"距降频 0°C"。
+    gpu_stat_ok "$tl_min"  && metric_add "gpu${idx}" "距温度上限最小余量" "$tl_min"
     # 逐卡攒起来，压测判定完之后统一出一条"满载运行状态"的结论
     GPU_LOAD_ROWS+=("${idx}|${clk_min}|${clk_avg}|${fan_max}|${tl_min}|${pow_avg}")
     (( tmax >= GPU_TEMP_FAIL )) && overheat=$(( overheat + 1 ))
@@ -442,6 +542,10 @@ gpu_stress() {
   metric_add "gpu" "FAULTY卡数" "$faulty"
 
   local detail="${GPU_USABLE} 张显卡满载 $(fmt_dur "$secs")"
+  # 温度那两条结论里要说清楚这个度数是谁定的 —— 报告里出现一个数，
+  # 看的人第一个问题就是"这条线哪来的"。
+  local tsrc="（该温度取自显卡自身上报的限值）"
+  (( GPU_TEMP_FROM_CARD == 1 )) || tsrc=""
 
   # ---------------- 掉卡：排在所有判据最前面 ----------------
   # 卡都不在了，gpu_burn 报的"0 个错误"、采样算出来的"峰值温度 36°C /
@@ -502,10 +606,11 @@ gpu_stress() {
       "显卡满载测试程序异常退出（退出码 $rc）；$detail" "raw/stress/gpu-burn.log"
   elif (( overheat > 0 )); then
     result_add "stress_gpu" "GPU 压力测试" "$ST_FAIL" \
-      "有 ${overheat} 张卡温度超过 ${GPU_TEMP_FAIL}°C（散热异常）；$detail" "raw/stress/gpu-burn.log"
+      "有 ${overheat} 张卡温度达到 ${GPU_TEMP_FAIL}°C${tsrc}（散热异常）；$detail" "raw/stress/gpu-burn.log"
   elif (( hot > 0 )); then
     result_add "stress_gpu" "GPU 压力测试" "$ST_WARN" \
-      "有 ${hot} 张卡温度偏高（超过 ${GPU_TEMP_WARN}°C）；$detail" "raw/stress/gpu-burn.log"
+      "有 ${hot} 张卡温度达到 ${GPU_TEMP_WARN}°C${tsrc}，已进入降频保护区间；$detail" \
+      "raw/stress/gpu-burn.log"
   else
     result_add "stress_gpu" "GPU 压力测试" "$ST_PASS" "无计算错误，温度正常；$detail" "raw/stress/gpu-burn.log"
   fi
@@ -518,7 +623,7 @@ gpu_stress() {
 #
 # 一张散热不行的卡会自己把频率降下来保护，于是**温度曲线反而好看** ——
 # 只看温度什么都发现不了。验收单点名要看的四个读数（频率 / 功耗 / 风扇 /
-# 距降频阈值的余量）正是为了堵这个口子，所以单独出一条结论。
+# 距温度上限的余量）正是为了堵这个口子，所以单独出一条结论。
 #
 # ⚠️ **这一项只报读数，不判达标与否。**不同型号的卡满载频率从 1400MHz 到
 # 2700MHz 都有，凭空写死一个数就是替客户定了一个他没定过的标准；而且这张盘
@@ -540,7 +645,7 @@ check_gpu_load_profile() {
     fi
     gpu_stat_ok "$pow_avg" && one="${one}，平均功耗 ${pow_avg}W"
     gpu_stat_ok "$fan_max" && one="${one}，风扇最高 ${fan_max}%"
-    gpu_stat_ok "$tl_min"  && one="${one}，距降频阈值最少还有 ${tl_min}°C"
+    gpu_stat_ok "$tl_min"  && one="${one}，距显卡自报的温度上限最少还有 ${tl_min}°C"
     shown="${shown}${one}；"
   done
 
