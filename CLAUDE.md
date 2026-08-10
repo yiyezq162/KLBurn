@@ -119,6 +119,48 @@ wsl -d Ubuntu-24.04 -u root -e bash -c "cd /mnt/c/Users/li/Desktop/project/KLBur
 7. 全绿之后**主动汇报结果**（构建版本、断言数、e2e 结果），
    而不是丢一条命令让用户自己去跑一遍确认
 
+## 提交与打 tag —— **默认动作，不用问**
+
+> **每构建一版，就提交一次、打一个 tag。**不管有没有拿去真机测过。
+> 这是**默认行为，不需要征求同意**（用户 2026-08-10 明确交代）。
+> 理由很简单：报告上只有版本号和 commit hash，漏一次就断一环，
+> 半年后拿着一份报告回来查，查不到那版代码长什么样。
+
+**顺序是死的，别自己改：**
+
+```
+1. bump build/config.sh 的 KLBURN_VERSION + 写 CHANGELOG
+2. ./tests/run-all.sh 全绿（判定逻辑动了再加 mutate.sh）
+3. git commit          ← 必须在构建之前，工作区要干净
+4. 构建 ISO             ← 这时 klburn.conf 里记的才是干净的 commit hash
+5. check-firmware.sh + e2e-qemu.sh 冒烟
+6. git tag -a v<版本>   ← 打在第 3 步那个 commit 上
+```
+
+⚠️⚠️ **第 3 步必须排在第 4 步之前，这一条栽过。**
+构建脚本会把 `git rev-parse --short HEAD` 和"工作区脏不脏"一起钉进
+盘里的 `klburn.conf`。**先构建后提交的话，盘里记的是上一版的 hash 加一个
+`-dirty`**（1.9.4 第一次构建就是 `GIT_COMMIT="59f289e-dirty"`，而 59f289e 是
+v1.9.3）。这时候再打 tag，tag 指向的 commit 和盘里写的对不上 ——
+拿着报告查代码的那条链就断了，而且**不会有任何报错**。
+
+构建完记得核一眼，两个值要对得上：
+
+```
+wsl -d Ubuntu-24.04 -e bash -c "grep -E 'KLBURN_VERSION|GIT_COMMIT' /home/li/klburn-build/rootfs/opt/klburn/klburn.conf"
+```
+
+`GIT_COMMIT` **不许带 `-dirty`**。带了就是第 3 步漏了，重新提交再构建一次。
+
+tag 用 annotated（`-a`），说明里写清楚那一版干了什么、断言数多少：
+
+```bash
+git tag -a v1.9.4 -m "1.9.4：显存带宽口径修正、四路电源误判、两类不该外发的报告行；run-all 1314 项、mutate 98 条"
+```
+
+已发布的 tag 清单在 [`CHANGELOG.md`](CHANGELOG.md) 顶上维护着，打完 tag 顺手补进去。
+（`v1.9.1` 没有 tag —— 那次就是"bump 完没马上提交"，留在 CHANGELOG 里当反面教材。）
+
 ## 三条最容易踩的红线
 
 1. **交付报告（与报告目录同名的 `.html`）只放参与判定的内容**：不出现内部实现细节
