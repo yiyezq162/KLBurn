@@ -1832,17 +1832,38 @@ def build_html(data):
     A('<span style="margin-left:18px" class="sub">通过 %d 项 ｜ 失败 %d 项 ｜ 告警 %d 项 ｜ 跳过 %d 项</span></div>'
       % (n_pass, n_fail, n_warn, n_skip))
 
+    # 「本轮选的那个部件不在这台机器上」——选了显卡专项、机器却没有独立显卡。
+    # 判据是主流程落的那条判定（factory-test.sh 的 SCOPE_ABORT 那一段）。
+    scope_missing = any(r.get("id") == "scope_target_missing" for r in results)
+
     # 结论块下面紧跟一句"这一轮到底覆盖了什么"。
     # **必须紧贴结论，不能埋到下面某一节里** —— 一个孤零零的 PASS 加上一行
     # "本轮只测了 CPU"，和一个孤零零的 PASS，是两份完全不同的报告。
+    #
+    # ⚠️ 但"本轮选的部件不在这台机器上"那种情况**不能印这句**：
+    #    它写死的是「本轮只对显卡做了压力测试与专项诊断」，而那一轮根本没做 ——
+    #    说得比做得多（report-policy 六-4）。那一支由下面那条 notice 说清楚。
     cover = SCOPE_COVER.get(scope_of(meta))
-    if cover:
+    if cover and not scope_missing:
         A('<div class="notice notice-info">%s</div>' % cover)
 
+    # 「本轮选的那个部件不在这台机器上」——选了显卡专项、机器却没有独立显卡。
+    #
+    # ⚠️ 这一条判 FAIL，但 FAIL 的含义是**「这一轮作废」，不是「这台机器坏了」**，
+    #    所以**绝不能**套用下面那句「本机存在未通过项，不建议出货」——
+    #    没装显卡的机器本身一点毛病都没有，那句话会把一台好机器拦在出货前
+    #    （一号红线：能力缺失 ≠ 硬件故障）。
+    #    和上面 no_results 那一支是同一类措辞：说这一轮没跑成，不说硬件不好。
     if no_results:
         # 措辞只说"这次测试没跑成"，不说机器有问题——两码事
         A('<div class="notice notice-warn"><b>本次测试未产生任何判定结果，'
           "本报告无效。</b>测试过程未能正常完成，请重新测试后以新报告为准。</div>")
+    elif scope_missing:
+        A('<div class="notice notice-warn"><b>本轮测试未执行：所选的测试范围'
+          "（%s）在本机上没有可测的部件。</b>"
+          "<b>这不是硬件故障</b> —— 本机未安装该部件，测试无从进行。"
+          "请确认是不是选错了测试范围、或者测错了机器，重新测试后以新报告为准。</div>"
+          % E(scope_cn(meta)))
     elif overall == "FAIL":
         A('<div class="notice notice-warn"><b>本机存在未通过项，不建议出货。</b>'
           "请查看下方标红的测试项详情。</div>")

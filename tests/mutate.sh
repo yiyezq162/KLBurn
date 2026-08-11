@@ -157,6 +157,8 @@ MUTATIONS=(
 "scope-tag-dropped${S}报告目录名不带范围后缀（单项专测和全量的目录长得一模一样）${S}test-hw-checks${S}$RT/lib/core.sh${S}mut_scope_tag_dropped"
 "scope-summary-plain-pass${S}批次汇总把单项专测的 PASS 写成和全量一样的 PASS${S}test-batch-tools${S}tools/klburn-summary.py${S}mut_scope_summary_plain_pass"
 "flops-only-best${S}算力只认末尾那行汇总（被超时打断时把已经量到的成绩白扔，平白判 SKIP）${S}test-log-parsing${S}$RT/lib/bench.sh${S}mut_flops_only_best"
+"scope-missing-as-pass${S}选了显卡专测却没有显卡时不再判 FAIL（一项没测的机器拿到绿色 PASS）${S}test-hw-checks${S}$RT/factory-test.sh${S}mut_scope_missing_as_pass"
+"scope-missing-blames-hw${S}缺部件那条 FAIL 套用「不建议出货」（把一台好机器说成硬件有毛病）${S}test-report-render${S}$RT/report/generate_report.py${S}mut_scope_missing_blames_hw"
 )
 
 # ================================================================
@@ -1061,6 +1063,24 @@ mut_flops_only_best() {
   replace_line "$RT/lib/bench.sh" \
     '    $1 ~ /^[0-9]+$/ && NF >= 4 && $3 ~ /^[0-9]+\.?[0-9]*$/ {' \
     '    $1 ~ /^ZZ_NEVER_MATCHES_ZZ$/ && NF >= 4 && $3 ~ /^[0-9]+\.?[0-9]*$/ {'
+}
+
+# 选了显卡专项、机器却没有独立显卡 —— 退回 1.9.6 之前那样一路跑到底。
+# 结果是一台**一项测试都没跑成**的机器拿到绿色 PASS，
+# 下面还写着"本轮只对显卡做了压力测试与专项诊断"。
+mut_scope_missing_as_pass() {
+  replace_line "$RT/factory-test.sh" \
+    'if [[ "$KLB_SCOPE" == "gpu" ]] && (( GPU_USABLE == 0 )); then' \
+    'if false; then'
+}
+
+# 缺部件那条 FAIL 套用「本机存在未通过项，不建议出货」。
+# 那句话说的是**这台机器有毛病** —— 而它只是没装显卡，本身一点问题都没有。
+# 一号红线的反向踩法：不是漏判，是把好机器拦在出货前。
+mut_scope_missing_blames_hw() {
+  replace_line "$RT/report/generate_report.py" \
+    '    elif scope_missing:' \
+    '    elif False:'
 }
 
 # 硬盘自检结果里「Completed: read failure」被当成通过。这句话里也有

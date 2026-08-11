@@ -2641,7 +2641,37 @@ check "那一处必须紧跟在 confirm_disk_write 的成功分支里" "yes" \
 # 两处：一处是"要不要问破坏性写确认"，一处是"要不要真跑 fio"。
 # 两处都得在，缺前一处 = 硬盘专测不问就跑，缺后一处 = 问了却不跑。
 check "破坏性写确认和硬盘压测两段都由 scope_runs stress_disk 管" "2" \
-      "$(grep -c 'if scope_runs stress_disk; then' "$FT_SH" || true)"
+      "$(grep -c 'scope_runs stress_disk' "$FT_SH" || true)"
+
+# ---- 范围里的部件不在这台机器上：直接跳出，判 FAIL ----
+#
+# 选了显卡专项、插的却是没有独立显卡的机器。1.9.6 之前这种情况一路跑到底、
+# 打绿色 PASS，下面还写着"本轮只对显卡做了压力测试与专项诊断"——一项都没做。
+check "gpu 范围 + 没有可用显卡 -> 置 SCOPE_ABORT" "1" \
+      "$(grep -cE 'if \[\[ "\$KLB_SCOPE" == "gpu" \]\] && \(\( GPU_USABLE == 0 \)\); then' "$FT_SH" || true)"
+check "disk 范围 + 没有可测硬盘 -> 置 SCOPE_ABORT" "1" \
+      "$(grep -cE 'elif \[\[ "\$KLB_SCOPE" == "disk" \]\] && \(\( \$\{#DISK_CAND\[@\]\} == 0 \)\); then' "$FT_SH" || true)"
+check "两档各落一条 scope_target_missing 的 FAIL" "2" \
+      "$(grep -c 'result_add "scope_target_missing"' "$FT_SH" || true)"
+check "两条判定的状态都必须是 FAIL" "2" \
+      "$(grep -A1 'result_add "scope_target_missing"' "$FT_SH" | grep -c 'ST_FAIL' || true)"
+# ⚠️ **只管显卡和硬盘。**CPU / 内存不做这件事：没有这两样机器根本开不了机，
+#    "选了 CPU 专测却没有 CPU"这件事不存在。多写一档就是凭空多一条误判路径。
+check "不许给 cpu / mem 也加这条（没有它们机器开不了机）" "0" \
+      "$(grep -cE 'KLB_SCOPE" == "(cpu|mem)" \]\] && \(\(' "$FT_SH" || true)"
+# 跳出必须是**真的跳出**。五处：配置核对屏、破坏性写确认（别问一个不会执行的
+# 擦盘）、性能基准+专项验证、压测、测后复查。
+# 少守一处的后果是"说跳出了其实还在跑"，比不跳出更难查。
+check "SCOPE_ABORT 要挡住五段（核对屏 / 写确认 / 基准 / 压测 / 复查）" "5" \
+      "$(grep -cE 'SCOPE_ABORT == 0' "$FT_SH" || true)"
+# ⚠️ 这条 FAIL 说的是「这一轮作废」，**不是「这台机器坏了」**。
+#    没装显卡 / 没有可测盘的机器本身没有任何毛病 —— 两条文案里都必须写明，
+#    否则就撞上一号红线（能力缺失 ≠ 硬件故障）。
+check "两条文案都要写明这不是硬件故障" "2" \
+      "$(grep -c '这不是硬件故障' "$FT_SH" || true)"
+# 硬盘那条要把两种情况都说到：真没装盘 / 盘都在使用中
+check "硬盘那条要说清楚「盘都在使用中」也算" "1" \
+      "$(grep -c '盘都在使用中、不参与破坏性测试' "$FT_SH" || true)"
 
 # ---- 校验清单必须排除还在写的日志 ----
 #

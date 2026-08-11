@@ -865,7 +865,11 @@ FT_MAIN="$ROOT/rootfs/opt/klburn/factory-test.sh"
 check "factory-test.sh 必须调用 validate_all" "yes" \
       "$(grep -qE '^[[:space:]]*validate_all( |$)' "$FT_MAIN" && echo yes || echo no)"
 # 和基准同一个阶段：都要机器空闲。排到压测里去的话，量到的和判到的都是别的东西。
-vl_pos="$(grep -n '^validate_all' "$FT_MAIN" | head -1 | cut -d: -f1)"
+#
+# ⚠️ 锚点不能写成 `^validate_all`：1.9.7 起这一段被包进了
+#    `if (( SCOPE_ABORT == 0 )); then`（范围里的部件不在这台机器上就整段跳过），
+#    调用点缩进了两格，行首锚点会说"它排到压测后面去了"—— 一个不存在的问题。
+vl_pos="$(grep -nE '^[[:space:]]*validate_all([[:space:]]|$)' "$FT_MAIN" | head -1 | cut -d: -f1)"
 st_pos="$(grep -n 'stress_cpu "\$CPU_SECS"' "$FT_MAIN" | head -1 | cut -d: -f1)"
 check "validate_all 必须排在并发压测之前（空闲时测）" "yes" \
       "$( [[ -n "$vl_pos" && -n "$st_pos" && "$vl_pos" -lt "$st_pos" ]] && echo yes || echo no )"

@@ -1471,6 +1471,77 @@ has "$OUTI" "一、硬件清单" "info：硬件清单照常"
 has "$OUTI" "二、配置核对" "info：配置核对照常"
 has "$OUTI" "三、性能基准" "info：性能基准照跑（几十秒的事，而且不写盘）"
 
+# ---------------------------------------------------------------- 范围里的部件不在这台机器上
+#
+# 选了「显卡专项测试」，插的却是一台没有独立显卡的机器（现场手滑 / 拿错机器）。
+# 1.9.6 之前这种情况打的是**绿色 PASS**，下面还写着"本轮只对显卡做了压力测试
+# 与专项诊断"—— 而它一项都没做。把"没测"包装成"通过"，比不做这个功能还糟。
+#
+# 1.9.7 起：主流程直接跳出、判 FAIL。但 **FAIL 的含义是"这一轮作废"，
+# 不是"这台机器坏了"** —— 没装显卡的机器本身一点毛病都没有。
+RSM="$TMP/run-scope-missing"
+mkdir -p "$RSM/raw"
+cp -r "$RD/raw/." "$RSM/raw/" 2>/dev/null || true
+cat > "$RSM/results.jsonl" <<'EOF'
+{"id":"collect_system","name":"硬件信息采集","status":"PASS","detail":"采集完成","ref":"","time":"t"}
+{"id":"gpu_detect","name":"GPU","status":"SKIP","detail":"未安装独立显卡","ref":"","time":"t"}
+{"id":"scope_target_missing","name":"本轮测试未执行","status":"FAIL","detail":"本轮选择的是显卡专项测试，但本机未检测到可用的独立显卡，测试**未执行**。这不是硬件故障 —— 请确认是不是选错了测试范围、或者测错了机器，重新测试后以新报告为准。","ref":"","time":"t"}
+EOF
+printf '' > "$RSM/metrics.jsonl"
+python3 - "$RSM/meta.json" <<'PYEOF'
+import json, sys
+json.dump({"klburn_version":"1.9.7","company_name":"广州市鲲林科技有限公司",
+           "base_os":"Ubuntu Server 24.04.4","build_date":"2026-08-11 10:00:00",
+           "serial":"TESTSN0001","scope":"gpu","profile":"QUICK",
+           "planned_secs":600,"elapsed_secs":180,
+           "start_time":"2026-08-11 10:00:00","end_time":"2026-08-11 10:03:00",
+           "budget":{"cpu_secs":0,"mem_secs":0,"disk_secs":0,"gpu_secs":0},
+           "disk_confirmed":0,"data_partition":"/dev/sdb1"},
+          open(sys.argv[1],"w",encoding="utf-8"), ensure_ascii=False)
+PYEOF
+OUTSM="$TMP/report-scope-missing.html"
+"$GEN" --run-dir "$RSM" --out "$OUTSM" >/dev/null 2>&1
+check "范围内部件缺失：报告生成成功" "0" "$?"
+
+# ① 必须是 FAIL 大字（用户要的就是这个：绝不能再是绿的）
+check "结论必须是 FAIL，不许是 PASS" "1" "$(cnt "$OUTSM" 'class="verdict v-FAIL"')"
+check "一个 PASS 大字都不许有" "0" "$(cnt "$OUTSM" 'class="verdict v-PASS"')"
+
+# ② ⚠️ 但**绝不能**说这台机器有毛病 —— 一号红线。
+#    没装显卡的机器本身没问题，「不建议出货」会把一台好机器拦在出货前。
+has_no "$OUTSM" "本机存在未通过项，不建议出货" \
+       "缺部件那条 FAIL 不许套用「不建议出货」（那是说硬件坏了）"
+has "$OUTSM" "本轮测试未执行"  "要说清楚这一轮没执行"
+has "$OUTSM" "这不是硬件故障"  "要明说这不是硬件故障"
+has "$OUTSM" "选错了测试范围"  "要给出下一步怎么办"
+
+# ③ 那句写死的 cover 文案不许出现 —— 它说"本轮只对显卡做了压力测试与专项诊断"，
+#    而这一轮根本没做（说得比做得多）。
+has_no "$OUTSM" "本轮只对 <b>显卡</b> 做了压力测试与专项诊断" \
+       "不许再印那句「已经对显卡做了压测」——这一轮压根没做"
+
+# ④ 硬件清单照常八节：客户还是要知道这台机器装了什么
+check "硬件清单仍然是 8 个小节" "8" "$(cnt "$OUTSM" '<h3>1\.[0-9]+ ')"
+
+# ⑤ 硬盘那一档同理（同一个机制，但抬头里的范围名要跟着变）
+RSD="$TMP/run-scope-missing-disk"
+cp -r "$RSM" "$RSD"
+python3 - "$RSD/meta.json" <<'PYEOF'
+import json, sys
+m = json.load(open(sys.argv[1], encoding="utf-8")); m["scope"] = "disk"
+json.dump(m, open(sys.argv[1], "w", encoding="utf-8"), ensure_ascii=False)
+PYEOF
+cat > "$RSD/results.jsonl" <<'EOF'
+{"id":"collect_system","name":"硬件信息采集","status":"PASS","detail":"采集完成","ref":"","time":"t"}
+{"id":"scope_target_missing","name":"本轮测试未执行","status":"FAIL","detail":"本轮选择的是硬盘专项测试，但本机未发现可测试的硬盘，测试**未执行**（本机未安装硬盘，或者盘都在使用中、不参与破坏性测试）。这不是硬件故障 —— 请确认是不是选错了测试范围、或者测错了机器，重新测试后以新报告为准。","ref":"","time":"t"}
+EOF
+OUTSD="$TMP/report-scope-missing-disk.html"
+"$GEN" --run-dir "$RSD" --out "$OUTSD" >/dev/null 2>&1
+check "硬盘那档：报告生成成功" "0" "$?"
+check "硬盘那档：结论也是 FAIL" "1" "$(cnt "$OUTSD" 'class="verdict v-FAIL"')"
+has "$OUTSD" "硬盘专项测试" "抬头那句要写成硬盘专项测试，不是显卡"
+has_no "$OUTSD" "本机存在未通过项，不建议出货" "同样不许说这台机器有毛病"
+
 # ---------------------------------------------------------------- 单项专测写得更细
 has "$TMP/report-scope-cpu.html"  "逐颗 CPU 满载温度"          "cpu：给出逐颗温度"
 has "$TMP/report-scope-mem.html"  "逐条内存 ECC 计数"          "mem：给出逐条 ECC 对比"

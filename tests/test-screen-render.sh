@@ -443,8 +443,11 @@ check "factory-test.sh 进压测前要把内核消息压下去（不算注释）
       "$(grep -n 'console_quiet_on' "$FT" | grep -vE '^[0-9]+:[[:space:]]*#' | grep -c . || true)"
 check "压测结束和异常退出都要恢复（cleanup 里也有一处）" "2" \
       "$(grep -n 'console_quiet_off' "$FT" | grep -vE '^[0-9]+:[[:space:]]*#' | grep -c . || true)"
+# ⚠️ 别锚在行首：1.9.7 起这一句被包进了 `if (( SCOPE_ABORT == 0 )); then`
+#    （范围里的部件不在这台机器上时连这一屏也跳过），缩进了两格。
+#    `^config_review` 会说"现场那一屏凭空消失了"—— 一个不存在的问题。
 check "config_review 必须真的被调用（少调 = 现场那一屏凭空消失）" "1" \
-      "$(grep -c '^config_review ' "$FT" || true)"
+      "$(grep -cE '^[[:space:]]*config_review ' "$FT" || true)"
 
 # 配置核对面板绝不能卡住流程：必须有超时分支。
 check "config_review 的倒计时到点必须自己往下走（不能等按键）" "yes" \

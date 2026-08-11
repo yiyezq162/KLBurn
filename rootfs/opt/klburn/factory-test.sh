@@ -190,6 +190,80 @@ collect_all
 # "内存混插了""序列号对不上"，不用等三十分钟压测跑完。
 conformance_all
 
+# ---------------------------------------------------------------- 范围里的部件不在这台机器上
+#
+# 选了「显卡专项测试」，插的却是一台没有独立显卡的机器 —— 现场手滑或者拿错
+# 机器都会这样。**这一轮一项测试都跑不成，所以直接跳出，不要再往下走。**
+#
+# ⚠️⚠️ 这里判 FAIL，而 FAIL 的含义是**「这一轮作废」，不是「这台机器坏了」**。
+#
+# 两件事必须分清楚，否则就撞上一号红线（能力缺失 ≠ 硬件故障）：
+#   - 没装显卡的机器**本身没有任何毛病**，报告里绝不能写"不建议出货"
+#   - 但它也绝不能打绿色 PASS —— 1.9.6 之前就是这样：一台什么都没测的机器
+#     拿到一份绿字报告，下面还写着"本轮只对显卡做了压力测试与专项诊断"，
+#     而它根本没做。**把"没测"包装成"通过"，比不做这个功能还糟。**
+#
+# 所以走的是仓库里已有的那套「本轮无效」语义（和"一条判定都没有"同一类）：
+# 大红 FAIL + 屏幕红字 + 报告里写明"选错范围或选错机器，本轮未执行"，
+# 一个字都不往硬件头上扣。
+# ⚠️ **只管显卡和硬盘这两档。** CPU 和内存不需要：没有这两样机器根本开不了机，
+#    "选了 CPU 专测却没有 CPU"这件事不存在。
+SCOPE_ABORT=0
+if [[ "$KLB_SCOPE" == "gpu" ]] && (( GPU_USABLE == 0 )); then
+  SCOPE_ABORT=1
+  result_add "scope_target_missing" "本轮测试未执行" "$ST_FAIL" \
+    "本轮选择的是显卡专项测试，但本机未检测到可用的独立显卡，测试**未执行**。\
+这不是硬件故障 —— 请确认是不是选错了测试范围、或者测错了机器，重新测试后以新报告为准。" ""
+  printf '\n'
+  printf '%s' "$C_RED$C_BLD"
+  cat <<'EOF'
+  ##############################################################
+  #  NO GPU FOUND - GPU-ONLY TEST CANNOT RUN                   #
+  #                                                            #
+  #  You picked  [4] GPU ONLY , but this machine has no        #
+  #  usable discrete graphics card. Nothing can be tested.     #
+  #                                                            #
+  #  The run STOPS here and is marked FAIL.                    #
+  #  This does NOT mean the hardware is faulty - it means      #
+  #  the wrong scope (or the wrong machine) was picked.        #
+  #                                                            #
+  #  Re-run and pick  [1] FULL BURN-IN  for a normal test.     #
+  ##############################################################
+EOF
+  printf '%s\n' "$C_RST"
+  warn "GPU-only scope on a machine with no usable GPU - skipping all test phases."
+  sleep 5
+
+elif [[ "$KLB_SCOPE" == "disk" ]] && (( ${#DISK_CAND[@]} == 0 )); then
+  SCOPE_ABORT=1
+  # 两种情况都会走到这儿，文案要把两种都说到：真的没装硬盘，
+  # 或者盘都在使用中（被挂载 / 是启动 U 盘自己）因而不参与破坏性测试。
+  result_add "scope_target_missing" "本轮测试未执行" "$ST_FAIL" \
+    "本轮选择的是硬盘专项测试，但本机未发现可测试的硬盘，测试**未执行**\
+（本机未安装硬盘，或者盘都在使用中、不参与破坏性测试）。\
+这不是硬件故障 —— 请确认是不是选错了测试范围、或者测错了机器，重新测试后以新报告为准。" ""
+  printf '\n'
+  printf '%s' "$C_RED$C_BLD"
+  cat <<'EOF'
+  ##############################################################
+  #  NO TESTABLE DISK - DISK-ONLY TEST CANNOT RUN              #
+  #                                                            #
+  #  You picked  [5] DISK ONLY , but this machine has no       #
+  #  testable disk: either none is installed, or every disk    #
+  #  is in use (mounted, or the KLBurn USB stick itself).      #
+  #                                                            #
+  #  The run STOPS here and is marked FAIL.                    #
+  #  This does NOT mean the hardware is faulty - it means      #
+  #  the wrong scope (or the wrong machine) was picked.        #
+  #                                                            #
+  #  Re-run and pick  [1] FULL BURN-IN  for a normal test.     #
+  ##############################################################
+EOF
+  printf '%s\n' "$C_RST"
+  warn "Disk-only scope with no testable disk - skipping all test phases."
+  sleep 5
+fi
+
 # ---------------------------------------------------------------- 配置核对
 # 采集完、压测开始前，先让现场把"这台机器到底装了什么"过一遍。
 #
@@ -198,7 +272,13 @@ conformance_all
 #
 # 60 秒倒计时、按任意键立即继续、超时自动继续。**绝不能卡住流程**：
 # 现场最怕的就是插上去没反应，那会让人直接断电重来。
-config_review 60
+#
+# 范围里的部件压根不在这台机器上时跳过这一屏：上面那块红字已经把话说完了，
+# 再让人对着一个 60 秒的面板等下去，和"直接跳出"是相反的。
+# 这台机器装了什么，报告的「一、硬件清单」里一个字都不少。
+if (( SCOPE_ABORT == 0 )); then
+  config_review 60
+fi
 
 # ---------------------------------------------------------------- 破坏性写确认
 #
@@ -212,7 +292,7 @@ config_review 60
 # 反过来，不测硬盘的那几个范围里**不问**：那一屏是个 120 秒的输入框，
 # 问一个这轮根本不会执行的破坏性操作，只会让现场白等、白紧张一次。
 DISK_CONFIRMED=0
-if scope_runs stress_disk; then
+if scope_runs stress_disk && (( SCOPE_ABORT == 0 )); then
   if (( ${#DISK_CAND[@]} > 0 )); then
     if confirm_disk_write 120; then
       DISK_CONFIRMED=1
@@ -295,18 +375,21 @@ fi
 #
 # 盘里没放对应的基准程序时，每一项都干净地判 SKIP，整段几秒钟就过去了 ——
 # 所以不需要额外的开关，也不影响不做性能核对的那些机器。
-section "PHASE 2/5  BASELINE & DEVICE VALIDATION (idle machine)"
-BENCH_START_EPOCH="$(date +%s)"
-bench_all "$DISK_CONFIRMED"
-# 部件专项验证（可选件：opendcdiag / dcgmi）。和基准同一个阶段——都要机器空闲。
-# 一个都没放进 vendor/ 时整段几秒钟就过去了。
-validate_all
-BENCH_SECS=$(( $(date +%s) - BENCH_START_EPOCH ))
+BENCH_SECS=0
+if (( SCOPE_ABORT == 0 )); then
+  section "PHASE 2/5  BASELINE & DEVICE VALIDATION (idle machine)"
+  BENCH_START_EPOCH="$(date +%s)"
+  bench_all "$DISK_CONFIRMED"
+  # 部件专项验证（可选件：opendcdiag / dcgmi）。和基准同一个阶段——都要机器空闲。
+  # 一个都没放进 vendor/ 时整段几秒钟就过去了。
+  validate_all
+  BENCH_SECS=$(( $(date +%s) - BENCH_START_EPOCH ))
+fi
 
 # ---------------------------------------------------------------- 压测
 # 「仅导出报告」那一档整段跳过：没有任何东西要压，也就没有仪表盘、没有
 # turbostat 采样、没有测后复查。
-if scope_has_stress; then
+if scope_has_stress && (( SCOPE_ABORT == 0 )); then
   stress_init
 
   # 仪表盘是"每 2 秒清屏 + 整屏重画"，前提是只有它一个人在往控制台上写。
@@ -379,8 +462,10 @@ TEST_END_TS="$(date '+%Y-%m-%d %H:%M:%S')"
 TEST_ELAPSED=$(( $(date +%s) - TEST_START_EPOCH ))
 
 # ---------------------------------------------------------------- 复查
-# 「测后复查」的前提是有"测"这回事。仅导出报告那一档没有测后，也就没有复查。
-if scope_has_stress; then
+# 「测后复查」的前提是有"测"这回事。仅导出报告那一档没有测后，也就没有复查；
+# 范围里的部件压根不在这台机器上（SCOPE_ABORT）时同理 —— 什么都没压过，
+# 也就没有"压测把什么逼出来了"可查。
+if scope_has_stress && (( SCOPE_ABORT == 0 )); then
   verify_all
 fi
 
