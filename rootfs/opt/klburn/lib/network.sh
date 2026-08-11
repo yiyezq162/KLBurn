@@ -46,6 +46,14 @@ net_parse_addr() {
   grep -oE 'inet [0-9]+(\.[0-9]+){3}/[0-9]+' <<<"$1" | head -1 | awk '{print $2}'
 }
 
+# 169.254.0.0/16 是**没拿到 DHCP 时自己编的**链路本地地址（RFC 3927），
+# 不是一个真的租约：拿着它既不会有网关、也上不了任何网。
+# 当成"拿到地址了"会让结论变成"已获取地址，但 DHCP 未下发网关"，
+# 把一个"没有 DHCP 服务器"的现场说成了网络配置有问题。
+net_addr_is_linklocal() {
+  [[ "${1:-}" == 169.254.* ]]
+}
+
 # `ip -4 route show ...` 的输出 -> 默认网关，没有则空
 net_parse_gateway() {
   grep -oE 'via [0-9]+(\.[0-9]+){3}' <<<"$1" | head -1 | awk '{print $2}'
@@ -68,8 +76,52 @@ net_result_text() {
 # 硬件操作
 # ================================================================
 
-# 物理网口列表（跳过 lo 和 bond/vlan/veth 之类没有 device 节点的虚拟口）
-net_phys_ifaces() {
+# ---------------------------------------------------------------- 哪些口算数
+#
+# ⚠️⚠️ **服务器的 BMC 会往系统里插一个 USB 虚拟网口。**
+#
+# 1.9.7 现场那台 7542 上是这样的：
+#     enxbe3af2b6059f   driver rndis_host   bus-info usb-0000:48:00.3-1.1
+#     Link detected: yes   IPv4 169.254.3.1/24   Gateway: -   -> NO_GATEWAY
+#
+# 它是主板上 BMC 通过 USB 暴露给操作系统的**带内管理通道**，不是这台机器
+# 要交付给客户的网口。它那头没有 DHCP 服务器，所以永远拿不到网关，自己配一个
+# 169.254 的链路本地地址就完事 —— 于是**每一台带 BMC 的机器都会被我们自己
+# 刷一条「网卡连通性 WARN」**，还会让"共 N 个物理网口"多数一个。
+#
+# 判据两条，命中任意一条就不参与判定：
+#   1. 挂在 USB 总线上（/sys/class/net/X/device/subsystem -> .../bus/usb）
+#   2. 驱动是 RNDIS / CDC 那一族（BMC 虚拟网口、USB 网卡都走这几个驱动）
+# 第 2 条是给"读不到 subsystem"的内核兜底的，两条各自都能单独成立。
+#
+# 出厂测试台上不存在"必须靠 USB 网卡上网"的场景，所以 USB 口一律不参与判定；
+# 但它**照样采集、照样进清单**（标注成虚拟口），不然现场会以为我们漏了一个口。
+#
+# net_iface_is_virtual <总线名> <驱动名> -> 返回 0 = 虚拟口
+# 抽成纯函数便于脱机回归测试，见 tests/test-hw-checks.sh
+net_iface_is_virtual() {
+  local bus="${1:-}" drv="${2:-}"
+  [[ "$bus" == "usb" ]] && return 0
+  case "$drv" in
+    rndis_host|cdc_ether|cdc_ncm|cdc_eem|cdc_subset|cdc_mbim|usbnet|ipheth|qmi_wwan)
+      return 0 ;;
+  esac
+  return 1
+}
+
+# 从 sysfs 读某个口挂在哪条总线上 / 用的什么驱动，读不到给空串
+net_iface_bus() {
+  local p; p="$(readlink -f "/sys/class/net/${1:-}/device/subsystem" 2>/dev/null)"
+  [[ -n "$p" ]] && basename "$p" || printf ''
+}
+net_iface_driver() {
+  local p; p="$(readlink -f "/sys/class/net/${1:-}/device/driver" 2>/dev/null)"
+  [[ -n "$p" ]] && basename "$p" || printf ''
+}
+
+# 所有带 device 节点的口（跳过 lo 和 bond/vlan/veth 之类的纯软件口）。
+# 虚拟口也在里面 —— 采集要用它，判定不用。
+net_all_ifaces() {
   local n ifn
   for n in /sys/class/net/*; do
     [[ -e "$n" ]] || continue
@@ -78,6 +130,26 @@ net_phys_ifaces() {
     [[ -e "$n/device" ]] || continue
     printf '%s\n' "$ifn"
   done
+}
+
+# 参与判定的物理网口列表
+net_phys_ifaces() {
+  local ifn
+  while read -r ifn; do
+    [[ -n "$ifn" ]] || continue
+    net_iface_is_virtual "$(net_iface_bus "$ifn")" "$(net_iface_driver "$ifn")" && continue
+    printf '%s\n' "$ifn"
+  done < <(net_all_ifaces)
+}
+
+# 不参与判定的虚拟口列表（BMC 虚拟网口、USB 网卡），只用来在清单里标注
+net_virtual_ifaces() {
+  local ifn
+  while read -r ifn; do
+    [[ -n "$ifn" ]] || continue
+    net_iface_is_virtual "$(net_iface_bus "$ifn")" "$(net_iface_driver "$ifn")" \
+      && printf '%s\n' "$ifn"
+  done < <(net_all_ifaces)
 }
 
 # 把所有物理口拉起来，然后统一等一次载波。
@@ -194,6 +266,33 @@ net_release() {
 # 真正用哪个口测连通性、拿哪个口的地址，交给后面 collect_all 里的 net_test()
 # 正式再做一遍（那才是写进报告的结论）；这里只是"顺手蹭一次网"，
 # 所以拿到时间就退出，不用把每个口都测一遍。
+
+# ---------------------------------------------------------------- 时间源候选
+#
+# ⚠️⚠️ **只往公网 NTP 拨是不够的 —— 1.9.7 现场那台 7542 就是这么栽的。**
+# 那台机器网是通的（eno1 拿到 192.168.110.147、ping 网关 4/4 通、0.525ms），
+# 但**那个网出不了公网**，于是 ntp.aliyun.com / cn.pool.ntp.org /
+# time.cloudflare.com 三个全部拨不通，报告日期停在一个八个月前的假日期上。
+#
+# 内网机器才是工厂里的常态，所以候选源按"由近及远"排：
+#   1. DHCP 下发的 NTP 服务器（option 42）—— 企业网基本都配了，最靠谱
+#   2. 默认网关自己 —— 绝大多数企业网关/路由器本身就应答 NTP
+#   3. 配置里那几个公网源 —— 只有真能出公网时才轮得到
+# 全都不成还有第 4 条退路，见 sync_clock_from_bmc。
+#
+# net_dhcp_ntp_servers -> DHCP 租约里带回来的 NTP 服务器，一行一个
+# dhclient 的默认 request 列表里本来就有 ntp-servers，不用改配置。
+# 抽成纯函数便于脱机回归测试（传文件路径进来），见 tests/test-hw-checks.sh
+net_dhcp_ntp_servers() {
+  local f="${1:-/var/lib/dhcp/dhclient.leases}"
+  [[ -f "$f" ]] || return 0
+  # option ntp-servers 10.0.0.1, 10.0.0.2;
+  grep -aoE 'option ntp-servers[^;]*' "$f" 2>/dev/null \
+    | sed -E 's/option ntp-servers[[:space:]]*//' \
+    | tr ',' '\n' | tr -d ' \t' | grep -E '^[0-9]+(\.[0-9]+){3}$' | sort -u
+}
+
+# sync_clock_now [服务器...] —— 拿给定的服务器拨一次。不给就用配置里那几个。
 sync_clock_now() {
   have chronyd || { dbg "clock sync: no chronyd on this media"; return 1; }
 
@@ -204,8 +303,12 @@ sync_clock_now() {
   #     Fatal error : Could not parse server directive at line 1
   # 秒退——也就是说校时**从来就没跑起来过**，现场日志里那句"1 秒就放弃"
   # 不是网络不通，是这里参数传错了。（在 WSL 里两种写法对比实测过。）
+  local cand=("$@")
+  (( ${#cand[@]} == 0 )) && cand=("${NET_TIME_SERVERS[@]}")
+  (( ${#cand[@]} == 0 )) && return 1
+
   local args=() srv
-  for srv in "${NET_TIME_SERVERS[@]}"; do
+  for srv in "${cand[@]}"; do
     args+=("server $srv iburst maxsamples 1")
   done
 
@@ -214,39 +317,110 @@ sync_clock_now() {
   # 由 factory-test.sh 在 RUN_DIR 就绪后搬进 raw/。
   local log="${KLB_CLOCK_LOG:-/tmp/klburn-clocksync.log}"
   {
-    printf '=== %s try sync via %s ===\n' "$(date '+%F %T')" "${NET_TIME_SERVERS[*]}"
+    printf '=== %s try sync via %s ===\n' "$(date '+%F %T')" "${cand[*]}"
   } >> "$log" 2>/dev/null
   timeout "$NET_TIME_SYNC_TIMEOUT" chronyd -q "${args[@]}" >> "$log" 2>&1
 }
 
-try_sync_clock_via_network() {
-  local ifn total=0
-  while read -r ifn; do [[ -n "$ifn" ]] && total=$((total+1)); done < <(net_phys_ifaces)
-  if (( total == 0 )); then
-    dbg "clock sync: no physical NIC, skip"
+# ---------------------------------------------------------------- 退到 BMC 的时钟
+#
+# 一根网线都没接的机器（工厂里大多数）永远走不到 NTP 那一步，但**机器上还有
+# 一个一直在走的时钟：BMC**。它自带电池、独立于主板 RTC，绝大多数机器上
+# 装机时就对过一次，比一个"每次开机都回退到同一个时间点"的死 RTC 靠谱得多。
+#
+# ⚠️ 但它也**不保证准**（客户从没配过 BMC 时间的机器也见得到），所以：
+#   * 只在网络校时失败之后才用
+#   * 明显不合理的值一律不采信 —— 比这张介质的构建日期还早的时间，
+#     和现在这个坏 RTC 一样没有价值，采信了反而更坏事：
+#     一个"看着像正经日期"的错时间，比一个一眼假的错时间更难被发现
+#   * 用了就把来源记下来（CLOCK_SOURCE），报告里如实写明
+sync_clock_from_bmc() {
+  have ipmitool || { dbg "clock sync: no ipmitool on this media"; return 1; }
+  local log="${KLB_CLOCK_LOG:-/tmp/klburn-clocksync.log}" raw ts now_epoch min_epoch
+
+  # ⚠️ 这一步跑在 collect_ipmi **之前**（校时必须在算 RUN_STAMP 之前做），
+  #    那两个模块还没人加载过 —— 不在这儿自己 modprobe 一次的话，
+  #    ipmitool 一定报 "Could not open device at /dev/ipmi0"，这条退路等于没写。
+  modprobe ipmi_devintf >/dev/null 2>&1 || true
+  modprobe ipmi_si      >/dev/null 2>&1 || true
+
+  raw="$(timeout 20 ipmitool sel time get 2>/dev/null | tr -d '\r' | head -1)"
+  printf '=== %s BMC clock reads: %s ===\n' "$(date '+%F %T')" "${raw:-<none>}" \
+    >> "$log" 2>/dev/null
+  [[ -n "$raw" ]] || return 1
+
+  # ipmitool 给的是 "MM/DD/YYYY HH:MM:SS"，date 认不了这个顺序，转成 ISO 再喂
+  ts="$(printf '%s' "$raw" | awk '
+    match($0, /[0-9]{2}\/[0-9]{2}\/[0-9]{4} [0-9]{2}:[0-9]{2}:[0-9]{2}/) {
+      s = substr($0, RSTART, RLENGTH)
+      split(s, a, " "); split(a[1], d, "/")
+      printf "%s-%s-%s %s", d[3], d[1], d[2], a[2]
+    }')"
+  [[ -n "$ts" ]] || return 1
+
+  now_epoch="$(date -d "$ts" +%s 2>/dev/null)" || return 1
+  [[ "$now_epoch" =~ ^[0-9]+$ ]] || return 1
+  # 比介质构建日期还早的一律不采信（判据和 factory-test.sh 里那条一致）
+  min_epoch="$(date -d "${BUILD_DATE:-2020-01-01}" +%s 2>/dev/null || echo 0)"
+  if [[ "$min_epoch" =~ ^[0-9]+$ ]] && (( now_epoch < min_epoch )); then
+    printf '    rejected: BMC clock is older than this media build date\n' >> "$log" 2>/dev/null
     return 1
   fi
 
-  info "Checking for network access to sync the clock (best-effort) ..."
-  net_link_up_all
+  date -s "$ts" >> "$log" 2>&1 || return 1
+  hwclock -w >/dev/null 2>&1 || true
+  return 0
+}
+
+try_sync_clock_via_network() {
+  # 这一轮的时间是从哪来的，报告里要如实写明。取值：
+  #   network / bmc / rtc
+  CLOCK_SOURCE="rtc"
+
+  local ifn total=0
+  while read -r ifn; do [[ -n "$ifn" ]] && total=$((total+1)); done < <(net_phys_ifaces)
 
   local synced=0
-  while read -r ifn; do
-    [[ -n "$ifn" ]] || continue
-    [[ "$(cat "/sys/class/net/$ifn/carrier" 2>/dev/null)" == "1" ]] || continue
-
-    if net_dhcp "$ifn" && sync_clock_now; then
-      synced=1
-    fi
-    net_release "$ifn"
-    (( synced )) && break
-  done < <(net_phys_ifaces)
-
-  if (( synced )); then
-    ok "System clock synced via network: $(date '+%Y-%m-%d %H:%M %Z')"
+  if (( total == 0 )); then
+    dbg "clock sync: no physical NIC, skip to BMC"
   else
-    warn "No network time source reached - keeping BIOS/RTC clock as-is."
+    info "Checking for network access to sync the clock (best-effort) ..."
+    net_link_up_all
+
+    while read -r ifn; do
+      [[ -n "$ifn" ]] || continue
+      net_iface_has_carrier "$ifn" || continue
+      net_dhcp "$ifn" || { net_release "$ifn"; continue; }
+
+      # 候选源由近及远，见 net_dhcp_ntp_servers 上面那段说明。
+      # 一次只拨一档：拨得通就收工，省得在没有公网的现场白等三次超时。
+      local cand=() gw srv
+      while read -r srv; do [[ -n "$srv" ]] && cand+=("$srv"); done \
+        < <(net_dhcp_ntp_servers)
+      gw="$(net_parse_gateway "$(ip -4 route show default dev "$ifn" 2>/dev/null)")"
+      [[ -n "$gw" ]] && cand+=("$gw")
+      cand+=("${NET_TIME_SERVERS[@]}")
+
+      for srv in "${cand[@]}"; do
+        if sync_clock_now "$srv"; then synced=1; CLOCK_SOURCE="network"; break; fi
+      done
+
+      net_release "$ifn"
+      (( synced )) && break
+    done < <(net_phys_ifaces)
   fi
+
+  # 一根网线都没接、或者内网也没有任何 NTP —— 还有 BMC 那个一直在走的时钟
+  if (( synced == 0 )) && sync_clock_from_bmc; then
+    synced=1
+    CLOCK_SOURCE="bmc"
+  fi
+
+  case "$CLOCK_SOURCE" in
+    network) ok "System clock synced from network: $(date '+%Y-%m-%d %H:%M %Z')" ;;
+    bmc)     ok "System clock taken from the BMC: $(date '+%Y-%m-%d %H:%M %Z')" ;;
+    *)       warn "No usable time source - keeping BIOS/RTC clock as-is." ;;
+  esac
   return $(( synced ? 0 : 1 ))
 }
 
@@ -333,20 +507,42 @@ nic_current_mbps() {
 #        Link test   (on/offline) 1    Link test   (on/offline) 0
 #                                 ^ 唯一不同的就是这一项
 #
-#    所以这里必须把子项拆开看：**只有非 link 子项不通过才算硬件故障**。
+#    所以这里必须把子项拆开看：**只有非「网线相关」子项不通过才算硬件故障**。
 #    「现场没接网线」是二号红线点名的场景，判 FAIL 就是把好机器拦在出货前。
 #
+# ⚠️⚠️⚠️ **1.9.7 现场又栽了一次，同一个坑的第二个入口。**
+#    那台 7542 上的 ConnectX-5（mlx5_core）两个口都没插网线，报告写着
+#    「2 个网口自带的自检未通过，说明该网口存在硬件故障，需更换或返修」，
+#    直接卡住出货。mlx5 的子项名字和 Intel 完全不一样：
+#
+#        Link Test        1   ← 名字里有 link，1.9.2 认得
+#        Speed Test       1   ← **名字里没有 link，被当成了硬件故障**
+#        Health Test      0
+#        Loopback Test  -95   ← 驱动返回 -EOPNOTSUPP，非 0，也被当成了失败
+#
+#    内核里 mlx5e_test_link_speed() 头一句就是 `if (!netif_carrier_ok()) return 1`
+#    —— 它和 Link Test 一样是**没插网线必然不通过**的。所以这一版做了四件事，
+#    每一件单独都能挡住这次的误判，四件一起是为了下一个厂家的下一个名字：
+#
+#      1. 名字里带 link / speed / cable 的，一律归到「网线相关」那一档
+#      2. **负数一律当成"驱动跑不了这一子项"**，不是失败（一号红线：
+#         能力缺失 ≠ 硬件故障）。ethtool 直接把驱动的返回码填进结果数组，
+#         -95 是 EOPNOTSUPP、-22 是 EINVAL，都是"没做这项"而不是"这项没过"
+#      3. 自检前先把网口 up 起来（见 check_nic_selftest）—— mlx5 的回环自检
+#         在口 down 的时候压根不跑，直接返回 -EOPNOTSUPP
+#      4. 兜底：**没插网线的口，任何情况下都不判 FAIL**（见 check_nic_selftest）
+#
 # nic_selftest_subtests <ethtool -t 的输出文件>
-#   -> "<非 link 子项失败数> <link 子项失败数>"
+#   -> "<硬件子项失败数> <网线相关子项失败数> <驱动跑不了的子项数>"
 #
 # 子项明细的格式各家驱动不完全一样，共同点是"名字在前、数值在最后一个字段，
 # 0 表示这一项通过"：
 #     Register test  (offline)\t 0     ← intel ixgbe / igb / i40e / e1000e
 #     Link Test                  0     ← mlx5 / bnxt 这类不带括号的
-# 所以按"最后一个字段是数值"来认，名字里带 link 的归到 link 那一档。
+# 所以按"最后一个字段是数值"来认。
 nic_selftest_subtests() {
   local f="${1:-}"
-  [[ -s "$f" ]] || { printf '0 0'; return; }
+  [[ -s "$f" ]] || { printf '0 0 0'; return; }
   awk '
     /[Tt]he test extra info/ { inx = 1; next }
     !inx { next }
@@ -359,34 +555,50 @@ nic_selftest_subtests() {
       v = line; sub(/^.* /, "", v)
       if (v !~ /^-?[0-9]+$/) next          # 读不出数值的行让开，不猜
       if (v + 0 == 0) next                 # 0 = 这一子项通过
+      if (v + 0 <  0) { nosup++; next }    # 负数 = 驱动没跑这一项，不是失败
       name = line; sub(/ [^ ]*$/, "", name)
-      if (tolower(name) ~ /link/) link++; else hw++
+      # 这三个词都是"要有网线、有对端才能过"的子项。mlx5 的 Speed Test
+      # 在没有载波时和 Link Test 一样直接返回 1，见上面那段说明。
+      if (tolower(name) ~ /link|speed|cable/) link++; else hw++
     }
-    END { printf "%d %d", hw + 0, link + 0 }
+    END { printf "%d %d %d", hw + 0, link + 0, nosup + 0 }
   ' "$f" 2>/dev/null
 }
 
-# nic_selftest_verdict <ethtool -t 的输出文件> -> pass | fail | link_only | unsupported
+# nic_selftest_verdict <ethtool -t 的输出文件>
+#   -> pass | fail | link_only | nosupport_only | unknown_fail | unsupported
+#
+#   fail            确实有硬件子项没过
+#   link_only       只有网线相关子项没过 = 没插网线，卡本身是好的
+#   nosupport_only  没过的全是驱动跑不了的子项 = 能力缺失，不是故障
+#   unknown_fail    卡自己说 FAIL，但一条子项明细都拆不出来 —— 拆不开就
+#                   **不知道**是网线还是硬件，交给调用方按有没有载波来定
 nic_selftest_verdict() {
   local f="${1:-}"
   [[ -s "$f" ]] || { printf 'unsupported'; return; }
   # 先认 FAIL：`The test result is FAIL` 里也有 "test result is"，
   # 顺序反了会把失败读成通过。
   if grep -aqiE 'The test result is[[:space:]]+FAIL' "$f" 2>/dev/null; then
-    local hw_bad link_bad
-    read -r hw_bad link_bad < <(nic_selftest_subtests "$f")
+    local hw_bad link_bad nosup
+    read -r hw_bad link_bad nosup < <(nic_selftest_subtests "$f")
     [[ "$hw_bad"   =~ ^[0-9]+$ ]] || hw_bad=0
     [[ "$link_bad" =~ ^[0-9]+$ ]] || link_bad=0
+    [[ "$nosup"    =~ ^[0-9]+$ ]] || nosup=0
     (( hw_bad   > 0 )) && { printf 'fail'; return; }
     (( link_bad > 0 )) && { printf 'link_only'; return; }
-    # 卡自己说失败，但一条子项明细都拆不出来（驱动没打那一段）——
-    # 这时我们没有任何证据说明那是网线的事，照卡自己的结论走。
-    printf 'fail'; return
+    (( nosup    > 0 )) && { printf 'nosupport_only'; return; }
+    printf 'unknown_fail'; return
   fi
   if grep -aqiE 'The test result is[[:space:]]+PASS' "$f" 2>/dev/null; then
     printf 'pass'; return
   fi
   printf 'unsupported'
+}
+
+# 这个口现在有没有载波（插没插网线）。读不到一律当"没插"—— 保守的那一边
+# 是"不判故障"，正好是二号红线要的方向。
+net_iface_has_carrier() {
+  [[ "$(cat "/sys/class/net/${1:-}/carrier" 2>/dev/null)" == "1" ]]
 }
 
 check_nic_selftest() {
@@ -402,7 +614,14 @@ check_nic_selftest() {
   info "Running on-NIC self-test on ${#ifaces[@]} port(s) ..."
   mkdir -p "$RAW_DIR/nic" 2>/dev/null || true
 
-  local n_pass=0 n_fail=0 n_unsup=0 n_link=0 bad="" nolink="" v f
+  # ⚠️ 先把口 up 起来再自检。**口是 down 的时候，回环这类自检根本不跑** ——
+  # mlx5 直接返回 -EOPNOTSUPP，一整条子项白丢。这里只 up、不等载波
+  # （等载波是 net_link_up_all 的事，它在自检之后还会再跑一遍）。
+  for ifn in "${ifaces[@]}"; do ip link set "$ifn" up 2>/dev/null || true; done
+  sleep 2
+
+  local n_pass=0 n_fail=0 n_unsup=0 n_link=0 n_retest=0
+  local bad="" nolink="" retest="" v f
   for ifn in "${ifaces[@]}"; do
     f="$RAW_DIR/nic/${ifn}-selftest.txt"
     # 有的驱动只实现 online 自检；offline 不支持时退一步再试一次。
@@ -413,9 +632,26 @@ check_nic_selftest() {
         timeout 90 ethtool -t "$ifn" online 2>&1 || true; } >> "$f"
     fi
     v="$(nic_selftest_verdict "$f")"
+
+    # ⚠️⚠️ **最后一道兜底：没插网线的口，不判 FAIL。**
+    #
+    # 上面已经按子项名字把"网线相关"的挑出去了，但那份名单是按我们见过的
+    # 驱动列的 —— 下一个厂家换一个名字（"Cable Test"？"PHY Test"？）
+    # 我们又会把一台好机器判成"需更换或返修"。而"没插网线"是工厂里的常态，
+    # 误判的代价是拦住一整批出货，漏判的代价只是少查一个没接线的口。
+    #
+    # 所以：口上没有载波时，把 fail / unknown_fail 一律降级成"要接线复测"。
+    # 这不是把结论藏起来 —— 报告里照样写明是哪个口、请接上网线重测一次。
+    if [[ "$v" == "fail" || "$v" == "unknown_fail" ]] && ! net_iface_has_carrier "$ifn"; then
+      printf '\n(no carrier on this port - verdict not conclusive, see lib/network.sh)\n' >> "$f"
+      v="retest"
+    fi
+    [[ "$v" == "unknown_fail" ]] && v="fail"   # 有载波还说不清，照卡自己的结论走
+
     case "$v" in
       pass)      n_pass=$(( n_pass + 1 )) ;;
       link_only) n_link=$(( n_link + 1 )); nolink="${nolink}${nolink:+、}${ifn}" ;;
+      retest)    n_retest=$(( n_retest + 1 )); retest="${retest}${retest:+、}${ifn}" ;;
       fail)      n_fail=$(( n_fail + 1 )); bad="${bad}${bad:+、}${ifn}" ;;
       *)         n_unsup=$(( n_unsup + 1 )) ;;
     esac
@@ -427,14 +663,21 @@ check_nic_selftest() {
   if (( n_fail > 0 )); then
     result_add "check_nic_selftest" "网卡自检" "$ST_FAIL" \
       "${n_fail} 个网口自带的自检未通过（${bad}）。这是网卡自身给出的结论，\
-且未通过的不是依赖网线的链路项，说明该网口存在硬件故障，需更换或返修后复测。" "raw/nic/"
+该口已接网线、未通过的也不是依赖网线的检查项，说明该网口存在硬件故障，需更换或返修后复测。" "raw/nic/"
+  elif (( n_retest > 0 )); then
+    # 卡自己说没过，但那个口没接网线 —— 拆不出是网线还是卡的问题。
+    # 判 WARN 不判 FAIL：拦住一整批好机器，比漏查一个没接线的口糟得多。
+    result_add "check_nic_selftest" "网卡自检" "$ST_WARN" \
+      "${n_retest} 个网口（${retest}）的自检未通过，但这几个口**现场没有接网线**。\
+网卡自检里有若干项要靠网线与对端设备才能完成，没接线时必然不通过，\
+无法据此判断网卡本身好坏。如需确认，请给这几个口接上网线后重测一次${extra}" "raw/nic/"
   elif (( n_link > 0 )); then
-    # 卡上的硬件项全过了，只有「链路」这一子项没过 = 那个口没接网线。
+    # 卡上的硬件项全过了，只有依赖网线的那几个子项没过 = 那个口没接网线。
     # 二号红线：现场没接网线不是硬件故障。
     result_add "check_nic_selftest" "网卡自检" "$ST_PASS" \
       "$(( n_pass + n_link )) 个网口的卡上自检项（寄存器 / EEPROM / 中断 / 回环）全部通过，\
-未发现硬件故障。其中 ${n_link} 个网口（${nolink}）的「链路」子项未通过 —— \
-该子项查的是网线与对端设备，现场未接网线时必然不通过，与网卡本身好坏无关${extra}" \
+未发现硬件故障。其中 ${n_link} 个网口（${nolink}）的「链路 / 协商速率」子项未通过 —— \
+这几项查的是网线与对端设备，现场未接网线时必然不通过，与网卡本身好坏无关${extra}" \
       "raw/nic/"
   elif (( n_pass > 0 )); then
     result_add "check_nic_selftest" "网卡自检" "$ST_PASS" \
@@ -526,6 +769,9 @@ net_test() {
         gw="$(net_parse_gateway "$(ip -4 route show default dev "$ifn" 2>/dev/null)")"
         # 有些 DHCP 只给地址不给默认路由，再从该口的普通路由里找一次
         [[ -n "$gw" ]] || gw="$(net_parse_gateway "$(ip -4 route show dev "$ifn" 2>/dev/null)")"
+
+        # 自己编的 169.254 地址不算拿到租约，见 net_addr_is_linklocal
+        net_addr_is_linklocal "${ip4%%/*}" && ip4=""
 
         if [[ -z "$ip4" ]]; then
           res="NO_DHCP"

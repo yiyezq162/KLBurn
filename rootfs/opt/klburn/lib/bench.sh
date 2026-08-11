@@ -952,11 +952,14 @@ bench_disk_bandwidth() {
   #    写那一列整个不画，标题也就只写「顺序读」）—— 两边用同一个判据拼，
   #    否则这句话会指向一个报告里根本不存在的小节。
   #    tests/test-report-render.sh 有一条"每个「见下方「X」」都得有对应标题"钉着。
-  local scope="顺序读" secname="硬盘顺序读带宽"
+  # ⚠️ 括号里那句耗时也得跟着方向数走。只测了读的时候写「每块每个方向各 20 秒」，
+  #    同一句话里前半句说只测了顺序读、后半句冒出个"每个方向"，自相矛盾
+  #    （1.9.7 那份硬盘专项报告里就是这样印出去的）。
+  local scope="顺序读" secname="硬盘顺序读带宽" how="每块 ${secs} 秒"
   if (( write_ok == 1 )); then
-    scope="顺序读与顺序写"; secname="硬盘顺序读写带宽"
+    scope="顺序读与顺序写"; secname="硬盘顺序读写带宽"; how="每块每个方向各 ${secs} 秒"
   fi
-  local detail="对 ${n} 块硬盘逐块测量 128KB 大块${scope}带宽（每块每个方向各 ${secs} 秒），\
+  local detail="对 ${n} 块硬盘逐块测量 128KB 大块${scope}带宽（${how}），\
 逐盘数值见下方「${secname}」"
 
   if (( write_ok == 1 )); then

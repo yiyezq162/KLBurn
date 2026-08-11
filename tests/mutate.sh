@@ -159,6 +159,11 @@ MUTATIONS=(
 "flops-only-best${S}算力只认末尾那行汇总（被超时打断时把已经量到的成绩白扔，平白判 SKIP）${S}test-log-parsing${S}$RT/lib/bench.sh${S}mut_flops_only_best"
 "scope-missing-as-pass${S}选了显卡专测却没有显卡时不再判 FAIL（一项没测的机器拿到绿色 PASS）${S}test-hw-checks${S}$RT/factory-test.sh${S}mut_scope_missing_as_pass"
 "scope-missing-blames-hw${S}缺部件那条 FAIL 套用「不建议出货」（把一台好机器说成硬件有毛病）${S}test-report-render${S}$RT/report/generate_report.py${S}mut_scope_missing_blames_hw"
+"scope-burn-skipped-green${S}选了硬盘专项、硬盘压测却被跳过，报告仍打绿色 PASS（把「没测」包装成「通过」）${S}test-report-render${S}$RT/report/generate_report.py${S}mut_scope_burn_skipped_green_pass"
+"scope-filter-hides-bad${S}范围裁剪把 WARN / FAIL 也一起藏掉（有毛病的机器拿到一份干净的专项报告）${S}test-report-render${S}$RT/report/generate_report.py${S}mut_scope_filter_hides_bad"
+"pcie-idle-snapshot${S}PCIe 链路退回拿一次空闲快照判定（同一张卡六轮四轮误报）${S}test-hw-checks${S}$RT/lib/collect.sh${S}mut_pcie_idle_snapshot_verdict"
+"nic-selftest-nolink-fail${S}没插网线的口自检失败照样判 FAIL（1.9.2 和 1.9.7 各栽过一次）${S}test-hw-checks${S}$RT/lib/network.sh${S}mut_nic_selftest_nolink_fails"
+"bmc-virtual-nic-judged${S}BMC 的 USB 虚拟网口重新进判定（每台带 BMC 的机器都被刷一条 WARN）${S}test-hw-checks${S}$RT/lib/network.sh${S}mut_bmc_virtual_nic_judged"
 )
 
 # ================================================================
@@ -1022,8 +1027,53 @@ mut_disk_scope_skips_confirm() {
 # 那一轮一个压测都没跑、一个部件都没验过 —— 这是把"没测"包装成"通过"。
 mut_info_scope_green_pass() {
   replace_line "$RT/report/generate_report.py" \
-    '    if scope_of(meta) == "info" and overall == "PASS":' \
+    '    if overall == "PASS" and scope == "info":' \
     '    if False:'
+}
+
+# 1.9.8：选了硬盘专项、硬盘压测却是 SKIP 的那一轮，报告仍然打绿色 PASS。
+# 现场真跑出来过（破坏性写确认等了 120 秒无人应答，按默认跳过）——
+# 和 info 档、和"部件不在这台机器上"是同一类：把"没测"包装成"通过"。
+mut_scope_burn_skipped_green_pass() {
+  replace_line "$RT/report/generate_report.py" \
+    '    elif overall == "PASS" and target_burn_skipped:' \
+    '    elif False:'
+}
+
+# 1.9.8：范围过滤把 WARN / FAIL 也一起藏掉。
+# 藏掉一条 FAIL = 报告打着红色大字、底下却找不到任何理由；
+# 藏掉一条 WARN = 一台有真实告警的机器拿着一份干净的专项报告出厂。
+mut_scope_filter_hides_bad() {
+  replace_line "$RT/report/generate_report.py" \
+    '             if r.get("status") in ("FAIL", "WARN")' \
+    '             if False'
+}
+
+# 1.9.8：PCIe 链路判定退回"拿一次空闲快照定生死"。
+# 现场实测同一张 4090 六轮里四轮读到 2.5GT/s、两轮读到 16GT/s ——
+# 硬件没动过，判定却是掷骰子。这条守的是"判据必须是全程最好的一次读数"。
+mut_pcie_idle_snapshot_verdict() {
+  replace_line "$RT/lib/collect.sh" \
+    '    read -r bsp bw nsmp < <(pcie_link_best "$samples" "$bdf")' \
+    '    read -r bsp bw nsmp <<< "0 0 1"'
+}
+
+# 1.9.8：没插网线的口，网卡自检失败照样判 FAIL。
+# 1.9.2 和 1.9.7 各栽过一次（Intel 的 Link test、mlx5 的 Speed Test），
+# 两次都是把一整批好机器拦在出货前。这条是那道兜底。
+mut_nic_selftest_nolink_fails() {
+  replace_line "$RT/lib/network.sh" \
+    '    if [[ "$v" == "fail" || "$v" == "unknown_fail" ]] && ! net_iface_has_carrier "$ifn"; then' \
+    '    if false; then'
+}
+
+# 1.9.8：BMC 的 USB 虚拟网口重新进判定。
+# 它那头没有 DHCP 服务器、永远拿不到网关 —— 放回来就是每台带 BMC 的机器
+# 都被我们自己刷一条「网卡连通性 WARN」。
+mut_bmc_virtual_nic_judged() {
+  replace_line "$RT/lib/network.sh" \
+    '  [[ "$bus" == "usb" ]] && return 0' \
+    '  [[ "$bus" == "ZZ_NEVER" ]] && return 0'
 }
 
 # 同一件事在现场那块屏幕上的版本。两处各有各的守卫，缺一处就漏一半。

@@ -678,19 +678,28 @@ nic_pci_model() {
 
 collect_nic() {
   info "Collecting NIC info ..."
-  local n count=0
+  local ifn n count=0 vcount=0 vlist=""
   : > "$RAW_DIR/nic-summary.txt"
 
-  for n in /sys/class/net/*; do
-    local ifn; ifn="$(basename "$n")"
-    [[ "$ifn" == "lo" ]] && continue
-    [[ -e "$n/device" ]] || continue     # 跳过虚拟接口
-    count=$((count+1))
+  # BMC 的 USB 虚拟网口照样采集、照样落 raw（现场会想知道那个口是什么），
+  # 但**不计入"共 N 个物理网口"，也不参与任何判定** —— 见 lib/network.sh
+  # 里 net_iface_is_virtual 那一大段。
+  while read -r ifn; do
+    [[ -n "$ifn" ]] || continue
+    n="/sys/class/net/$ifn"
+    local virt=0
+    if net_iface_is_virtual "$(net_iface_bus "$ifn")" "$(net_iface_driver "$ifn")"; then
+      virt=1; vcount=$((vcount+1)); vlist="${vlist}${vlist:+、}${ifn}"
+    else
+      count=$((count+1))
+    fi
     {
       printf '===== %s =====\n' "$ifn"
       printf 'MAC        : %s\n' "$(cat "$n/address" 2>/dev/null)"
       printf 'OperState  : %s\n' "$(cat "$n/operstate" 2>/dev/null)"
       printf 'Speed      : %s Mb/s\n' "$(cat "$n/speed" 2>/dev/null || echo 'n/a')"
+      # 报告生成器读这一行来决定这个口要不要标注成"不参与判定"
+      printf 'Virtual    : %s\n' "$( (( virt )) && echo yes || echo no )"
       printf '\n'
     } >> "$RAW_DIR/nic-summary.txt"
 
@@ -708,12 +717,17 @@ collect_nic() {
     busaddr="$(awk -F': ' '/^bus-info:/{print $2}' "$RAW_DIR/nic/${ifn}-driver.txt" 2>/dev/null)"
     pciname="$(nic_pci_model "$busaddr" "$RAW_DIR/lspci.txt")"
     [[ -n "$pciname" ]] && printf 'model: %s\n' "$pciname" >> "$RAW_DIR/nic/${ifn}-driver.txt"
-  done
+  done < <(net_all_ifaces)
+
+  local vtxt=""
+  (( vcount > 0 )) && vtxt="；另有 ${vcount} 个管理控制器提供的虚拟网口（${vlist}），\
+它不是这台机器对外的网口，不参与判定"
 
   if (( count > 0 )); then
-    result_add "collect_nic" "网卡" "$ST_PASS" "共 ${count} 个物理网口，已采集型号/固件/协商速率/链路状态" "raw/nic-summary.txt"
+    result_add "collect_nic" "网卡" "$ST_PASS" \
+      "共 ${count} 个物理网口，已采集型号/固件/协商速率/链路状态${vtxt}" "raw/nic-summary.txt"
   else
-    result_add "collect_nic" "网卡" "$ST_WARN" "未发现物理网口" ""
+    result_add "collect_nic" "网卡" "$ST_WARN" "未发现物理网口${vtxt}" ""
   fi
 }
 
@@ -1330,15 +1344,94 @@ pcie_slot_map() {
   ' "$dmi" "$vv"
 }
 
-# 判 WARN 不判 FAIL，两个理由：
-#   1. 空闲时降速是正常的电源管理行为 —— N 卡尤其明显，没负载时会自己掉到
-#      Gen1，一加载就回满。采集是在空闲状态做的，判 FAIL 会误杀一大片。
-#   2. x16 的卡插在 x8 槽上有时是机器设计如此（槽位本来就只有 x8 电气通道），
-#      不一定是装配错误。
+# ---------------------------------------------------------------- 全程复读链路
+#
+# ⚠️⚠️ **一次空闲快照根本不能当判据 —— 1.9.7 的现场数据把这件事钉死了。**
+#
+# 同一台 6530、同一张 4090、同一个 Slot9_CPU1，连着测六轮，采到的链路速率是：
+#     Full 16GT/s ｜ CPU 2.5 ｜ MEM 2.5 ｜ GPU 2.5 ｜ DISK 16 ｜ INFO 2.5
+# 宽度一直是 x16，只有速率在 2.5 和 16 之间跳。**硬件一个螺丝都没动过，
+# 判定结果却是掷骰子** —— N 卡空闲时自己掉到 Gen1 省电，`lspci -vv` 恰好
+# 撞上哪个状态就报哪个。1.9.7 之前的文案里还写着一句"空闲时降速属正常现象，
+# 请对照满载读数确认"—— 等于我们明知道这个读数不可信、还是拿它去吓客户，
+# 而且把"去核实"这件事推给了看报告的人。
+#
+# 所以改成：**整轮测试期间一直复读，判定只看全程最好的那一次读数。**
+# 空闲降速的设备一到加载就回满，自然就不再误报；真的没插到底 / 插在通道更少的
+# 槽位 / riser 信号差的卡，全程都回不到额定值，照样报出来。
+#
+# 读 sysfs 不读 lspci：`current_link_speed` / `current_link_width` 是内核直接
+# 暴露的两个文件，一次采样就是两次 read，5 秒一轮的开销可以忽略；而 lspci -vv
+# 要遍历整个配置空间，故障设备上还会卡到 PCIe 完成超时（0.3.0 实测卡过 94 秒）。
+#
+# pcie_sysfs_path <BDF> -> /sys/bus/pci/devices/ 下的路径
+# lspci 对 domain 0 的设备只打 "c8:00.0"，sysfs 里一律带 domain 前缀。
+pcie_sysfs_path() {
+  local bdf="${1:-}"
+  [[ "$bdf" =~ ^[0-9a-f]+:[0-9a-f]+\.[0-9a-f]+$ ]] && bdf="0000:${bdf}"
+  printf '/sys/bus/pci/devices/%s' "$bdf"
+}
+
+# pcie_link_read_now <BDF> -> "<BDF> <速率GT/s> <宽度>"，读不到就什么都不打印
+pcie_link_read_now() {
+  local bdf="${1:-}" d sp w
+  d="$(pcie_sysfs_path "$bdf")"
+  [[ -d "$d" ]] || return 0
+  # "16.0 GT/s PCIe" -> "16.0"；老内核可能只有 "8 GT/s"
+  sp="$(cat "$d/current_link_speed" 2>/dev/null)"; sp="${sp%%[[:space:]]GT/s*}"
+  w="$(cat "$d/current_link_width" 2>/dev/null)"
+  [[ "$sp" =~ ^[0-9]+(\.[0-9]+)?$ ]] || return 0
+  [[ "$w"  =~ ^[0-9]+$ ]] || return 0
+  printf '%s %s %s\n' "$bdf" "$sp" "$w"
+}
+
+# pcie_link_best <采样文件> <BDF> -> "<全程最好速率> <全程最好宽度> <采样条数>"
+# 一条采样都没有时给 "0 0 0"。抽成纯函数便于脱机回归测试。
+pcie_link_best() {
+  local f="${1:-}" bdf="${2:-}"
+  [[ -f "$f" ]] || { printf '0 0 0'; return; }
+  awk -v b="$bdf" '
+    $1 == b { n++; if ($2+0 > s+0) s = $2+0; if ($3+0 > w+0) w = $3+0 }
+    END { printf "%s %s %d", (s == "" ? 0 : s), (w == "" ? 0 : w), n+0 }
+  ' "$f" 2>/dev/null
+}
+
+PCIE_MON_PID=""
+pcie_link_monitor_start() {
+  local out="$RAW_DIR/pcie-link-samples.txt"
+  local bdfs=() bdf rest
+  while IFS='|' read -r bdf rest; do
+    [[ -n "$bdf" ]] && bdfs+=("$bdf")
+  done < <(pcie_link_scan)
+  (( ${#bdfs[@]} == 0 )) && { dbg "pcie link monitor: nothing to sample"; return 0; }
+
+  : > "$out"
+  (
+    while :; do
+      for bdf in "${bdfs[@]}"; do pcie_link_read_now "$bdf"; done >> "$out"
+      sleep 5
+    done
+  ) &
+  PCIE_MON_PID=$!
+  dbg "pcie link monitor started pid=$PCIE_MON_PID (${#bdfs[@]} endpoints)"
+}
+
+pcie_link_monitor_stop() {
+  [[ -n "$PCIE_MON_PID" ]] || return 0
+  kill "$PCIE_MON_PID" 2>/dev/null || true
+  wait "$PCIE_MON_PID" 2>/dev/null || true
+  PCIE_MON_PID=""
+}
+
+# 判 WARN 不判 FAIL：x16 的卡插在 x8 槽上有时是机器设计如此
+# （槽位本来就只有 x8 电气通道），不一定是装配错误。
 # WARN 会在报告抬头单独列一块，该看见的看得见，又不会把好机器拦在出货前。
 #
 # **只判插槽上的扩展卡**（1.7.5 起）。板载的照样采、照样落进 raw/pcie-link.txt
 # 供工程排查，但不进客户报告 —— 理由见上面 pcie_slot_map 那一段。
+#
+# ⚠️ **必须排在压测之后调用**（见 factory-test.sh）：它要用上面那个采样器
+#    攒下来的加载态读数。排回 PHASE 1 就又变回"拿一次空闲快照判定"了。
 check_pcie_link() {
   info "Checking PCIe link width/speed ..."
 
@@ -1360,32 +1453,49 @@ check_pcie_link() {
     slot_of["$sb"]="$sw"; slot_name["$sb"]="$sn"
   done < <(pcie_slot_map)
 
-  local slot_total=0 board_total=0 degraded=() board_degraded=()
+  local samples="$RAW_DIR/pcie-link-samples.txt"
+  local slot_total=0 board_total=0 degraded=() board_degraded=() unjudged=()
   local bdf name capsp capw stasp staw
   : > "$RAW_DIR/pcie-link.txt"
   while IFS='|' read -r bdf name capsp capw stasp staw; do
     [[ -n "$bdf" ]] || continue
     local where="${slot_of[$bdf]:-unknown}"
+
+    # 全程最好的一次读数：空闲快照和采样器攒下来的加载态读数，取大的那个
+    local bsp bw nsmp
+    read -r bsp bw nsmp < <(pcie_link_best "$samples" "$bdf")
+    [[ "$nsmp" =~ ^[0-9]+$ ]] || nsmp=0
+    awk -v a="$stasp" -v b="$bsp" 'BEGIN{exit !(a+0 > b+0)}' && bsp="$stasp"
+    [[ "$staw" =~ ^[0-9]+$ ]] && (( staw > bw )) && bw="$staw"
+
     local why=""
     # 宽度是整数，直接比；速率带小数（2.5），交给 awk 比
-    if [[ "$staw" =~ ^[0-9]+$ && "$capw" =~ ^[0-9]+$ ]] && (( staw < capw )); then
-      why="宽度 x${staw}（额定 x${capw}）"
+    if [[ "$bw" =~ ^[0-9]+$ && "$capw" =~ ^[0-9]+$ ]] && (( bw > 0 && bw < capw )); then
+      why="宽度 x${bw}（额定 x${capw}）"
     fi
-    if awk -v a="$stasp" -v b="$capsp" 'BEGIN{exit !(a+0 < b+0 && a+0 > 0)}'; then
+    if awk -v a="$bsp" -v b="$capsp" 'BEGIN{exit !(a+0 < b+0 && a+0 > 0)}'; then
       [[ -n "$why" ]] && why="${why}、"
-      why="${why}速率 ${stasp}GT/s（额定 ${capsp}GT/s）"
+      why="${why}速率 ${bsp}GT/s（额定 ${capsp}GT/s）"
     fi
 
-    printf '%-12s %-8s %-22s cap=x%-3s %-6sGT/s  sta=x%-3s %-6sGT/s  %s\n' \
-      "$bdf" "$where" "${slot_name[$bdf]:--}" "$capw" "$capsp" "$staw" "$stasp" \
+    printf '%-12s %-8s %-22s cap=x%-3s %-6sGT/s  idle=x%-3s %-6sGT/s  best=x%-3s %-6sGT/s  n=%-4s %s\n' \
+      "$bdf" "$where" "${slot_name[$bdf]:--}" "$capw" "$capsp" \
+      "$staw" "$stasp" "$bw" "$bsp" "$nsmp" \
       "${why:-满足额定值}" >> "$RAW_DIR/pcie-link.txt"
 
     if [[ "$where" == "slot" ]]; then
       slot_total=$((slot_total+1))
       if [[ -n "$why" ]]; then
-        degraded+=("${bdf} ${name}：${why}")
         # metric 会进客户报告的「其他实测指标」，所以只记插槽上的
-        metric_add "pcie" "${bdf} 链路" "x${staw} ${stasp}GT/s / 额定 x${capw} ${capsp}GT/s"
+        metric_add "pcie" "${bdf} 链路" "x${bw} ${bsp}GT/s / 额定 x${capw} ${capsp}GT/s"
+        if (( nsmp > 0 )); then
+          degraded+=("${bdf} ${name}：${why}")
+        else
+          # 一次加载态读数都没有（本轮压根没跑到采样那一步）——
+          # 只有空闲快照的话，上面那段说明里的"掷骰子"问题原样还在，
+          # 不能拿它判 WARN。数值照报，判定让开。
+          unjudged+=("${bdf} ${name}：${why}")
+        fi
       fi
     else
       board_total=$((board_total+1))
@@ -1401,13 +1511,26 @@ check_pcie_link() {
     return
   fi
 
+  # 只有空闲读数、判不了的那几张，单独一句挂在结论后面（数值照报，不判）
+  local unj_txt=""
+  (( ${#unjudged[@]} > 0 )) && unj_txt="。另有 $(printf '%s；' "${unjudged[@]}")\
+这几张卡本轮只读到空闲状态下的链路读数 —— 空闲时主动降速是正常的省电行为，\
+加载后会自动回满，仅凭空闲读数无法判断，故本项不对它们作出结论"
+
   if (( ${#degraded[@]} > 0 )); then
     result_add "check_pcie_link" "PCIe 链路" "$ST_WARN" \
       "$(printf '%s；' "${degraded[@]}")共检查 ${slot_total} 张插槽上的扩展卡。\
-链路没跑到额定值会直接砍掉一半带宽，常见原因：卡没插到底、插在了电气通道更少的槽位、\
-转接板/riser 信号质量不好。注意空闲状态下部分设备（尤其是显卡）会主动降速省电，\
-加载后会自动回满，这种属于正常现象——请对照该设备满载时的读数确认。\
-（板载集成设备的链路宽度由主板走线决定，不属于装配问题，不参与本项判定。）" \
+以上为本轮测试全程持续复读中**最好的一次**读数（含设备满载期间），\
+已排除空闲降速这一正常的省电行为。链路没跑到额定值会直接砍掉一半带宽，\
+常见原因：卡没插到底、插在了电气通道更少的槽位、转接板/riser 信号质量不好，\
+建议重新插拔确认。（板载集成设备的链路宽度由主板走线决定，\
+不属于装配问题，不参与本项判定。）${unj_txt}" \
+      "raw/pcie-link.txt"
+  elif (( ${#unjudged[@]} > 0 )); then
+    # 达标的都达标了，剩下的只有"没有加载态读数、判不了"的那几张
+    result_add "check_pcie_link" "PCIe 链路" "$ST_PASS" \
+      "共检查 ${slot_total} 张插槽上的扩展卡，其余各张的链路宽度与速率均达到额定值\
+（板载集成设备的链路宽度由主板走线决定，不参与本项判定）${unj_txt}。" \
       "raw/pcie-link.txt"
   elif (( slot_total == 0 )); then
     result_add "check_pcie_link" "PCIe 链路" "$ST_SKIP" \
@@ -1417,7 +1540,8 @@ check_pcie_link() {
   else
     result_add "check_pcie_link" "PCIe 链路" "$ST_PASS" \
       "${slot_total} 张插槽上的扩展卡，链路宽度与速率均达到额定值\
-（板载集成设备的链路宽度由主板走线决定，不参与本项判定）。" "raw/pcie-link.txt"
+（读数取自本轮测试全程持续复读中最好的一次，已排除空闲降速这一正常的省电行为；\
+板载集成设备的链路宽度由主板走线决定，不参与本项判定）。" "raw/pcie-link.txt"
   fi
 }
 
@@ -1768,7 +1892,9 @@ collect_all() {
   section "PHASE 1/5  HARDWARE INVENTORY"
   collect_system
   check_memory_capacity
-  check_pcie_link     # 读的是 collect_system 落下的 lspci-vv.txt，必须排在它后面
+  # check_pcie_link 以前在这儿。**它挪到压测之后去了**（factory-test.sh）——
+  # 在这里判定等于拿一次空闲快照定生死，而那个读数是掷骰子的，
+  # 详见上面 pcie_link_monitor_start 那一大段。这里只留采集。
   collect_sensors
   collect_smart "pre"
   # 硬盘自己的出厂自检，在这儿**发起**，结果留到 verify_disk_selftest 去读。

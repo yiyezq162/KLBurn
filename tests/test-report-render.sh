@@ -284,6 +284,38 @@ Ping      : -
 Result    : NO_LINK
 EOF
 
+# BMC 通过 USB 塞进系统的虚拟网口（1.9.7 现场那台 7542 上的 enxbe3af2b6059f）。
+# 它那头没有 DHCP 服务器，永远拿不到网关，1.9.7 之前每台带 BMC 的机器
+# 都会被它刷一条「网卡连通性 WARN」。照列不照判。
+cat > "$RD/raw/nic/enxbe3af2b6059f-driver.txt" <<'EOF'
+driver: rndis_host
+firmware-version: RNDIS device
+bus-info: usb-0000:48:00.3-1.1
+EOF
+cat > "$RD/raw/nic/enxbe3af2b6059f-ethtool.txt" <<'EOF'
+Settings for enxbe3af2b6059f:
+	Speed: Unknown!
+	Duplex: Half
+	Link detected: yes
+EOF
+cat > "$RD/raw/nic-summary.txt" <<'EOF'
+===== ens9f0 =====
+MAC        : e8:61:1a:4e:10:40
+OperState  : up
+Virtual    : no
+
+===== ens9f1 =====
+MAC        : e8:61:1a:4e:10:41
+OperState  : up
+Virtual    : no
+
+===== enxbe3af2b6059f =====
+MAC        : be:3a:f2:b6:05:9f
+OperState  : up
+Virtual    : yes
+
+EOF
+
 # ================================================================
 echo "=== 生成报告 ==="
 OUT="$TMP/report.html"
@@ -703,10 +735,35 @@ has_no "$OUT" "FAULTY"           "指标名里混进来的英文也要收拾掉"
 has    "$OUT" "状态异常卡数"      "但那一行本身还在，信息不许少"
 
 echo
+echo "=== BMC 的 USB 虚拟网口：照列不照判（1.9.8）==="
+has "$OUT" "enxbe3af2b6059f" "虚拟网口照样列进清单（现场看得到这个口，不列像是漏采）"
+has "$OUT" "不参与判定（本机管理控制器提供的虚拟网口）" "但连通性那一格要写明不参与判定"
+has "$OUT" "不计入网口数量、也不参与任何判定" "表下面要解释这是什么口"
+# 成对断言：真网口那两个不许被这条豁免误伤
+has "$OUT" "已连通（4/4 通，平均 0.203ms）" "真网口的连通性结论照常"
+has "$OUT" "未连接链路（未接网线）" "没插线的真网口照常显示未连接链路"
+
+echo
 echo "=== 抬头提示 ==="
 has "$OUT" "项为告警"      "WARN 项要在抬头点出来"
-has "$OUT" "未能通过网络自动校时" "时钟不准的提示（run-dir 里没有 clock_synced 字段，按未校时处理）"
+has "$OUT" "未能自动校时" "时钟不准的提示（run-dir 里没有 clock_source 字段，按未校时处理）"
 has "$OUT" "广州市鲲林科技有限公司" "公司名"
+
+# 时间是从哪儿来的，看报告的人有权知道（1.9.8）。
+# 1.9.7 现场那台 7542 的网是通的，但那个内网出不了公网，公网 NTP 全部拨不通，
+# 报告日期停在一个八个月前的假日期上 —— 现在退到 BMC 的时钟，并写明来源。
+RCK="$TMP/run-clock-bmc"
+rm -rf "$RCK"; cp -r "$RD" "$RCK"
+python3 - "$RCK/meta.json" <<'PYEOF'
+import json, sys
+m = json.load(open(sys.argv[1], encoding="utf-8"))
+m["clock_source"] = "bmc"; m["clock_synced"] = 1; m["clock_suspect"] = 0
+json.dump(m, open(sys.argv[1], "w", encoding="utf-8"), ensure_ascii=False)
+PYEOF
+OUTCK="$TMP/report-clock-bmc.html"
+"$GEN" --run-dir "$RCK" --out "$OUTCK" >/dev/null 2>&1
+has "$OUTCK" "报告时间取自本机管理控制器" "退到 BMC 时钟时要写明时间来源"
+has_no "$OUTCK" "未能自动校时" "退到 BMC 成功了就不许再说没校上"
 
 echo
 echo "=== 二级编号不跳号（本例无 GPU、无 fio、无性能基准）==="
@@ -1435,9 +1492,52 @@ print("、".join(sorted({t for t in re.findall(r"见下方「([^」]+)」", h)
                        if t not in heads and t not in names})))
 PYEOF
 )"
-  # ⑤ 硬件清单八节在任何范围下都保留（"有啥列啥、没有的标未安装"这条不变量
-  #    不因为范围而松动 —— 那八节正是单项专测的人也要核对的"平台参数"）
-  check "$sc：硬件清单仍然是 8 个小节" "8" "$(cnt "$OUTS" '<h3>1\.[0-9]+ ')"
+  # ⑤ 硬件清单**按范围裁剪**（1.9.8 改的口径，用户 2026-08-11 拍板）
+  #
+  # 1.9.7 之前这里钉的是"八节在任何范围下都保留"。现场反过来了：一份自称
+  # "本轮只对硬盘做了压力测试"的报告里铺着 CPU 逐路频率、逐条内存、整张网卡表、
+  # GPU、电源 —— 客户要的是一份硬盘测试单，不是一份删了几行的全量报告。
+  # 现在只留「平台身份（整机 / CPU / 内存）+ 本轮被测的那个部件」。
+  #   full / info  8 节（整机 CPU 内存 硬盘 阵列卡 网卡 GPU 电源）
+  #   cpu / mem    3 节
+  #   gpu          4 节（+ GPU）
+  #   disk         5 节（+ 硬盘、阵列卡 —— 盘挂在卡后面，测盘的人要知道）
+  declare -A INV_SECTIONS=([full]=8 [info]=8 [cpu]=3 [mem]=3 [gpu]=4 [disk]=5)
+  check "$sc：硬件清单只出 ${INV_SECTIONS[$sc]} 个小节（平台身份 + 被测部件）" \
+        "${INV_SECTIONS[$sc]}" "$(cnt "$OUTS" '<h3>1\.[0-9]+ ')"
+  # 反过来钉死：专项报告里不许出现别的部件那几张表。
+  # 豁免写反（该留的留了、该去的没去）是这条最容易的失败方式。
+  if [[ "$sc" != "full" && "$sc" != "info" ]]; then
+    [[ "$sc" == "disk" ]] || has_no "$OUTS" "<h3>1.4 硬盘</h3>" "$sc：不许出现硬盘清单"
+    [[ "$sc" == "gpu"  ]] || has_no "$OUTS" "GPU 显卡</h3>"     "$sc：不许出现显卡清单"
+    has_no "$OUTS" "网卡</h3>" "$sc：不许出现网卡清单"
+    has_no "$OUTS" "电源</h3>" "$sc：不许出现电源清单"
+    has_no "$OUTS" "固件版本清单" "$sc：不许出现固件版本清单"
+    has_no "$OUTS" "平台关键设置" "$sc：不许出现平台关键设置"
+    has_no "$OUTS" "核对依据的实测值" "$sc：不许出现核对依据的实测值"
+  fi
+  # ⑦ ⚠️⚠️ **范围裁剪只藏 PASS / SKIP，WARN 和 FAIL 一条都不许藏。**
+  #
+  # 裁掉的是"没话说的行"和整块的清单表格，不是"这台机器有什么毛病"。
+  # 只压了 CPU 的那一轮里 PCIe 报了新增 AER、BMC 记了电源掉电，那仍然是
+  # **这台机器**的毛病，和压了哪个部件无关 —— 藏掉它等于让一台有真实告警的
+  # 机器拿着一份干净的专项报告出厂。和 1.7.6「硬盘压测没跑」那条同一把尺子，
+  # 也是 report-policy 三节那条红线（mutate.sh 里 scope-filter-hides-bad 守着）。
+  if [[ "$sc" != "full" && "$sc" != "info" ]]; then
+    ROB="$TMP/run-scope-$sc-warn"
+    rm -rf "$ROB"; cp -r "$RS" "$ROB"
+    # 挑一条**一定在范围外**的项目（电源和网卡在任何专项里都被裁）
+    cat >> "$ROB/results.jsonl" <<'EOF'
+{"id":"check_psu","name":"电源","status":"WARN","detail":"PSU2 未检测到交流输入","ref":"","time":"t"}
+{"id":"test_nic","name":"网卡连通性","status":"PASS","detail":"共 2 个网口，已接网线的 1 个全部 ping 通网关","ref":"","time":"t"}
+EOF
+    OUTB="$TMP/report-scope-$sc-warn.html"
+    "$GEN" --run-dir "$ROB" --out "$OUTB" >/dev/null 2>&1
+    has "$OUTB" "PSU2 未检测到交流输入" \
+        "$sc：范围外的 WARN 照常出现（藏掉 = 有毛病的机器拿到干净报告）"
+    has_no "$OUTB" "已接网线的 1 个全部 ping 通网关" \
+        "$sc：而范围外的 PASS 照旧裁掉（证明上面那条不是把裁剪整个关了）"
+  fi
   # ⑥ 范围外的压测时长不许印一行 0 秒（读的人会以为那一项失败了）
   case "$sc" in
     cpu)  has_no "$OUTS" "内存压测时长" "$sc：范围外的压测时长不出现"
@@ -1520,8 +1620,10 @@ has "$OUTSM" "选错了测试范围"  "要给出下一步怎么办"
 has_no "$OUTSM" "本轮只对 <b>显卡</b> 做了压力测试与专项诊断" \
        "不许再印那句「已经对显卡做了压测」——这一轮压根没做"
 
-# ④ 硬件清单照常八节：客户还是要知道这台机器装了什么
-check "硬件清单仍然是 8 个小节" "8" "$(cnt "$OUTSM" '<h3>1\.[0-9]+ ')"
+# ④ 硬件清单照常按范围出（这一轮是显卡专项，所以是 整机 / CPU / 内存 / GPU 四节）：
+#    客户还是要知道这台机器装了什么 —— 尤其是"显卡那一栏是空的"这件事。
+check "硬件清单出 4 个小节（平台身份 + 显卡）" "4" "$(cnt "$OUTSM" '<h3>1\.[0-9]+ ')"
+has "$OUTSM" "未安装独立显卡" "显卡那一节要明说这台机器没有显卡"
 
 # ⑤ 硬盘那一档同理（同一个机制，但抬头里的范围名要跟着变）
 RSD="$TMP/run-scope-missing-disk"
@@ -1541,6 +1643,46 @@ check "硬盘那档：报告生成成功" "0" "$?"
 check "硬盘那档：结论也是 FAIL" "1" "$(cnt "$OUTSD" 'class="verdict v-FAIL"')"
 has "$OUTSD" "硬盘专项测试" "抬头那句要写成硬盘专项测试，不是显卡"
 has_no "$OUTSD" "本机存在未通过项，不建议出货" "同样不许说这台机器有毛病"
+
+# ---------------------------------------------------------------- 专项选了、那个部件却没压测
+#
+# ⚠️⚠️ 1.9.7 现场真跑出来的：选了硬盘专项，破坏性写入确认等了 120 秒无人应答，
+#    按默认跳过，stress_disk 落了一条 SKIP —— 报告抬头照样是**绿色大 PASS**
+#    加一行「硬盘专项测试」，下面还写着"本轮只对硬盘做了压力测试与 SMART 复查"。
+#    那台机器的硬盘这一轮一个字节都没压过。和 info 档、和"部件不在这台机器上"
+#    是同一类错误：**把"没测"包装成"通过"**。
+RSS="$TMP/run-scope-disk-noburn"
+cp -r "$RSM" "$RSS"
+python3 - "$RSS/meta.json" <<'PYEOF'
+import json, sys
+m = json.load(open(sys.argv[1], encoding="utf-8"))
+m["scope"] = "disk"; m["budget"] = {"cpu_secs": 0, "mem_secs": 0,
+                                    "disk_secs": 0, "gpu_secs": 0}
+json.dump(m, open(sys.argv[1], "w", encoding="utf-8"), ensure_ascii=False)
+PYEOF
+cat > "$RSS/results.jsonl" <<'EOF'
+{"id":"collect_system","name":"硬件信息采集","status":"PASS","detail":"采集完成","ref":"","time":"t"}
+{"id":"collect_disk","name":"硬盘信息采集","status":"PASS","detail":"共 1 块盘，已采集","ref":"","time":"t"}
+{"id":"stress_disk","name":"硬盘压力测试","status":"SKIP","detail":"等待 120s 无人确认，按默认跳过（硬盘信息已采集）","ref":"","time":"t"}
+{"id":"verify_disk_temp","name":"硬盘温度","status":"PASS","detail":"1 块盘温度均低于 70°C","ref":"","time":"t"}
+EOF
+OUTNB="$TMP/report-scope-disk-noburn.html"
+"$GEN" --run-dir "$RSS" --out "$OUTNB" >/dev/null 2>&1
+check "专项没压测：报告生成成功" "0" "$?"
+check "⚠️ 绝不许再出绿色 PASS 大字" "0" "$(cnt "$OUTNB" 'class="verdict v-PASS"')"
+has "$OUTNB" 'class="verdict v-INFO"' "换成中性的结论块"
+has "$OUTNB" "未完成 · 本轮未做该部件老化测试" "结论块上直说这一轮没做老化测试"
+has "$OUTNB" "本报告不能作为该部件的验收依据" "必须直说这份报告不能当验收依据"
+has "$OUTNB" "这不是硬件故障" "但一个字都不许扣到硬件头上（一号红线）"
+has "$OUTNB" "等待 120s 无人确认" "要把跳过的原因原样带出来"
+# 那句写死的 cover 文案不许出现 —— 它说"本轮只对硬盘做了压力测试与 SMART 复查"
+has_no "$OUTNB" "本轮只对 <b>硬盘</b> 做了压力测试与 SMART 复查" \
+       "不许再印那句「已经对硬盘做了压测」——这一轮压根没压"
+# 反过来：真跑了压测的那一轮必须照常打 PASS，否则这条改动就把好报告也压绿了
+check "真跑了硬盘压测的那一轮照常是 PASS（证明上面不是一刀切）" "1" \
+      "$(cnt "$TMP/report-scope-disk.html" 'class="verdict v-PASS"')"
+has_no "$TMP/report-scope-disk.html" "未完成 · 本轮未做该部件老化测试" \
+       "真跑过的那一轮不许挂「未完成」"
 
 # ---------------------------------------------------------------- 单项专测写得更细
 has "$TMP/report-scope-cpu.html"  "逐颗 CPU 满载温度"          "cpu：给出逐颗温度"

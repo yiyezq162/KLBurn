@@ -293,6 +293,55 @@ SCOPE_COVER = {
 }
 
 
+# ============================================================ 单项专测只留被测部件
+#
+# ⚠️⚠️ **单项专测是一把独立的工具，不是"全量报告删掉几行"。**
+#
+# 1.9.7 现场那份硬盘专项报告里有：逐路 CPU 频率与缓存、逐条内存明细、
+# 整张网卡表、GPU、电源、PCIe 链路、平台关键设置、固件版本清单，还有一条
+# 「内存混插 WARN」。客户拿到的是一份自称"本轮只对硬盘做了压力测试"、
+# 却铺了满屏其它部件的报告 —— 他要的是一份硬盘测试单。
+#
+# 1.9.8 起的口径（用户 2026-08-11 拍板）：**照采不照报**。
+#   raw/ 和内部报告 INTERNAL_*.html 一个字都不少（日后排查全靠它们），
+#   交付报告只出「平台身份（整机 / CPU / 内存）+ 本轮被测的那个部件」。
+#
+# ⚠️⚠️ **WARN / FAIL 一条都不许藏**（见 build_html 里做过滤的那一行）。
+#    藏掉 FAIL = 报告打着红色大字、底下却找不到任何理由；
+#    藏掉 WARN = 一台有真实告警的机器拿着一份干净的专项报告出厂。
+#    范围裁掉的是"没话说的行"和整块的清单表格，不是"这台机器有什么毛病"。
+#    tests/test-report-render.sh 有成对断言、mutate.sh 里 scope-filter-hides-bad 守着。
+# ⚠️ 这张名单管的是 **PASS / SKIP 那些"没话说的行"**。WARN 和 FAIL 不看它，
+#    一条都不藏 —— 判据写在 build_html 里做过滤的那一行，不在这张表上。
+SCOPE_KEEP_ALWAYS = frozenset((
+    "collect_system",       # 硬件信息采集：整块硬件清单的来源，任何范围都要
+    "check_virtual_dev",    # 运行环境核对：说明报告里的数据取自实机，一行
+    "scope_target_missing", # 「本轮测试未执行」，藏了就没人知道这轮为什么是红的
+))
+SCOPE_KEEP = {
+    "cpu":  frozenset(("verify_throttle", "verify_ecc")),
+    "mem":  frozenset(("verify_ecc", "check_mem_cap", "check_dimm_uniform")),
+    "gpu":  frozenset(("gpu_detect", "check_gpu_uniform", "check_gpu_ecc",
+                       "check_gpu_remap", "check_gpu_load")),
+    "disk": frozenset(("collect_disk", "collect_raid", "check_disk_uniform",
+                       "verify_smart", "verify_disk_temp", "verify_disk_selftest")),
+}
+# 这三类**只在范围里才会跑**（core.sh 的 scope_runs 管着），所以一律留。
+# 白名单里再逐条列一遍，只会在以后加新判定时漏登记 —— 而漏登记的后果是
+# 那一项从专项报告里静悄悄消失，没有任何人会发现。
+SCOPE_KEEP_PREFIXES = ("bench_", "stress_", "validate_")
+
+
+def scope_row_kept(scope, rid):
+    """这条判定要不要出现在**专项**交付报告里。full / info 一律 True。"""
+    if scope not in SCOPE_KEEP:
+        return True
+    rid = str(rid or "")
+    return (rid in SCOPE_KEEP_ALWAYS
+            or rid in SCOPE_KEEP[scope]
+            or rid.startswith(SCOPE_KEEP_PREFIXES))
+
+
 def scope_of(meta):
     """meta.json 里的 scope。老的 run-dir 没有这个字段，一律当全量。
 
@@ -879,11 +928,29 @@ class Data(object):
         "NO_CLIENT":  "未测试（当前测试环境不具备该项检测条件）",
     }
 
+    def virtual_nics(self):
+        """管理控制器（BMC）通过 USB 塞进系统的虚拟网口，一律不参与判定。
+
+        名单由采集阶段写在 nic-summary.txt 里（lib/collect.sh 的 collect_nic），
+        判据在 lib/network.sh 的 net_iface_is_virtual —— 报告这边**不重新判**，
+        两处各判一次迟早会不一致。
+        """
+        out, cur = set(), None
+        for line in read_text(self.rawpath("nic-summary.txt")).splitlines():
+            m = re.match(r"^=====\s*(\S+)\s*=====", line)
+            if m:
+                cur = m.group(1)
+                continue
+            if cur and re.match(r"^\s*Virtual\s*:\s*yes\s*$", line):
+                out.add(cur)
+        return out
+
     def nics(self):
         out = []
         nicdir = self.rawpath("nic")
         if not os.path.isdir(nicdir):
             return out
+        virt = self.virtual_nics()
         # 一个口有 -driver / -ethtool / -test / -ping / -dhcp 好几个文件，去重取口名
         names = sorted({f.rsplit("-", 1)[0] for f in os.listdir(nicdir)})
         for n in names:
@@ -904,7 +971,13 @@ class Data(object):
             ping = grab(tst, "Ping")
             link = grab(eth, "Link detected")
             conn = None
-            if res is not None:
+            if n in virt:
+                # ⚠️ 这个口**照列不照判**。它是 BMC 的带内管理通道，那头没有
+                #    DHCP 服务器，永远拿不到网关 —— 1.9.7 之前它每台机器都会
+                #    刷一条「网卡连通性 WARN」。列出来是因为现场看得到这个口，
+                #    不列反而像我们漏采了。
+                conn = "不参与判定（本机管理控制器提供的虚拟网口）"
+            elif res is not None:
                 conn = self.NIC_RESULT_TEXT.get(res, res)
                 if ping:
                     conn = "%s（%s）" % (conn, ping)
@@ -1728,6 +1801,25 @@ def build_html(data):
     shown = [r for r in shown
              if not (r.get("status") == "SKIP" and r.get("origin") == "self")]
 
+    # ---------------- 单项专测：只留被测部件那几条 ----------------
+    #
+    # 口径和名单见文件上方 SCOPE_KEEP 那一大段。这里只强调一件事：
+    #
+    # ⚠️⚠️ **只藏 PASS / SKIP。WARN 和 FAIL 一条都不许藏。**
+    #
+    # 和 1.7.6 给"硬盘压测没跑"立的那条、和 report-policy 三节那条是同一把尺子。
+    #   * 藏掉一条 FAIL —— 一台在 CPU 专测里被 dmesg 复查抓出阵列卡故障的机器，
+    #     报告顶上是红色大字、底下却找不到任何理由。
+    #   * 藏掉一条 WARN —— 只压了 CPU 的那一轮里 PCIe 报了新增 AER、BMC 记了
+    #     电源掉电，那仍然是**这台机器**的毛病，和压了哪个部件无关。
+    #     一台有真实告警的机器拿着一份干净的专项报告出厂，比多印两行糟得多。
+    # 范围裁掉的是那些"没话说的行"（PASS / SKIP）和整块的清单表格，
+    # 不是"这台机器有什么毛病"。
+    scope = scope_of(meta)
+    shown = [r for r in shown
+             if r.get("status") in ("FAIL", "WARN")
+             or scope_row_kept(scope, r.get("id"))]
+
     # ---------------- 判定按"读者关心的三件事"分组 ----------------
     #
     # 出厂验收表大多是分段写的：配置检查一段、性能数值一段、老化一段。
@@ -1825,16 +1917,42 @@ def build_html(data):
     # （内存容量对不上、看到虚拟设备），那是实打实的、必须看见的东西。
     #
     # tests/mutate.sh 里有一条变异专门守着这里。
-    if scope_of(meta) == "info" and overall == "PASS":
+    #
+    # 「本轮选的那个部件不在这台机器上」——选了显卡专项、机器却没有独立显卡。
+    # 判据是主流程落的那条判定（factory-test.sh 的 SCOPE_ABORT 那一段）。
+    scope_missing = any(r.get("id") == "scope_target_missing" for r in results)
+
+    # ---------------- 专项选了、那个部件的压测却没跑成 ----------------
+    #
+    # ⚠️⚠️ **同一条道理再往前一步：选了硬盘专项，硬盘压测却是 SKIP 的。**
+    #
+    # 1.9.7 现场真跑出来过：DISK 那一轮的破坏性写入确认等了 120 秒无人应答，
+    # 按默认跳过，`stress_disk` 落了一条 SKIP —— 而报告抬头照样是绿色大 PASS
+    # 加一行「硬盘专项测试」，下面还写着"本轮只对硬盘做了压力测试与 SMART 复查"。
+    # **这台机器的硬盘这一轮一个字节都没压过。**
+    #
+    # 和 info 档、和"部件不在这台机器上"是同一类：把"没测"包装成"通过"。
+    # FAIL 照打不误（真判出问题时那条优先），只是不许再出绿色 PASS。
+    SCOPE_STRESS_ROW = {"cpu": "stress_cpu", "mem": "stress_mem",
+                        "gpu": "stress_gpu", "disk": "stress_disk"}
+    target_burn_skipped, target_burn_why = False, ""
+    _sid = SCOPE_STRESS_ROW.get(scope)
+    if _sid and not scope_missing:
+        _row = next((r for r in results if r.get("id") == _sid), None)
+        # 只认"整个没跑"这一种。WARN 是跑了但有话说，那仍然是跑过了。
+        if _row is None or _row.get("status") == "SKIP":
+            target_burn_skipped = True
+            target_burn_why = (_row or {}).get("detail") or ""
+
+    if overall == "PASS" and scope == "info":
         A('<div style="margin:18px 0 8px"><span class="verdict v-INFO">仅硬件信息 · 未做测试</span>')
+    elif overall == "PASS" and target_burn_skipped:
+        A('<div style="margin:18px 0 8px">'
+          '<span class="verdict v-INFO">未完成 · 本轮未做该部件老化测试</span>')
     else:
         A('<div style="margin:18px 0 8px"><span class="verdict v-%s">%s</span>' % (overall, overall))
     A('<span style="margin-left:18px" class="sub">通过 %d 项 ｜ 失败 %d 项 ｜ 告警 %d 项 ｜ 跳过 %d 项</span></div>'
       % (n_pass, n_fail, n_warn, n_skip))
-
-    # 「本轮选的那个部件不在这台机器上」——选了显卡专项、机器却没有独立显卡。
-    # 判据是主流程落的那条判定（factory-test.sh 的 SCOPE_ABORT 那一段）。
-    scope_missing = any(r.get("id") == "scope_target_missing" for r in results)
 
     # 结论块下面紧跟一句"这一轮到底覆盖了什么"。
     # **必须紧贴结论，不能埋到下面某一节里** —— 一个孤零零的 PASS 加上一行
@@ -1843,8 +1961,11 @@ def build_html(data):
     # ⚠️ 但"本轮选的部件不在这台机器上"那种情况**不能印这句**：
     #    它写死的是「本轮只对显卡做了压力测试与专项诊断」，而那一轮根本没做 ——
     #    说得比做得多（report-policy 六-4）。那一支由下面那条 notice 说清楚。
+    # ⚠️ 那个部件的压测没跑成时同样不能印这句：它写死的是「本轮只对硬盘做了
+    #    压力测试与 SMART 复查」，而这一轮压根没压 —— 又是说得比做得多。
+    #    那一支由下面 target_burn_skipped 那条 notice 说清楚。
     cover = SCOPE_COVER.get(scope_of(meta))
-    if cover and not scope_missing:
+    if cover and not scope_missing and not target_burn_skipped:
         A('<div class="notice notice-info">%s</div>' % cover)
 
     # 「本轮选的那个部件不在这台机器上」——选了显卡专项、机器却没有独立显卡。
@@ -1867,6 +1988,16 @@ def build_html(data):
     elif overall == "FAIL":
         A('<div class="notice notice-warn"><b>本机存在未通过项，不建议出货。</b>'
           "请查看下方标红的测试项详情。</div>")
+    elif target_burn_skipped:
+        # ⚠️ 措辞里一个字都不许扣到硬件头上：没压测是流程没走完，
+        #    不是这台机器有毛病（一号红线）。但也绝不能含糊过去 ——
+        #    这份报告**不能**当这个部件的验收依据，必须直说。
+        A('<div class="notice notice-warn"><b>本轮选择的是%s，但该部件的老化压力测试'
+          "<b>未执行</b>，本报告不能作为该部件的验收依据。</b>"
+          "<b>这不是硬件故障</b> —— 已采集到的硬件信息与检查结论照常有效，"
+          "只是这一轮没有对它做老化测试。%s请重新测试并完成该项后以新报告为准。</div>"
+          % (E(scope_cn(meta)),
+             ("原因：%s。" % E_rich(target_burn_why)) if target_burn_why else ""))
 
     # 告警项不影响总结论，但必须在抬头就点出来，不能只埋在下面的列表里等人翻。
     # 缺一条内存、少接一路电源线这种事，恰恰是最容易被漏看又最该在出厂拦住的。
@@ -1878,16 +2009,27 @@ def build_html(data):
             A("<li>%s：%s</li>" % (E(r.get("name")), E_rich(r.get("detail"))))
         A("</ul></div>")
 
+    # ⚠️ 报告上那个时间到底是从哪儿来的，看报告的人有权知道。
+    #    1.9.7 现场那台 7542：网是通的、ping 网关 4/4 通，但那个内网出不了公网，
+    #    公网 NTP 全部拨不通，报告日期停在一个八个月前的假日期上 —— 而报告上
+    #    只写着一句"未能通过网络自动校时"，没人分得清"时间准不准"。
+    #    1.9.8 起校时有三级回退（DHCP 下发的 NTP / 默认网关 / BMC 时钟），
+    #    来源记在 meta.json 的 clock_source 里，这里如实写明。
+    clock_src = str(meta.get("clock_source") or
+                    ("network" if str(meta.get("clock_synced")) == "1" else "rtc"))
+    if clock_src == "bmc":
+        A('<div class="notice notice-info">本机现场没有可用的网络时间源，'
+          "报告时间取自本机管理控制器（BMC）的时钟。</div>")
     if str(meta.get("clock_suspect")) == "1":
-        # 开机后会尝试联网校时（见 lib/network.sh），这条通知只在校时没成功、
+        # 开机后会尝试校时（见 lib/network.sh），这条通知只在校时没成功、
         # 时间戳仍然看着不对时才出现——文案要如实反映"试过但没成"，
         # 不能再写"现场无网络"，那已经不是这个分支的真实原因了。
-        if str(meta.get("clock_synced")) == "1":
-            A('<div class="notice notice-info">已通过网络自动校时，但测试时间戳看起来仍有异常，'
+        if clock_src != "rtc":
+            A('<div class="notice notice-info">已自动校时，但测试时间戳看起来仍有异常，'
               "以下时间仅供参考，测试内容与结论不受影响。</div>")
         else:
-            A('<div class="notice notice-info">本机未能通过网络自动校时'
-              "（现场无网络连接，或连接不到时间服务器），"
+            A('<div class="notice notice-info">本机未能自动校时'
+              "（现场无网络连接、连接不到时间服务器，管理控制器也未提供可用时钟），"
               "测试时间沿用主板 RTC 原有设置，可能不准。测试内容与结论不受影响。</div>")
 
     if meta.get("data_partition") in (None, "", "none"):
@@ -1895,16 +2037,47 @@ def build_html(data):
           "报告曾写入 /tmp（关机即丢失）。</div>")
 
     # ================================================================
-    A("<h2>一、硬件清单</h2>")
+    # 一级章节编号是**动的**：单项专测里「配置核对」「性能基准」可能整节都不出现
+    # （见下面 conform_shown / bench_shown），编号写死就会冒出"一、三、四"这种断号。
+    # 二级编号跟着当前一级走，所以下面几个 SUB 都读 sec_no[0]。
+    CN_SEC = ("一", "二", "三", "四", "五", "六", "七", "八")
+    sec_no = [0]
 
-    A("<h3>1.1 整机</h3>")
+    def SEC(title):
+        sec_no[0] += 1
+        return "<h2>%s、%s</h2>" % (CN_SEC[sec_no[0] - 1], title)
+
+    # ---- 这一轮的报告里，硬件清单出哪几张表 ----
+    #
+    # 全量 / 仅导出信息：全都出。单项专测：只出「平台身份 + 被测部件」——
+    # 一份硬盘测试单上不需要写这台机器插了什么网卡、什么显卡（见 SCOPE_KEEP）。
+    scope_all = scope in ("full", "info")
+    cpu_detail = scope_all or scope == "cpu"     # 逐路频率 / 缓存 / 虚拟化那一块
+    mem_detail = scope_all or scope == "mem"     # 逐条内存明细表
+    show_disk_inv = scope_all or scope == "disk"
+    show_gpu_inv = scope_all or scope == "gpu"
+    show_nic_inv = scope_all
+    show_psu_inv = scope_all
+
+    A(SEC("硬件清单"))
+    if not scope_all:
+        A('<p class="sub">本轮是%s，下表只列出<b>整机身份</b>与<b>本轮实际测试的部件</b>。'
+          "这台机器上其它部件的详细信息本轮未列入本报告。</p>" % E(scope_cn(meta)))
+
+    inv_no = [0]
+
+    def INV(title):
+        inv_no[0] += 1
+        return "<h3>1.%d %s</h3>" % (inv_no[0], title)
+
+    A(INV("整机"))
     A(kv_block(sysinfo))
 
-    A("<h3>1.2 CPU</h3>")
+    A(INV("CPU"))
     cpus = data.cpus()
     A(table(cpus, "未检测到 CPU 信息"))
     cs = data.cpu_summary()
-    if cs:
+    if cs and cpu_detail:
         A(kv_block(OrderedDict([
             ("逻辑处理器", cs.get("CPU(s)")),
             ("每核线程", cs.get("Thread(s) per core")),
@@ -1919,10 +2092,10 @@ def build_html(data):
             ("虚拟化", cs.get("Virtualization")),
         ])))
 
-    A("<h3>1.3 内存</h3>")
+    A(INV("内存"))
     dimms = data.dimms()
     installed_mb, visible_mb = data.mem_capacity()
-    if dimms:
+    if dimms and mem_detail:
         A('<p class="sub">已装 %d 条，主板共 %d 个内存插槽。'
           "每条的厂商 / 颗粒型号 / 序列号如下，可逐条核对品牌与规格是否一致。</p>"
           % (len(dimms), data.dimm_slots_total()))
@@ -1931,40 +2104,51 @@ def build_html(data):
             ("装机容量", "%d GB（%d 条）" % (installed_mb // 1024, len(dimms))),
             ("系统识别容量", "%d GB" % (visible_mb // 1024)),
         ])))
-    A(table(dimms, "未检测到内存条信息"))
+    if mem_detail:
+        A(table(dimms, "未检测到内存条信息"))
 
-    A("<h3>1.4 硬盘</h3>")
-    disks = data.disks(show_stress_col=disk_ran)
-    if disks:
-        # 后半句指的是下面那一项判定。它被藏掉时这句话就是指向一个
-        # 报告里根本不存在的小节，所以跟着 smart_shown 走。
-        A('<p class="sub">下表为本机硬盘的型号 / 序列号 / 固件 / 容量与 SMART 健康状态。%s</p>'
-          % ("坏道类计数在压测前后的变化见下方「硬盘 SMART 复查」。" if smart_shown else ""))
-        if data.raid_pd_keys():
-            A('<p class="sub">标注为「阵列卡 PD<i>n</i>」的是接在阵列卡后面的物理盘 —— '
-              "它们在操作系统里看不到独立的盘符，这里的信息是通过阵列卡逐块读取的。</p>")
-    A(table(disks, "未检测到本机硬盘"))
+    if show_disk_inv:
+        A(INV("硬盘"))
+        disks = data.disks(show_stress_col=disk_ran)
+        if disks:
+            # 后半句指的是下面那一项判定。它被藏掉时这句话就是指向一个
+            # 报告里根本不存在的小节，所以跟着 smart_shown 走。
+            A('<p class="sub">下表为本机硬盘的型号 / 序列号 / 固件 / 容量与 SMART 健康状态。%s</p>'
+              % ("坏道类计数在压测前后的变化见下方「硬盘 SMART 复查」。" if smart_shown else ""))
+            if data.raid_pd_keys():
+                A('<p class="sub">标注为「阵列卡 PD<i>n</i>」的是接在阵列卡后面的物理盘 —— '
+                  "它们在操作系统里看不到独立的盘符，这里的信息是通过阵列卡逐块读取的。</p>")
+        A(table(disks, "未检测到本机硬盘"))
 
-    A("<h3>1.5 阵列卡</h3>")
-    A(table(data.raid(), "未安装阵列卡"))
+        # 阵列卡跟着硬盘走：盘挂在它后面，测硬盘的人一定要知道中间隔着什么卡
+        A(INV("阵列卡"))
+        A(table(data.raid(), "未安装阵列卡"))
 
-    A("<h3>1.6 网卡</h3>")
-    nics = data.nics()
-    if nics:
-        A('<p class="sub">每个网口都会拉起链路、用 DHCP 取地址并 ping 默认网关；'
-          "未接网线的口显示「未连接链路」，不计为故障。</p>")
-    A(table(nics, "未检测到物理网卡"))
+    if show_nic_inv:
+        A(INV("网卡"))
+        nics = data.nics()
+        if nics:
+            A('<p class="sub">每个网口都会拉起链路、用 DHCP 取地址并 ping 默认网关；'
+              "未接网线的口显示「未连接链路」，不计为故障。</p>")
+            if data.virtual_nics():
+                A('<p class="sub">表中标注「不参与判定」的是本机管理控制器（BMC）'
+                  "在操作系统里注册的虚拟网口，它是管理通道、不是这台机器对外的网口，"
+                  "本身不接网线也拿不到网关，因此不计入网口数量、也不参与任何判定。</p>")
+        A(table(nics, "未检测到物理网卡"))
 
-    A("<h3>1.7 GPU 显卡</h3>")
-    gpus = data.gpus()
-    if gpus:
-        A(table(gpus))
-    else:
-        A('<p class="muted">未安装独立显卡</p>')
+    if show_gpu_inv:
+        A(INV("GPU 显卡"))
+        gpus = data.gpus()
+        if gpus:
+            A(table(gpus))
+        else:
+            A('<p class="muted">未安装独立显卡</p>')
 
-    A("<h3>1.8 电源</h3>")
-    psus = data.psus()
-    A(table(psus, "BIOS 未提供电源信息（部分机型不上报，可从 BMC 查看）"))
+    psus = []
+    if show_psu_inv:
+        A(INV("电源"))
+        psus = data.psus()
+        A(table(psus, "BIOS 未提供电源信息（部分机型不上报，可从 BMC 查看）"))
     # 有些主板（实测 Supermicro X11DPG-QT）DMI type 39 里除了位置和状态之外
     # 一格都没填 —— 厂商/型号/序列号是 dmidecode 的 <BAD INDEX>，额定功率是
     # 0xFFFF。我们把这些原样印出去过，客户拿到的是四格乱码和「65535 W」，
@@ -2015,42 +2199,51 @@ def build_html(data):
     #    tests/test-report-render.sh 里有一组断言钉着这一点。
 
     # ================================================================
-    A("<h2>二、配置核对</h2>")
-    A('<p class="sub">这一节回答的是「这台机器装的东西对不对、齐不齐、一不一致」。'
-      "同规格的部件在同一台机器里应当型号一致、固件版本一致；"
-      "整机序列号在主板与管理控制器两处应当对得上。</p>")
+    # 「配置核对」整节只在真的核对了什么的时候才出现。
+    #
+    # 单项专测里这一节大多只剩一两条（硬盘专测就只剩「硬盘型号一致性」），
+    # 而「平台关键设置」「核对依据的实测值」「固件版本清单」三张表回答的是
+    # "这台机器整体装得对不对"—— 那是全量报告和「仅导出信息」那一档的事，
+    # 一份硬盘测试单上不需要（用户 2026-08-11 明确点名了这三张表）。
+    plat = metrics_of("platform") if scope_all else []
+    conf_m = metrics_of("conform") if scope_all else []
+    fwrows = data.firmware_rows() if scope_all else []
+    conform_shown = bool(conform_rows or plat or conf_m or fwrows)
 
-    conf_no = [0]
+    if conform_shown:
+        A(SEC("配置核对"))
+        A('<p class="sub">这一节回答的是「这台机器装的东西对不对、齐不齐、一不一致」。'
+          "同规格的部件在同一台机器里应当型号一致、固件版本一致；"
+          "整机序列号在主板与管理控制器两处应当对得上。</p>")
 
-    def CSUB(title):
-        conf_no[0] += 1
-        return "<h3>2.%d %s</h3>" % (conf_no[0], title)
+        conf_no = [0]
 
-    A(CSUB("核对结论"))
-    if conform_rows:
-        result_list(conform_rows)
-    else:
-        A('<p class="muted">本次未产生配置核对结论。</p>')
+        def CSUB(title):
+            conf_no[0] += 1
+            return "<h3>%d.%d %s</h3>" % (sec_no[0], conf_no[0], title)
 
-    plat = metrics_of("platform")
-    if plat:
-        A(CSUB("平台关键设置"))
-        A('<p class="sub">以下为操作系统读到的实际状态，可与订单要求逐项比对。'
-          "这些是主板设置项，与硬件好坏无关。</p>")
-        A(metric_kv("platform"))
+        A(CSUB("核对结论"))
+        if conform_rows:
+            result_list(conform_rows)
+        else:
+            A('<p class="muted">本次未产生配置核对结论。</p>')
 
-    conf_m = metrics_of("conform")
-    if conf_m:
-        A(CSUB("核对依据的实测值"))
-        A('<p class="sub">上面每一条结论所依据的原始读数，逐项列在这里。</p>')
-        A(metric_table("conform"))
+        if plat:
+            A(CSUB("平台关键设置"))
+            A('<p class="sub">以下为操作系统读到的实际状态，可与订单要求逐项比对。'
+              "这些是主板设置项，与硬件好坏无关。</p>")
+            A(metric_kv("platform"))
 
-    fwrows = data.firmware_rows()
-    if fwrows:
-        A(CSUB("固件版本清单"))
-        A('<p class="sub">同一批次的机器，这张表应当逐行一致。'
-          "本表只汇总本机实测到的版本号，不做批次间比对。</p>")
-        A(table(fwrows))
+        if conf_m:
+            A(CSUB("核对依据的实测值"))
+            A('<p class="sub">上面每一条结论所依据的原始读数，逐项列在这里。</p>')
+            A(metric_table("conform"))
+
+        if fwrows:
+            A(CSUB("固件版本清单"))
+            A('<p class="sub">同一批次的机器，这张表应当逐行一致。'
+              "本表只汇总本机实测到的版本号，不做批次间比对。</p>")
+            A(table(fwrows))
 
     # ================================================================
     # 性能基准：整段只在真的测了才出现。
@@ -2065,7 +2258,7 @@ def build_html(data):
     bench_disk = data.bench_disk_rows()
     bench_shown = bool(bench_rows or bench_disk)
     if bench_shown:
-        A("<h2>三、性能基准</h2>")
+        A(SEC("性能基准"))
         A('<p class="sub">以下数值在机器空闲时测得（不与老化压测同时进行，'
           "否则数值会被互相干扰）。<b>本节只如实报出实测数值，不做合格与否的判断，"
           "也不影响整机结论</b> —— 不同用途对性能的要求各不相同，"
@@ -2074,7 +2267,7 @@ def build_html(data):
 
         def BSUB(title):
             bench_no[0] += 1
-            return "<h3>3.%d %s</h3>" % (bench_no[0], title)
+            return "<h3>%d.%d %s</h3>" % (sec_no[0], bench_no[0], title)
 
         if bench_rows:
             A(BSUB("各项结论"))
@@ -2109,11 +2302,6 @@ def build_html(data):
               "「测试口径」一列是本次实际使用的参数，格式为"
               "「引擎_方向_块大小_队列深度_线程数」。</p>" % (way, safety))
             A(table(bench_disk))
-        stress_no, raw_no = "四", "五"
-        sub_prefix = 4
-    else:
-        stress_no, raw_no = "三", "四"
-        sub_prefix = 3
 
     budget = meta.get("budget") or {}
 
@@ -2128,11 +2316,10 @@ def build_html(data):
     # 网卡连通性、开机内核日志这些检查 —— 顶着「压力测试结果」的标题就是
     # 说得比做得多（report-policy 六-4）。标题跟着实际内容走。
     burn_ran = bsec("cpu_secs") + bsec("mem_secs") + bsec("gpu_secs") + bsec("disk_secs") > 0
-    stress_h2 = "%s、%s" % (stress_no, "压力测试结果" if burn_ran else "其他检查结论")
-    raw_h2 = "%s、原始日志" % raw_no
 
     # ================================================================
-    A("<h2>%s</h2>" % stress_h2)
+    A(SEC("压力测试结果" if burn_ran else "其他检查结论"))
+    sub_prefix = sec_no[0]
 
     if burn_ran:
         dur = OrderedDict([
@@ -2198,7 +2385,7 @@ def build_html(data):
     #   2. **数据不在就整节不画**（老 run-dir、内核没有 EDAC、没跑 SMART），
     #      不铺一屏 "—"。
     #   3. 红线照旧：寿命类字段一格都不许进来，性能数字一律不判合格。
-    scope = scope_of(meta)
+    # （scope 在上面判定过滤那一段就取好了，这里直接用。）
 
     if scope == "cpu":
         pkg = data.pkg_temp_series()
@@ -2408,40 +2595,48 @@ def build_html(data):
         A(table(rows))
 
     # ================================================================
-    A("<h2>%s</h2>" % raw_h2)
+    A(SEC("原始日志"))
     A('<p class="sub">以下为采集到的原始输出，完整文件保存在报告目录的 raw/ 子目录下。</p>')
 
     # 这里不嵌 smartctl 的原始输出（raw/smart-pre|post/ 里完整保留）：
     # 一块盘几百行属性，绝大部分和判定无关，嵌进来只会把报告撑成一堆看不懂的数字。
     # 硬盘的结论看 1.4 表格和 SMART 复查那一项。
-    for title, rel in [
-        ("主板与整机信息（BIOS 记录）", "dmidecode.txt"),
-        ("CPU 详细信息", "lscpu.txt"),
-        ("内存条明细", "dmidecode-memory.txt"),
-        ("PCI 设备列表", "lspci.txt"),
-        ("块设备列表", "lsblk.txt"),
-        ("网卡信息", "nic-summary.txt"),
-        ("网卡连通性测试", "nic-test.txt"),
-        ("电源信息", "dmidecode-psu.txt"),
-        ("IPMI 传感器读数", "ipmi-sensors.txt"),
-        ("BMC 电源相关事件", "ipmi-sel-psu.txt"),
-        ("IPMI 事件日志（测前）", "ipmi-sel-pre.txt"),
-        ("IPMI 事件日志（测后）", "ipmi-sel-post.txt"),
-        ("阵列卡信息", "storcli-show.txt"),
-        ("GPU 详细信息", "gpu-smi-full.txt"),
-        ("温度传感器（测后）", "sensors-post.txt"),
-        ("CPU 压测日志", "stress/cpu-stress-ng.log"),
-        ("内存压测日志", "stress/mem-stressapptest.log"),
-        ("硬盘压测日志（随机）", "stress/fio-rand.log"),
-        ("GPU 压测日志", "stress/gpu-burn.log"),
-        ("显卡数据传输带宽测试", "bench/gpu-bandwidth.log"),
-        ("显卡间互联带宽测试", "bench/gpu-p2p.log"),
-        ("CPU 浮点算力测试", "bench/cpu-linpack.log"),
-        ("内存带宽测试", "bench/mem-bandwidth.log"),
-        ("内核日志中的硬件错误", "dmesg-errors.txt"),
-        ("内核日志（压测期间新增）", "dmesg-delta.txt"),
+    #
+    # 第三列是这一块归谁：
+    #   None    —— 任何范围都留（本轮真跑过什么，它就有什么内容）
+    #   "whole" —— 整机级的东西，只进全量报告和「仅导出信息」那一档
+    #   其余    —— 只进对应的那个专项（和全量）
+    # 一份硬盘测试单上不需要贴整台机器的 IPMI 传感器读数、网卡信息，
+    # 也不需要把整份 dmidecode（四十万字符）原样附上（用户 2026-08-11）。
+    for title, rel, only in [
+        ("主板与整机信息（BIOS 记录）", "dmidecode.txt", "whole"),
+        ("CPU 详细信息", "lscpu.txt", "cpu"),
+        ("内存条明细", "dmidecode-memory.txt", "mem"),
+        ("PCI 设备列表", "lspci.txt", "whole"),
+        ("块设备列表", "lsblk.txt", "disk"),
+        ("网卡信息", "nic-summary.txt", "whole"),
+        ("网卡连通性测试", "nic-test.txt", "whole"),
+        ("电源信息", "dmidecode-psu.txt", "whole"),
+        ("IPMI 传感器读数", "ipmi-sensors.txt", "whole"),
+        ("BMC 电源相关事件", "ipmi-sel-psu.txt", "whole"),
+        ("IPMI 事件日志（测前）", "ipmi-sel-pre.txt", "whole"),
+        ("IPMI 事件日志（测后）", "ipmi-sel-post.txt", "whole"),
+        ("阵列卡信息", "storcli-show.txt", "disk"),
+        ("GPU 详细信息", "gpu-smi-full.txt", "gpu"),
+        ("温度传感器（测后）", "sensors-post.txt", None),
+        ("CPU 压测日志", "stress/cpu-stress-ng.log", None),
+        ("内存压测日志", "stress/mem-stressapptest.log", None),
+        ("硬盘压测日志（随机）", "stress/fio-rand.log", None),
+        ("GPU 压测日志", "stress/gpu-burn.log", None),
+        ("显卡数据传输带宽测试", "bench/gpu-bandwidth.log", None),
+        ("显卡间互联带宽测试", "bench/gpu-p2p.log", None),
+        ("CPU 浮点算力测试", "bench/cpu-linpack.log", None),
+        ("内存带宽测试", "bench/mem-bandwidth.log", None),
+        ("内核日志中的硬件错误", "dmesg-errors.txt", None),
+        ("内核日志（压测期间新增）", "dmesg-delta.txt", None),
     ]:
-        A(raw_file_block(data, title, rel))
+        if only is None or scope_all or only == scope:
+            A(raw_file_block(data, title, rel))
 
     A("<footer>")
     A("本报告由 %s v%s 自动生成，所有数据来自被测机器实测采集，未经人工修改。<br>"

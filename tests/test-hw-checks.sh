@@ -1641,9 +1641,56 @@ check "两个端点都满速 -> PASS（桥的降速不算数）" "PASS" "$LAST_S
 
 # 把 4090 改成插在 x8 槽、且只训练到 Gen1
 sed -i 's/^\t\tLnkSta:\tSpeed 16GT\/s, Width x16/\t\tLnkSta:\tSpeed 2.5GT\/s, Width x8/' "$RAW_DIR/lspci-vv.txt"
-LAST_STATUS=""; check_pcie_link
-check "端点宽度和速率都没跑到额定 -> WARN" "WARN" "$LAST_STATUS"
+
+# ---- 1.9.8：**只有空闲快照的时候不许判 WARN** ----
+#
+# 这一条钉的是 1.9.7 现场那次误报。同一台 6530、同一张 4090、同一个槽，
+# 连测六轮读出来是 16 / 2.5 / 2.5 / 2.5 / 16 / 2.5 GT/s —— 硬件一个螺丝
+# 都没动，判定结果却是掷骰子。一次空闲快照本来就不能当判据。
+rm -f "$RAW_DIR/pcie-link-samples.txt"
+LAST_STATUS=""; LAST_DETAIL=""; check_pcie_link
+check "只有空闲快照、一条加载态读数都没有 -> 不判 WARN" "PASS" "$LAST_STATUS"
+check "但数值仍要如实报出来（不判 ≠ 不说）" "1" \
+      "$(printf '%s' "$LAST_DETAIL" | grep -c 'c8:00.0')"
+check "而且要说明为什么不作结论" "1" \
+      "$(printf '%s' "$LAST_DETAIL" | grep -c '不对它们作出结论')"
+
+# ---- 加载态一直没回满 -> 这才是真的降速，照报 ----
+cat > "$RAW_DIR/pcie-link-samples.txt" <<'EOF'
+27:00.0 5 8
+c8:00.0 2.5 8
+c8:00.0 2.5 8
+c8:00.0 2.5 8
+EOF
+LAST_STATUS=""; LAST_DETAIL=""; check_pcie_link
+check "全程复读也没回满 -> WARN" "WARN" "$LAST_STATUS"
 check "WARN 文案里要点名是哪个设备" "1" "$(printf '%s' "$LAST_DETAIL" | grep -c 'c8:00.0')"
+check "WARN 文案要讲清判据是全程最好的一次读数" "1" \
+      "$(printf '%s' "$LAST_DETAIL" | grep -c '最好')"
+check "既然已经按加载态判了，就不许再把核实推给看报告的人" "0" \
+      "$(printf '%s' "$LAST_DETAIL" | grep -c '请对照')"
+
+# ---- 空闲时掉档、加载后回满 -> 正常的省电行为，一个字都不该报 ----
+cat > "$RAW_DIR/pcie-link-samples.txt" <<'EOF'
+c8:00.0 2.5 8
+c8:00.0 16 16
+c8:00.0 2.5 8
+EOF
+LAST_STATUS=""; LAST_DETAIL=""; check_pcie_link
+check "加载后回满额定 -> PASS（这就是 4090 那个误报）" "PASS" "$LAST_STATUS"
+check "回满了就不许再提这张卡" "0" "$(printf '%s' "$LAST_DETAIL" | grep -c 'c8:00.0')"
+
+# ---- 纯函数：全程最好的一次 ----
+check "pcie_link_best 取全程最大值和采样条数" "16 16 3" \
+      "$(pcie_link_best "$RAW_DIR/pcie-link-samples.txt" c8:00.0)"
+check "pcie_link_best 对没采到的设备给 0 0 0" "0 0 0" \
+      "$(pcie_link_best "$RAW_DIR/pcie-link-samples.txt" 99:00.0)"
+check "pcie_link_best 采样文件不存在时也不崩" "0 0 0" \
+      "$(pcie_link_best "$RAW_DIR/nope.txt" c8:00.0)"
+check "pcie_sysfs_path 给 domain 0 的 BDF 补上前缀" \
+      "/sys/bus/pci/devices/0000:c8:00.0" "$(pcie_sysfs_path c8:00.0)"
+check "pcie_sysfs_path 对已经带 domain 的原样放行" \
+      "/sys/bus/pci/devices/10000:01:00.0" "$(pcie_sysfs_path 10000:01:00.0)"
 
 rm -f "$RAW_DIR/lspci-vv.txt"
 LAST_STATUS=""; check_pcie_link
@@ -1756,6 +1803,11 @@ check "插槽上那三张卡照常留档" "3" \
 # 豁免扩大化是这条最危险的失败方式：放过板载的同时顺手把插槽也放过，
 # 于是"卡没插到底"这种真能修的问题从此再没人看得到。
 sed -i 's/^\t\tLnkSta:\tSpeed 8GT\/s, Width x8$/\t\tLnkSta:\tSpeed 8GT\/s, Width x4/' "$RAW_DIR/lspci-vv.txt"
+# 加载态复读也一直是 x4（阵列卡不会因为省电砍宽度，这就是真的没插到底）
+cat > "$RAW_DIR/pcie-link-samples.txt" <<'EOF'
+28:00.0 8 4
+28:00.0 8 4
+EOF
 LAST_STATUS=""; LAST_DETAIL=""; check_pcie_link
 check "插槽上的阵列卡降到 x4 -> 照常 WARN" "WARN" "$LAST_STATUS"
 check "WARN 文案里要点名 28:00.0" "1" "$(printf '%s' "$LAST_DETAIL" | grep -c '28:00\.0')"
@@ -2659,10 +2711,10 @@ check "两条判定的状态都必须是 FAIL" "2" \
 #    "选了 CPU 专测却没有 CPU"这件事不存在。多写一档就是凭空多一条误判路径。
 check "不许给 cpu / mem 也加这条（没有它们机器开不了机）" "0" \
       "$(grep -cE 'KLB_SCOPE" == "(cpu|mem)" \]\] && \(\(' "$FT_SH" || true)"
-# 跳出必须是**真的跳出**。五处：配置核对屏、破坏性写确认（别问一个不会执行的
-# 擦盘）、性能基准+专项验证、压测、测后复查。
+# 跳出必须是**真的跳出**。六处：配置核对屏、破坏性写确认（别问一个不会执行的
+# 擦盘）、性能基准+专项验证、压测、PCIe 链路判定、测后复查。
 # 少守一处的后果是"说跳出了其实还在跑"，比不跳出更难查。
-check "SCOPE_ABORT 要挡住五段（核对屏 / 写确认 / 基准 / 压测 / 复查）" "5" \
+check "SCOPE_ABORT 要挡住六段（核对屏 / 写确认 / 基准 / 压测 / PCIe / 复查）" "6" \
       "$(grep -cE 'SCOPE_ABORT == 0' "$FT_SH" || true)"
 # ⚠️ 这条 FAIL 说的是「这一轮作废」，**不是「这台机器坏了」**。
 #    没装显卡 / 没有可测盘的机器本身没有任何毛病 —— 两条文案里都必须写明，
@@ -2699,12 +2751,33 @@ for fn in collect_smart verify_smart verify_disk_temp verify_dmesg verify_sel \
         "yes" "$(declare -f verify_all | grep -q "\b${fn}\b" && echo yes || echo no)"
 done
 
-for fn in collect_system check_memory_capacity check_pcie_link collect_sensors collect_smart \
-          net_link_up_all lldp_start collect_nic check_nic_speed net_test collect_ipmi collect_raid \
-          check_psu gpu_detect collect_deep collect_counters verify_dmesg_boot; do
+for fn in collect_system check_memory_capacity collect_sensors collect_smart \
+          check_nic_selftest net_link_up_all lldp_start collect_nic check_nic_speed net_test \
+          collect_ipmi collect_raid check_psu gpu_detect collect_deep collect_counters \
+          verify_dmesg_boot; do
   check "collect_all 必须调用 $fn" \
         "yes" "$(declare -f collect_all | grep -q "\b${fn}\b" && echo yes || echo no)"
 done
+
+# ---- PCIe 链路判定必须排在压测之后 ----
+#
+# 1.9.8 起它从 collect_all（PHASE 1）挪到了主流程压测之后 —— 判据是
+# "全程最好的一次读数"，在 PHASE 1 判等于又变回拿一次空闲快照定生死。
+# 挪回去不会有任何报错，只会静悄悄地把误报放回来，所以这里钉死。
+check "check_pcie_link 不许再回到 collect_all 里（那是空闲快照）" "no" \
+      "$(declare -f collect_all | grep -q '\bcheck_pcie_link\b' && echo yes || echo no)"
+check "主流程里要起 PCIe 链路采样器" "1" \
+      "$(grep -c '^  pcie_link_monitor_start$' "$FT_SH" || true)"
+check "而且要在判定之前停掉它" "1" \
+      "$(grep -c '^  pcie_link_monitor_stop$' "$FT_SH" || true)"
+check "主流程里要调用 check_pcie_link" "1" \
+      "$(grep -c '^  check_pcie_link$' "$FT_SH" || true)"
+check "采样器起在压测之前、判定排在压测之后" "yes" \
+      "$( [[ "$(grep -n 'pcie_link_monitor_start' "$FT_SH" | head -1 | cut -d: -f1)" \
+             -lt "$(grep -n '^  check_pcie_link$' "$FT_SH" | head -1 | cut -d: -f1)" ]] \
+          && echo yes || echo no)"
+check "异常退出时也要收掉采样器（否则它会一直往 raw/ 里追加）" "1" \
+      "$(grep -c 'pcie_link_monitor_stop 2>/dev/null' "$FT_SH" || true)"
 
 # 上面那两组必须**有能力变红**：这个项目栽过"从没红过的测试等于没写"。
 # 拿一个真不存在的函数名喂给同一条判据，它必须给出 no。
@@ -2804,11 +2877,8 @@ _vpos() { grep -n -- "$1" <<<"$vchain" | head -1 | cut -d: -f1; }
 vp_cap="$(_vpos 'ipmi-sensors-post.txt')"; vp_jdg="$(_vpos 'verify_bmc_sensors')"
 check "ipmi-sensors-post.txt 的采集必须排在 verify_bmc_sensors 之前" "yes" \
       "$( [[ -n "$vp_cap" && -n "$vp_jdg" && "$vp_cap" -lt "$vp_jdg" ]] && echo yes || echo no )"
-check "collect_system 必须排在 check_pcie_link 之前（PCIe 判定读的是它落下的 lspci-vv.txt）" \
-      "yes" \
-      "$(if [[ "$(grep -n 'collect_system' <<<"$chain" | head -1 | cut -d: -f1)" \
-               -lt "$(grep -n 'check_pcie_link' <<<"$chain" | head -1 | cut -d: -f1)" ]]; \
-         then echo yes; else echo no; fi)"
+# （check_nic_selftest 必须排在 net_link_up_all 之前那一条，在下面
+#   「发起和读结果必须都挂在链上」那一组里已经钉着了，不重复。）
 check "collect_nic 必须排在 check_nic_speed 之前（速率判定读的是它落下的 ethtool 输出）" \
       "yes" \
       "$(if [[ "$(grep -n 'collect_nic' <<<"$chain" | head -1 | cut -d: -f1)" \
@@ -3072,7 +3142,7 @@ check "只有链路子项没过 -> link_only（不是 fail）" "link_only" \
       "$(nic_selftest_verdict "$TMP/nst-nolink.txt")"
 check "  这条绝不能判成 fail（好机器会被拦在出货前）" "0" \
       "$(nic_selftest_verdict "$TMP/nst-nolink.txt" | grep -c '^fail$' || true)"
-check "  子项计数：0 个硬件项失败、1 个链路项失败" "0 1" \
+check "  子项计数：0 个硬件项失败、1 个网线相关项失败、0 个驱动跑不了" "0 1 0" \
       "$(nic_selftest_subtests "$TMP/nst-nolink.txt")"
 # 不带括号的写法（mlx5 / bnxt 这一类）也要认，否则换张卡就又漏了
 cat > "$TMP/nst-nolink2.txt" <<'EOF'
@@ -3086,6 +3156,92 @@ Loopback Test    0
 EOF
 check "不带括号的子项写法也要认" "link_only" \
       "$(nic_selftest_verdict "$TMP/nst-nolink2.txt")"
+
+# ---- 1.9.8：mlx5 的原样输出，这是 1.9.7 现场卡住出货的那一份 ----
+#
+# ⚠️ 那台 7542 上的 ConnectX-5 两个口都**没插网线**，报告写着
+#    「2 个网口自带的自检未通过…说明该网口存在硬件故障，需更换或返修」。
+#    1.9.2 认得 Link Test，但 mlx5 还有一条 Speed Test —— 内核里
+#    mlx5e_test_link_speed() 头一句就是 `if (!netif_carrier_ok()) return 1`，
+#    它和 Link Test 一样是没插网线必然不通过的，名字里却没有 "link"。
+#    再加上口是 down 的时候回环自检直接返回 -EOPNOTSUPP（-95），
+#    于是"硬件项失败"数一下子变成 2，整机判 FAIL。
+cat > "$TMP/nst-mlx5.txt" <<'EOF'
+The test result is FAIL
+The test extra info:
+Link Test          1
+Speed Test         1
+Health Test        0
+Loopback Test    -95
+EOF
+check "mlx5 没插网线 -> link_only（1.9.7 就是这条判成了硬件故障）" "link_only" \
+      "$(nic_selftest_verdict "$TMP/nst-mlx5.txt")"
+check "  这条绝不能判成 fail（卡住出货的就是它）" "0" \
+      "$(nic_selftest_verdict "$TMP/nst-mlx5.txt" | grep -c '^fail$' || true)"
+check "  子项计数：Speed 归网线相关、-95 归驱动跑不了" "0 2 1" \
+      "$(nic_selftest_subtests "$TMP/nst-mlx5.txt")"
+# 负数单独成立：只有一条负数时不许判成失败（能力缺失 ≠ 硬件故障，一号红线）
+printf 'The test result is FAIL\nThe test extra info:\nLoopback Test  -95\n' \
+  > "$TMP/nst-nosup.txt"
+check "只有驱动跑不了的子项 -> nosupport_only（不是 fail）" "nosupport_only" \
+      "$(nic_selftest_verdict "$TMP/nst-nosup.txt")"
+# 但真硬件项失败仍然要抓住 —— 豁免扩大化是这条最危险的失败方式
+printf 'The test result is FAIL\nThe test extra info:\nSpeed Test 1\nEeprom test 1\n' \
+  > "$TMP/nst-mixed.txt"
+check "网线相关项 + 真硬件项同时失败 -> 仍然 fail" "fail" \
+      "$(nic_selftest_verdict "$TMP/nst-mixed.txt")"
+
+# ---- 兜底那一层：没插网线的口，任何情况下都不判 FAIL ----
+#
+# 上面几条钉的是**纯函数**怎么拆子项。但那份名单是按我们见过的驱动列的，
+# 下一个厂家换一个名字（"Cable Test"？"PHY Test"？）我们又会把一台好机器
+# 判成"需更换或返修"。这一组钉的是 check_nic_selftest 里那道兜底：
+# **口上没有载波时，卡自己说的 FAIL 只降级成"接上网线复测"，绝不判 FAIL。**
+RAW_DIR="$TMP/nicselftest"; RUN_DIR="$TMP/nicselftest"
+rm -rf "$RAW_DIR"; mkdir -p "$RAW_DIR/nic" "$TMP/nicbin"
+
+# ⚠️ ethtool 必须做成 **PATH 上的一个假程序**，不能定义成 shell 函数：
+#    被测代码里写的是 `timeout 90 ethtool -t ...` —— `timeout` 只认得
+#    磁盘上的可执行文件，shell 函数它看不见，桩会被整个绕过去
+#    （第一版就是这么写的，结果自检读到空文件、判成 SKIP，用例全红）。
+cat > "$TMP/nicbin/ethtool" <<'EOF'
+#!/usr/bin/env bash
+# 卡自己说 FAIL，但一条子项明细都拆不出来 —— 最坏的那种情况：
+# 我们没有任何依据说那是网线的事，全靠"这个口有没有载波"来定。
+[[ "${1:-}" == "-t" ]] && { printf 'The test result is FAIL\n'; exit 0; }
+exit 1
+EOF
+chmod +x "$TMP/nicbin/ethtool"
+_PATH_SAVE="$PATH"; PATH="$TMP/nicbin:$PATH"
+
+net_phys_ifaces() { printf 'ens9f0\n'; }
+
+net_iface_has_carrier() { return 1; }          # 没插网线
+LAST_STATUS=""; LAST_DETAIL=""; check_nic_selftest
+check "⚠️ 没插网线 + 卡自己说 FAIL -> 判 WARN，绝不判 FAIL" "WARN" "$LAST_STATUS"
+check "  一个 FAIL 都不许出（卡住整批出货的就是它）" "0" \
+      "$(printf '%s' "$LAST_STATUS" | grep -c '^FAIL$' || true)"
+check "  文案要说明这几个口现场没接网线" "1" \
+      "$(printf '%s' "$LAST_DETAIL" | grep -c '没有接网线')"
+check "  文案要给出下一步（接上线重测）" "1" \
+      "$(printf '%s' "$LAST_DETAIL" | grep -c '接上网线后重测')"
+
+# 成对断言：**插着网线**的口说 FAIL，那就是真的 FAIL，一条都不许放过。
+# 只钉上面那半的话，把整条判定改成"永远 WARN"也能变绿。
+net_iface_has_carrier() { return 0; }          # 插着网线
+LAST_STATUS=""; LAST_DETAIL=""; check_nic_selftest
+check "插着网线 + 卡自己说 FAIL -> 照常判 FAIL（豁免不许扩大化）" "FAIL" "$LAST_STATUS"
+check "  文案要写明这个口已接网线（否则和上面那条读起来一样）" "1" \
+      "$(printf '%s' "$LAST_DETAIL" | grep -c '该口已接网线')"
+
+PATH="$_PATH_SAVE"
+unset -f net_phys_ifaces net_iface_has_carrier
+# 把被桩顶掉的真函数装回来，别影响后面的用例。
+# ⚠️ **只重新 source network.sh，绝不能连 core.sh 一起** —— 本套件自己
+#    重定义了 result_add 来抓 LAST_STATUS，把 core.sh 再 source 一遍
+#    会把它顶回原版，后面几十条断言全部读到空串（第一版踩过）。
+# shellcheck source=/dev/null
+source "$LIB/network.sh"
 # 反过来：真故障一个都不许放过
 cat > "$TMP/nst-hwbad.txt" <<'EOF'
 The test result is FAIL
@@ -3103,14 +3259,81 @@ Link test   (on/offline)	 1
 EOF
 check "硬件项和链路项都没过 -> fail（不许被链路那条捞走）" "fail" \
       "$(nic_selftest_verdict "$TMP/nst-bothbad.txt")"
-# 拆不出明细时不许替卡开脱：卡自己说失败，我们没有证据说那是网线的事
+# 拆不出明细时**不知道**是网线还是硬件 —— 纯函数只如实报"说不清"，
+# 由 check_nic_selftest 按这个口有没有载波去定：有网线还说不清就照卡自己的
+# 结论判 FAIL，没网线则降级成"接上线复测"。
 printf 'The test result is FAIL\n' > "$TMP/nst-nodetail.txt"
-check "总结论 FAIL 但没有子项明细 -> 仍然 fail" "fail" \
+check "总结论 FAIL 但没有子项明细 -> unknown_fail（说不清，交给调用方定）" "unknown_fail" \
       "$(nic_selftest_verdict "$TMP/nst-nodetail.txt")"
+check "  说不清的时候也不许直接判 pass" "0" \
+      "$(nic_selftest_verdict "$TMP/nst-nodetail.txt" | grep -c '^pass$' || true)"
 # "Loopback" 里没有 "link"，别把回环项误归到链路那一档
 check "Loopback 不许被当成链路项" "fail" \
       "$(printf 'The test result is FAIL\nThe test extra info:\nLoopback test (offline)\t 1\n' \
          > "$TMP/nst-lb.txt"; nic_selftest_verdict "$TMP/nst-lb.txt")"
+
+# ================================================================
+echo
+echo "=== BMC 的 USB 虚拟网口不参与判定（1.9.8）==="
+#
+# ⚠️ 1.9.7 现场那台 7542：
+#      enxbe3af2b6059f  driver rndis_host  bus-info usb-0000:48:00.3-1.1
+#      Link detected: yes   IPv4 169.254.3.1/24   Gateway: -   -> NO_GATEWAY
+#    那是主板上 BMC 通过 USB 暴露给系统的带内管理通道，那头没有 DHCP 服务器，
+#    **永远拿不到网关** —— 于是每一台带 BMC 的机器都会被我们自己刷一条
+#    「网卡连通性 WARN」，还把"共 N 个物理网口"多数一个。
+check "USB 总线上的网口 -> 虚拟口" "yes" \
+      "$(net_iface_is_virtual usb rndis_host && echo yes || echo no)"
+# ⚠️ 这一条**只能靠总线判**：驱动名不在下面那张表里，两条判据里只有
+#    "挂在 USB 上"能成立。少了它，换一颗 USB 网卡芯片就又漏进判定了。
+check "USB 上但驱动不认识 -> 仍然是虚拟口（只靠总线也要判得出来）" "yes" \
+      "$(net_iface_is_virtual usb ax88179_178a && echo yes || echo no)"
+check "光看驱动也要认得出来（读不到 subsystem 的内核兜底）" "yes" \
+      "$(net_iface_is_virtual '' rndis_host && echo yes || echo no)"
+for d in cdc_ether cdc_ncm cdc_eem usbnet; do
+  check "  $d 同样是虚拟口" "yes" \
+        "$(net_iface_is_virtual '' "$d" && echo yes || echo no)"
+done
+# 反过来：真网卡一个都不许被误伤 —— 豁免扩大化的后果是网卡整项没人测了
+check "PCI 上的 Intel 万兆口 -> 真网口" "no" \
+      "$(net_iface_is_virtual pci ixgbe && echo yes || echo no)"
+check "PCI 上的 ConnectX-5 -> 真网口" "no" \
+      "$(net_iface_is_virtual pci mlx5_core && echo yes || echo no)"
+check "两样都读不到时按真网口算（宁可多测一个，不可漏测一个）" "no" \
+      "$(net_iface_is_virtual '' '' && echo yes || echo no)"
+
+# 169.254 是没拿到 DHCP 时自己编的地址，不是租约
+check "169.254 是链路本地地址" "yes" \
+      "$(net_addr_is_linklocal 169.254.3.1 && echo yes || echo no)"
+check "正常的内网地址不是" "no" \
+      "$(net_addr_is_linklocal 192.168.110.147 && echo yes || echo no)"
+check "空串不是（不能把'读不到'当成链路本地）" "no" \
+      "$(net_addr_is_linklocal '' && echo yes || echo no)"
+
+# ================================================================
+echo
+echo "=== 校时：内网也要能对上时间（1.9.8）==="
+#
+# ⚠️ 1.9.7 现场那台 7542 网是通的（ping 网关 4/4 通、0.525ms），但那个网
+#    出不了公网，三个公网 NTP 全部拨不通，报告日期停在一个八个月前的假日期上。
+#    DHCP 下发的 NTP 服务器（option 42）是内网机器最靠谱的一条路。
+cat > "$TMP/dhclient.leases" <<'EOF'
+lease {
+  interface "eno1";
+  fixed-address 192.168.110.147;
+  option subnet-mask 255.255.255.0;
+  option routers 192.168.110.1;
+  option ntp-servers 192.168.110.1, 192.168.110.9;
+  option domain-name-servers 192.168.110.1;
+}
+EOF
+check "从 DHCP 租约里抠出 NTP 服务器" "192.168.110.1
+192.168.110.9" "$(net_dhcp_ntp_servers "$TMP/dhclient.leases")"
+printf 'lease {\n  interface "eno1";\n  option routers 10.0.0.1;\n}\n' \
+  > "$TMP/dhclient-nontp.leases"
+check "租约里没有 NTP 那一项时给空（不能把 routers 当成 NTP）" "" \
+      "$(net_dhcp_ntp_servers "$TMP/dhclient-nontp.leases")"
+check "租约文件不存在时也不崩" "" "$(net_dhcp_ntp_servers "$TMP/nope.leases")"
 
 # ---- 发起和读结果必须都挂在链上，而且顺序不能反 ----
 check "collect_all 必须发起硬盘自检" "yes" \

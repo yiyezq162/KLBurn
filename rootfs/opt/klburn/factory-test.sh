@@ -41,6 +41,7 @@ cleanup() {
   monitor_stop 2>/dev/null || true
   gpu_monitor_stop 2>/dev/null || true
   turbostat_stop 2>/dev/null || true
+  pcie_link_monitor_stop 2>/dev/null || true
   # 异常退出时也要把内核消息放回控制台，否则收尾菜单那个 shell 是"聋"的
   console_quiet_off 2>/dev/null || true
   # CPU/内存/GPU 压测现在是并发子 shell（见下面的 BURN_PIDS），
@@ -377,6 +378,11 @@ fi
 # 所以不需要额外的开关，也不影响不做性能核对的那些机器。
 BENCH_SECS=0
 if (( SCOPE_ABORT == 0 )); then
+  # PCIe 链路全程复读从这儿开始起 —— 它要盖住**所有会给设备加载的阶段**
+  # （基准、专项验证、压测），空闲降速的卡才有机会被读到回满的那一刻。
+  # 详见 lib/collect.sh 里 pcie_link_monitor_start 上面那段。
+  pcie_link_monitor_start
+
   section "PHASE 2/5  BASELINE & DEVICE VALIDATION (idle machine)"
   BENCH_START_EPOCH="$(date +%s)"
   bench_all "$DISK_CONFIRMED"
@@ -461,6 +467,15 @@ fi
 TEST_END_TS="$(date '+%Y-%m-%d %H:%M:%S')"
 TEST_ELAPSED=$(( $(date +%s) - TEST_START_EPOCH ))
 
+# ---------------------------------------------------------------- PCIe 链路判定
+# 采样到此为止，然后才判 —— 判据是"全程最好的一次读数"，所以必须等所有
+# 会给设备加载的阶段都跑完。SCOPE_ABORT 那一轮什么都没跑，采样器也没起过，
+# check_pcie_link 会走"只有空闲读数、不作结论"那一支。
+if (( SCOPE_ABORT == 0 )); then
+  pcie_link_monitor_stop
+  check_pcie_link
+fi
+
 # ---------------------------------------------------------------- 复查
 # 「测后复查」的前提是有"测"这回事。仅导出报告那一档没有测后，也就没有复查；
 # 范围里的部件压根不在这台机器上（SCOPE_ABORT）时同理 —— 什么都没压过，
@@ -527,7 +542,8 @@ cat > "$RUN_DIR/meta.json" <<EOF
   },
   "data_partition": "${DATA_DEV:-none}",
   "clock_synced":   ${CLOCK_SYNCED},
-  "clock_suspect":  ${CLOCK_SUSPECT}
+  "clock_suspect":  ${CLOCK_SUSPECT},
+  "clock_source":   "${CLOCK_SOURCE:-rtc}"
 }
 EOF
 
