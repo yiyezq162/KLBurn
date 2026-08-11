@@ -917,7 +917,29 @@ else
     n_fail="$(jq -s '[.[] | select(.status == "FAIL")] | length' "$RUNDIR/results.jsonl" 2>/dev/null || echo -1)"
     n_all="$(jq -s 'length' "$RUNDIR/results.jsonl" 2>/dev/null || echo 0)"
     info "判定共 $n_all 项，其中 FAIL $n_fail 项"
-    if [[ "$n_fail" != "0" ]]; then
+    # ⚠️ 有**一种 FAIL 是这一轮应该出现的**：`--scope gpu` / `--scope disk` 跑在
+    #    一台没有那个部件的机器上（QEMU 恰好就是），1.9.7 起主流程会直接跳出
+    #    并落一条 `scope_target_missing` 的 FAIL。那条 FAIL 说的是"这一轮作废"，
+    #    不是"硬件坏了"，正是我们要的行为 —— 不能被下面这条断言判成红。
+    n_missing="$(jq -s '[.[] | select(.id == "scope_target_missing")] | length' \
+                 "$RUNDIR/results.jsonl" 2>/dev/null || echo 0)"
+    if [[ "$n_missing" != "0" ]]; then
+      if [[ "$SCOPE" == "gpu" || "$SCOPE" == "disk" ]]; then
+        ok "范围内的部件不在这台机器上 -> 落了 scope_target_missing 的 FAIL（预期行为）"
+        [[ "$n_fail" == "1" ]] \
+          && ok "而且**只有**这一条 FAIL（别的项没被连累成故障）" \
+          || bad "除了 scope_target_missing 还有 $(( n_fail - 1 )) 条 FAIL"
+        # 跳出必须是真的跳出：压测/复查那几项连结论行都不该产生
+        for leak in stress_gpu stress_disk verify_dmesg verify_sel bench_gpu_bw; do
+          jq -e -s --arg i "$leak" 'any(.[]; .id == $i)' "$RUNDIR/results.jsonl" \
+             >/dev/null 2>&1 \
+            && bad "说好跳出了，$leak 却还是跑了" \
+            || ok "跳出之后 $leak 没有再跑"
+        done
+      else
+        bad "范围 $SCOPE 不该出现 scope_target_missing"
+      fi
+    elif [[ "$n_fail" != "0" ]]; then
       # QEMU 里没有 BMC、没有阵列卡、没有显卡，这些都该 SKIP 不该 FAIL。
       # 真出现 FAIL 说明有判定逻辑把"没有这个硬件"当成了"硬件坏了"——
       # 这正是二号原则（能力缺失 ≠ 硬件故障）要防的事。
