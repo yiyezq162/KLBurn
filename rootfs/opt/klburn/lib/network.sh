@@ -275,10 +275,19 @@ net_release() {
 # time.cloudflare.com 三个全部拨不通，报告日期停在一个八个月前的假日期上。
 #
 # 内网机器才是工厂里的常态，所以候选源按"由近及远"排：
-#   1. DHCP 下发的 NTP 服务器（option 42）—— 企业网基本都配了，最靠谱
-#   2. 默认网关自己 —— 绝大多数企业网关/路由器本身就应答 NTP
+#   0. **klburn.conf 里现场自己填的那个**（KLB_NTP_SERVERS）—— 最优先
+#   1. DHCP 下发的 NTP 服务器（option 42）—— 企业网大多配了
+#   2. 默认网关自己 —— **这一条只是碰运气**：多数企业网关会应答 NTP，
+#      但这不是必然的（用户 2026-08-12 明确指出）。所以它排在①后面，
+#      而且绝不能是唯一的内网来源 —— 那正是加第 0 条的理由。
 #   3. 配置里那几个公网源 —— 只有真能出公网时才轮得到
 # 全都不成还有第 4 条退路，见 sync_clock_from_bmc。
+#
+# ⚠️ 数组不能裸赋值（klburn.conf 是在本文件**之前**被 source 的，
+#    裸赋值会把现场填的值原样顶掉，而且不会有任何报错）——
+#    见本文件开头 NET_TIME_SERVERS 那一段。KLB_NTP_SERVERS 是**标量**
+#    （空格分隔的一串），所以用 `: "${VAR:=}"` 就够了。
+: "${KLB_NTP_SERVERS:=}"
 #
 # net_dhcp_ntp_servers -> DHCP 租约里带回来的 NTP 服务器，一行一个
 # dhclient 的默认 request 列表里本来就有 ntp-servers，不用改配置。
@@ -395,10 +404,15 @@ try_sync_clock_via_network() {
       # 候选源由近及远，见 net_dhcp_ntp_servers 上面那段说明。
       # 一次只拨一档：拨得通就收工，省得在没有公网的现场白等三次超时。
       local cand=() gw srv
+      # ① 现场在 klburn.conf 里填的那个，排第一
+      for srv in ${KLB_NTP_SERVERS}; do [[ -n "$srv" ]] && cand+=("$srv"); done
+      # ② DHCP 下发的
       while read -r srv; do [[ -n "$srv" ]] && cand+=("$srv"); done \
         < <(net_dhcp_ntp_servers)
+      # ③ 默认网关（碰运气，见上面说明）
       gw="$(net_parse_gateway "$(ip -4 route show default dev "$ifn" 2>/dev/null)")"
       [[ -n "$gw" ]] && cand+=("$gw")
+      # ④ 公网
       cand+=("${NET_TIME_SERVERS[@]}")
 
       for srv in "${cand[@]}"; do

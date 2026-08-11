@@ -164,6 +164,9 @@ MUTATIONS=(
 "pcie-idle-snapshot${S}PCIe 链路退回拿一次空闲快照判定（同一张卡六轮四轮误报）${S}test-hw-checks${S}$RT/lib/collect.sh${S}mut_pcie_idle_snapshot_verdict"
 "nic-selftest-nolink-fail${S}没插网线的口自检失败照样判 FAIL（1.9.2 和 1.9.7 各栽过一次）${S}test-hw-checks${S}$RT/lib/network.sh${S}mut_nic_selftest_nolink_fails"
 "bmc-virtual-nic-judged${S}BMC 的 USB 虚拟网口重新进判定（每台带 BMC 的机器都被刷一条 WARN）${S}test-hw-checks${S}$RT/lib/network.sh${S}mut_bmc_virtual_nic_judged"
+"gpu-d2d-int-overflow${S}显存 D2D 块大小退回 2GiB（正好溢出 32 位参数，每台大显存的卡都测不到）${S}test-log-parsing${S}$RT/lib/bench.sh${S}mut_gpu_d2d_int_overflow"
+"psu-bench-wiring-warn${S}四路电源少插一根线又变回 WARN（七个版本 11 次，一次都不是真问题）${S}test-hw-checks${S}$RT/lib/collect.sh${S}mut_psu_bench_wiring_warn"
+"disk-confirm-single-key${S}破坏性写确认第二关退回单键（按下去就擦盘，没有反悔余地）${S}test-hw-checks${S}$RT/lib/storage.sh${S}mut_disk_confirm_single_key"
 )
 
 # ================================================================
@@ -972,7 +975,7 @@ mut_selfskip_overreach() {
 # 去掉"曲线压没压平"那道判据之后，这个数会被当成有效读数报出去。
 mut_d2d_single_size() {
   replace_line "$RT/lib/bench.sh" \
-    '    if (big > 2048 * MiB) big = 2048 * MiB' \
+    '    if (big > 1024 * MiB) big = 1024 * MiB       # 见上面：绝不能到 2GiB' \
     '    if (big > 32 * MiB) big = 32 * MiB'
 }
 
@@ -997,8 +1000,8 @@ mut_psu_ghost_ignores_bmc() {
 # 整机才 456W 的机器也会被写成"没有冗余"，客户以为机器有毛病。
 mut_psu_redundancy_unconditional() {
   replace_line "$RT/lib/collect.sh" \
-    '      if   (( live <= 1 )); then red="；当前仅剩 ${live} 路在供电，不具备电源冗余"' \
-    '      if   (( live <= 99 )); then red="；当前不具备电源冗余"'
+    '      (( ac_read == 1 )) && red="；当前仅剩 ${live} 路在供电，不具备电源冗余"' \
+    '      red="；当前不具备电源冗余"'
 }
 
 # 显存行重映射的查询里加回 `index`。驱动不认这个字段名，会把整条查询否掉，
@@ -1065,6 +1068,31 @@ mut_nic_selftest_nolink_fails() {
   replace_line "$RT/lib/network.sh" \
     '    if [[ "$v" == "fail" || "$v" == "unknown_fail" ]] && ! net_iface_has_carrier "$ifn"; then' \
     '    if false; then'
+}
+
+# 1.9.9：显存 D2D 的块大小退回 2GiB —— 正好比 32 位有符号整数上限大 1，
+# bandwidthTest 的参数解析溢出，每一张大显存的卡显存带宽这一项永远测不到，
+# 日志里还留一行红色的 Result = FAIL。
+mut_gpu_d2d_int_overflow() {
+  replace_line "$RT/lib/bench.sh" \
+    '    if (big > 1024 * MiB) big = 1024 * MiB       # 见上面：绝不能到 2GiB' \
+    '    if (big > 2048 * MiB) big = 2048 * MiB'
+}
+
+# 1.9.9：四路电源少插一根线又变回 WARN。这条 WARN 在七个版本的现场数据里
+# 出现 11 次、一次都不是机器的毛病 —— 全是测试台上没插满电源线。
+mut_psu_bench_wiring_warn() {
+  replace_line "$RT/lib/collect.sh" \
+    '    if (( ac_read == 1 && live >= 2 )); then' \
+    '    if false; then'
+}
+
+# 1.9.9：破坏性写确认的第二关退回单键。按下 y 的一瞬间就开始擦盘，
+# 连反悔的余地都没有；而且和第一关（打 yes 再回车）是两种交互。
+mut_disk_confirm_single_key() {
+  replace_line "$RT/lib/storage.sh" \
+    '  if ! read_line_countdown answer2 "$final_timeout" \' \
+    '  if IFS= read -r -s -t 1 -n 1 answer2; then :; elif true; then'
 }
 
 # 1.9.8：BMC 的 USB 虚拟网口重新进判定。

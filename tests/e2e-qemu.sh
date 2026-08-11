@@ -522,19 +522,25 @@ elif (( DISK_STRESS )); then
     bad "没等到配置核对面板结束的锚点 —— 按键不敢发（盲发按错方向就是真擦盘）"
   fi
 
-  # ---------------- 第 2 道：最终警告面板，单键 y ----------------
+  # ---------------- 第 2 道：最终警告面板，打 y 再回车 ----------------
   # 这一道没有自己的日志锚点（面板只是 printf），但它**紧跟着**第 1 道，
   # 中间不做任何硬件动作，时间窗是确定的，而且面板本身有 60s 超时。
   # 发完之后有锚点可验：两道都过了 confirm_disk_write 会打一条 ok。
+  #
+  # ⚠️ 1.9.9 起第 2 道**也是整行读**（打 y 或 yes 再回车），不再是单键。
+  #    现场反馈是"第一遍 yes 没毛病，第二遍不知道该打 y 还是 yes" ——
+  #    同一件事在相邻两屏上换了两种交互本身就是个坑，而且单键那种
+  #    按下去的一瞬间就开始擦盘，连反悔的余地都没有。
+  #    **所以这里必须补一个 ret，只发 y 是过不去的。**
   if (( disk_confirm_sent )); then
     sleep 4
-    mon "sendkey y"
+    mon "sendkey y"; sleep 1; mon "sendkey ret"
     if wait_for_log "Disk stress test confirmed by operator" 90 "两道确认都通过"; then
       ok "两道破坏性写确认都通过了（fio 会真的往裸盘上写）"
     else
-      mon "sendkey y"
+      mon "sendkey y"; sleep 1; mon "sendkey ret"
       if wait_for_log "Disk stress test confirmed by operator" 60 "两道确认都通过"; then
-        ok "两道破坏性写确认都通过了（第 2 道补发了一次 y）"
+        ok "两道破坏性写确认都通过了（第 2 道补发了一次 y+回车）"
       else
         bad "没能通过破坏性写确认 —— 这一轮 fio 不会写盘，下面几条必然红"
       fi

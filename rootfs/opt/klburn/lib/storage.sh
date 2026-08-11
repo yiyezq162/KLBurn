@@ -471,30 +471,42 @@ confirm_disk_write() {
     printf '  %s   %-14s %10s  %-24.24s%s\n' "$C_RED$C_BLD" "$path" "$size" "$model" "$C_RST"
   done
   printf '\n'
-  printf '  %s[y]%s  YES - erase and stress-test these disks\n' "$C_BLD" "$C_RST"
-  printf '  %s[n]%s  No  - skip  (default; any other key also skips)\n\n' "$C_BLD" "$C_RST"
+  # ⚠️ 两关的操作方式必须**一模一样**：都是打字 + 回车。
+  #
+  # 1.9.8 之前第一关是"打 yes 再回车"，第二关却是**单键**（`[y]` / `[n]`，
+  # 按下去立刻执行）。现场的反馈是"第一遍 yes 没毛病，第二遍不知道该打 y
+  # 还是 yes"—— 同一件事在相邻两屏上换了两种交互，这本身就是个坑。
+  # 而且第二关按下 y 的那一瞬间就开始擦盘，**连反悔的余地都没有**；
+  # 第一关反而更稳妥。所以统一成第一关那种：
+  #   * 打 y 或者 yes（不分大小写、前后空格无所谓）再回车 -> 擦
+  #   * 别的什么都不擦：打错（yas / ye / n）、直接回车、超时
+  # `[n]` 那一项也去掉了 —— "不擦"是默认动作，不需要专门给它一个按键，
+  # 列出来反而让人以为"必须选一个"。
+  printf '  %s[YES]%s  erase and stress-test these disks\n' "$C_BLD" "$C_RST"
+  printf '  %s       type  y  or  yes  and press ENTER. Anything else%s\n' "$C_GRY" "$C_RST"
+  printf '  %s       (typo, ENTER alone, or %ds timeout) SKIPS the test.%s\n\n' \
+    "$C_GRY" "60" "$C_RST"
 
-  local key="" start now remaining final_timeout=60
-  start=$(date +%s)
-  while :; do
-    now=$(date +%s); remaining=$(( final_timeout - (now - start) ))
-    if (( remaining <= 0 )); then
-      printf '\n'
-      warn "Final confirmation timed out - skipping disk stress test."
-      DISK_SKIP_REASON="最终确认面板等待 ${final_timeout}s 无响应，自动跳过（硬盘信息已采集）"
-      return 1
-    fi
-    printf '\r\033[K  %sPress y to ERASE, anything else to skip  [%2ds]%s ' \
-      "$C_RED$C_BLD" "$remaining" "$C_RST"
-    if IFS= read -r -s -t 1 -n 1 key; then
-      printf '\n'
-      if [[ "$key" == "y" || "$key" == "Y" ]]; then
-        ok "Disk stress test confirmed by operator."
-        return 0
-      fi
-      info "Skipped at final confirmation."
-      DISK_SKIP_REASON="现场在最终确认面板选择了跳过（硬盘信息已采集）"
-      return 1
-    fi
-  done
+  local answer2="" final_timeout=60
+  if ! read_line_countdown answer2 "$final_timeout" \
+       "  ${C_RED}${C_BLD}Type y or yes to ERASE >${C_RST}"; then
+    warn "Final confirmation timed out - skipping disk stress test."
+    DISK_SKIP_REASON="最终确认面板等待 ${final_timeout}s 无响应，自动跳过（硬盘信息已采集）"
+    return 1
+  fi
+
+  local norm2="${answer2//[[:space:]]/}"
+  if [[ "${norm2,,}" == "y" || "${norm2,,}" == "yes" ]]; then
+    ok "Disk stress test confirmed by operator."
+    return 0
+  fi
+
+  if [[ -z "$norm2" ]]; then
+    info "Skipped at final confirmation (ENTER)."
+    DISK_SKIP_REASON="现场在最终确认面板直接回车跳过（硬盘信息已采集）"
+  else
+    warn "Input was '${answer2}', not y/yes - skipping disk stress test."
+    DISK_SKIP_REASON="现场在最终确认面板输入的是 '${answer2}' 而非 y/yes，按默认跳过（硬盘信息已采集）"
+  fi
+  return 1
 }

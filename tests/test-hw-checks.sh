@@ -508,16 +508,28 @@ PSU4_Vin | 220.000 | Volts | ok | 10.25'
 psu_case "$DMI_3REAL_1GHOST" "$SENS_4PSU_P2DEAD"
 check "BMC 读到 PSU4 有 220V -> 它是真电源，四路都要算进在位数" "1" \
       "$(printf '%s' "$LAST_DETAIL" | grep -c '共 4 个电源模块在位')"
-check "少一路交流输入仍是 WARN（不是故障）" "WARN" "$LAST_STATUS"
-# ★ 「不具备电源冗余」原来是**无条件**拼上去的。四路电源掉一路、整机才 456W
-#   的机器也照写不误 —— 客户读到"不具备冗余"会以为这台机器有毛病。
+# ⚠️⚠️ 1.9.9 把这一支从 WARN 改成了 PASS。
+#
+# 翻了仓库里全部七个版本的现场数据：这条 WARN 出现了 **11 次，一次都不是
+# 机器的毛病** —— 全是"四路电源的机器，测试台上只插了两三根电源线"。
+# 而它每次都会在报告抬头单列一块「以下 N 项为告警，建议出货前确认」，
+# 把一台好机器的报告刷成黄的。**一条从来没有一次是真问题的告警，
+# 唯一的作用是训练看报告的人忽略告警。**
+check "四路里少一路、还剩 3 路带电 -> PASS（现场接线条件，不是故障）" "PASS" "$LAST_STATUS"
 check "还剩 3 路带电时要说「仍具备电源冗余」" "1" \
       "$(printf '%s' "$LAST_DETAIL" | grep -c '仍具备电源冗余')"
 check "而且绝不许出现「不具备电源冗余」" "0" \
       "$(printf '%s' "$LAST_DETAIL" | grep -c '不具备电源冗余')"
+check "但没进电的那一路必须点名（不是把这件事抹掉）" "1" \
+      "$(printf '%s' "$LAST_DETAIL" | grep -c 'PSU2')"
+check "文案要说明这是现场接线条件，不是模块有毛病" "1" \
+      "$(printf '%s' "$LAST_DETAIL" | grep -c '现场接线条件')"
 
-# 反过来：真的只剩一路了，那才是没有冗余 —— 这句话不许因此消失。
+# ⚠️ **成对断言：豁免不许扩大化。** 只剩一路的时候掉了就整机断电，
+#    那才是真的没有冗余，必须照旧 WARN。只钉上面那半的话，
+#    把整条判定改成"永远 PASS"也能变绿。
 psu_case "$DMI_OK_OK" "$SENS_PSU2_DEAD"
+check "两路里掉一路、只剩 1 路 -> 仍然判 WARN（真的没冗余了）" "WARN" "$LAST_STATUS"
 check "两路里掉一路、只剩 1 路 -> 这才说不具备冗余" "1" \
       "$(printf '%s' "$LAST_DETAIL" | grep -c '仅剩 1 路在供电，不具备电源冗余')"
 
@@ -2694,6 +2706,32 @@ check "那一处必须紧跟在 confirm_disk_write 的成功分支里" "yes" \
 # 两处都得在，缺前一处 = 硬盘专测不问就跑，缺后一处 = 问了却不跑。
 check "破坏性写确认和硬盘压测两段都由 scope_runs stress_disk 管" "2" \
       "$(grep -c 'scope_runs stress_disk' "$FT_SH" || true)"
+
+# ---- 两道确认必须是**同一种交互**（1.9.9）----
+#
+# 1.9.8 之前第一关是"打 yes 再回车"，第二关却是**单键**（`[y]` / `[n]`，
+# 按下去立刻擦盘）。现场反馈是"第一遍 yes 没毛病，第二遍不知道该打 y 还是 yes"
+# —— 同一件事在相邻两屏上换了两种交互，本身就是个坑；而且单键那种按下去的
+# 一瞬间就开始擦盘，**连反悔的余地都没有**，比第一关还危险。
+# 现在两关都是整行读（read_line_countdown），都必须回车才生效。
+_ST_SH="$LIB/storage.sh"
+_confirm="$(declare -f confirm_disk_write)"
+check "两道确认都必须走整行读（不许有单键读）" "2" \
+      "$(printf '%s\n' "$_confirm" | grep -c 'read_line_countdown' || true)"
+check "确认面板里不许再出现单键读（按下去就擦盘，没有反悔余地）" "0" \
+      "$(printf '%s\n' "$_confirm" | grep -c 'read -r -s -t 1 -n 1' || true)"
+# 第二关接受 y 和 yes 两种写法（现场记不住到底该打哪个，两个都认）
+check "第二关要认单个 y" "1" \
+      "$(grep -cF '"${norm2,,}" == "y"' "$_ST_SH" || true)"
+check "第二关也要认完整的 yes（现场记不住该打哪个，两个都得认）" "1" \
+      "$(grep -cF '"${norm2,,}" == "yes"' "$_ST_SH" || true)"
+# ⚠️ 但**第一关仍然只认 yes**：那是整套流程里最外面的一道闸，
+#    放宽成单个字母就等于把"手滑按到 y"变成一次真擦盘。
+check "第一关仍然只认完整的 yes（不许放宽成 y）" "1" \
+      "$(grep -c '"${norm,,}" != "yes"' "$_ST_SH" || true)"
+check "面板上不许再印那个多余的 \[n\]（不擦是默认动作，不需要按键）" "0" \
+      "$(printf '%s\n' "$_confirm" | grep -c '\[n\]' || true)"
+unset _ST_SH _confirm
 
 # ---- 范围里的部件不在这台机器上：直接跳出，判 FAIL ----
 #
