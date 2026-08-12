@@ -249,13 +249,32 @@ mkdir -p /opt/klburn/tools
 find /opt/klburn -type f -name '*.sh' -exec chmod 0755 {} +
 find /opt/klburn -type f -name '*.py' -exec chmod 0755 {} +
 chmod 0755 /opt/klburn/factory-test.sh
+chmod 0755 /opt/klburn/memtest.sh
+
+# ---------------------------------------------------------------- 开机拉起哪个脚本
+# 这是 full 盘和 mem 盘**唯一**的行为差别：换掉 klburn.service 的 ExecStart。
+#
+# ⚠️ 改完必须当场核一遍改成功了没有。sed 没匹配上是**静默**的 ——
+#    做出来的会是一张文件名写着 MEM、开机却跑整机全测流程（还会弹范围菜单）
+#    的盘，而构建日志里一个字的异常都没有。
+KLB_MAIN="/opt/klburn/factory-test.sh"
+if [[ "${KLBURN_EDITION:-full}" == "mem" ]]; then
+  KLB_MAIN="/opt/klburn/memtest.sh"
+  sed -i \
+    -e "s#^ExecStart=.*#ExecStart=${KLB_MAIN}#" \
+    -e 's#^Description=.*#Description=KLBurn Memory-Only Test#' \
+    /etc/systemd/system/klburn.service
+fi
+[[ -x "$KLB_MAIN" ]] || fail "开机要拉起的 $KLB_MAIN 不存在或不可执行"
+grep -qx "ExecStart=$KLB_MAIN" /etc/systemd/system/klburn.service \
+  || fail "klburn.service 的 ExecStart 不是 $KLB_MAIN —— 这张盘开机会跑错流程"
 
 # 开机自动拉起测试主脚本
 systemctl enable klburn.service >/dev/null 2>&1 \
   || fail "systemctl enable klburn.service 失败"
 [[ -L /etc/systemd/system/multi-user.target.wants/klburn.service ]] \
   || fail "klburn.service 没有真正 enable 成功，做出来的盘开机不会自动跑测试"
-say "klburn.service 已设为开机自启"
+say "klburn.service 已设为开机自启（ExecStart=$KLB_MAIN）"
 
 # 构建期常量写进配置文件，运行时脚本读它。
 # 抬头（公司名 / 报告标题 / 产品名）就是在这里钉死进盘里的 —— 现场不会再问任何人。
@@ -265,6 +284,12 @@ KLBURN_VERSION="${KLBURN_VERSION}"
 COMPANY_NAME="${COMPANY_NAME}"
 REPORT_TITLE="${REPORT_TITLE:-服务器出厂老化测试报告}"
 PRODUCT_NAME="${PRODUCT_NAME:-KLBurn}"
+# 这张盘是整机全测盘（full）还是内存专用盘（mem）。运行时脚本和报告生成器
+# 都读它 —— 报告抬头那句"本轮只测了内存"就是按它写的。
+KLBURN_EDITION="${KLBURN_EDITION:-full}"
+# 内存专用盘的压测时长（秒）。只有 mem 盘用得上；现场想改测多久，
+# 改这一行重新出盘即可，不需要动代码。
+MEM_BURN_SECONDS="${MEM_BURN_SECONDS:-150}"
 BUILD_DATE="$(date '+%Y-%m-%d %H:%M:%S')"
 BASE_OS="Ubuntu Server ${UBUNTU_POINT}"
 INCLUDE_NVIDIA="${INCLUDE_NVIDIA:-0}"

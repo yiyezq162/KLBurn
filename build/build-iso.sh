@@ -3,6 +3,7 @@
 # KLBurn ISO 一键构建
 #
 #   sudo ./build/build-iso.sh                  # 常规构建（vendor/nvidia 里有驱动就自动带上）
+#   sudo ./build/build-iso.sh --edition mem    # 内存专用盘（开机不问、直接测内存）
 #   sudo ./build/build-iso.sh --without-nvidia # 强制出一张不含显卡驱动的盘
 #   sudo ./build/build-iso.sh --clean          # 清空工作区从头来
 #   sudo ./build/build-iso.sh --rebuild-fs     # 强制重新解 squashfs（换源 ISO 后用）
@@ -28,8 +29,11 @@ while [[ $# -gt 0 ]]; do
     --skip-download) OPT_SKIP_DOWNLOAD=1 ;;
     --with-nvidia)    export INCLUDE_NVIDIA=1; OPT_NVIDIA_FORCED=1 ;;
     --without-nvidia) export INCLUDE_NVIDIA=0; OPT_NVIDIA_FORCED=1 ;;
+    # 出哪一种盘。必须 export：config.sh 在下面才被 source，它按这个值
+    # 决定报告标题、产品名和 ISO 文件名。
+    --edition)      export KLBURN_EDITION="$2"; shift ;;
     --iso)          SRC_ISO_OVERRIDE="$2"; shift ;;
-    -h|--help)      sed -n '2,14p' "$0"; exit 0 ;;
+    -h|--help)      sed -n '2,15p' "$0"; exit 0 ;;
     *) echo "未知参数: $1" >&2; exit 1 ;;
   esac
   shift
@@ -360,6 +364,11 @@ cat >> "$STAGE/config.sh" <<EOF
 
 # ---------- 以下由 build-iso.sh 在构建时追加，勿手改 ----------
 GIT_COMMIT="${GIT_COMMIT}${GIT_DIRTY}"
+# 出的是哪一种盘（full / mem）。和 INCLUDE_NVIDIA 同一个道理：chroot 里
+# 没有外面的环境变量，不钉死的话 \`--edition mem\` 在 chroot 里会读回
+# 默认的 full，于是开机自启的还是整机全测脚本 —— 而且不会有任何报错。
+KLBURN_EDITION="${KLBURN_EDITION}"
+MEM_BURN_SECONDS="${MEM_BURN_SECONDS}"
 # chroot 里没有 vendor/ 目录，自动检测得不出正确答案，这里钉死外面算好的结论
 INCLUDE_NVIDIA="${INCLUDE_NVIDIA}"
 NVIDIA_VERSION="${NVIDIA_VERSION}"
@@ -641,6 +650,13 @@ printf '%s 构建完成%s\n' "$C_GRN$C_BLD" "$C_RST"
 printf '  ISO      : out/%s\n' "$OUT_ISO_NAME"
 printf '  体积     : %s\n' "$(human "$ISO_SIZE")"
 printf '  抬头     : %s\n' "$COMPANY_NAME"
+# 版本必须打在这儿。两张盘的文件名只差三个字母，而跑起来完全不是一回事，
+# 构建完看一眼就能确认自己出的是哪一张。
+if [[ "$KLBURN_EDITION" == "mem" ]]; then
+  printf '  盘型     : 内存专用盘（开机直接测内存，压测 %s 秒）\n' "$MEM_BURN_SECONDS"
+else
+  printf '  盘型     : 整机出厂老化盘（开机选范围 + 选时长）\n'
+fi
 printf '  显卡驱动 : %s\n' \
   "$( ((INCLUDE_NVIDIA)) && echo "已包含 NVIDIA ${NVIDIA_VERSION}" || echo '未包含')"
 printf '  sha256   : %s\n' "$(cat "$PROJ_DIR/out/$OUT_ISO_NAME.sha256")"

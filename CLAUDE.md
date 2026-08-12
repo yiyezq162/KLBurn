@@ -16,10 +16,19 @@
 1.9.5 起开机先选**测试范围**（全量 / CPU / 内存 / 显卡 / 硬盘 / 仅导出报告），
 再选时长。范围之外的项目**整项不跑、也不产生结论行**。
 
+**1.10.0 起同一份源码出两种盘**（`--edition full|mem`，构建时钉死）：
+`mem` 是**内存专用盘** —— 开机不问任何东西、约三分钟、只读内存明细 + 压一遍内存，
+硬盘/阵列卡/显卡/电源/BMC/PCIe 完全不碰，网卡只用来校时。
+判定口径也窄一格：**只有内存坏才 FAIL**，坏网卡坏阵列卡不影响结论；
+外加一条查假条子的 —— **序列号重复判 FAIL**（那批假内存压测都能过，只有序列号露馅）。
+说明见 [`docs/mem-edition.md`](docs/mem-edition.md)，主流程是
+`rootfs/opt/klburn/memtest.sh`（不是 `factory-test.sh`）。
+
 ## 文档去哪儿找
 
 | 要查什么 | 看哪份 |
 |---|---|
+| **内存专用盘**（第二种盘） | [`docs/mem-edition.md`](docs/mem-edition.md) |
 | 判定口径、模块地图、**不变量清单** | [`docs/architecture.md`](docs/architecture.md) |
 | 哪些内容不能进交付报告 | [`docs/report-policy.md`](docs/report-policy.md) |
 | 输出了哪些文件、六个范围各长什么样 | [`docs/reports.md`](docs/reports.md) |
@@ -45,6 +54,18 @@ report-policy + reports.md；加/换工具 → toolbox.md + vendor/README.md。
 ```
 wsl -d Ubuntu-24.04 -u root -e bash -c "cd /mnt/c/Users/li/Desktop/project/KLBurn && KLBURN_WORK=/home/li/klburn-build ./build/build-iso.sh"
 ```
+
+内存专用盘加 `--edition mem`（**同一个工作区就行**，不用另开一个）：
+
+```
+wsl -d Ubuntu-24.04 -u root -e bash -c "cd /mnt/c/Users/li/Desktop/project/KLBurn && KLBURN_WORK=/home/li/klburn-build ./build/build-iso.sh --edition mem"
+```
+
+共用工作区是安全的，但理由要说清楚：`klburn.service` 在 `rootfs/` 覆盖层里，
+`chroot-setup.sh` 每次构建都先 `cp -a "$STAGE/overlay/." /` 把它**原样铺回来**
+（`ExecStart=…/factory-test.sh`），之后才按 edition 决定改不改。
+所以 mem 盘构建完再构建 full 盘，ExecStart 会自己回到 factory-test.sh。
+**顺序反过来就会出错**，别把那个 `cp -a` 挪到 sed 后面去。
 
 - 工作区（含已下载的源 ISO 缓存）：`/home/li/klburn-build`
 - 首次约 10~15 分钟，增量约 5~8 分钟；产物自动拷回项目的 `out/`

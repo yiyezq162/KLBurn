@@ -11,7 +11,31 @@
 # ⚠️ 改完脚本要「先 bump 再构建」。0.3.0 就栽过一次：ISO 构建完之后又改了
 # core.sh/collect.sh 却没动版本号，于是现场那根盘自称 0.3.0、跑的却是修复前的
 # 代码（lshw 卡满 90s、屏幕上冒 Killed），对着仓库怎么看都对不上。
-KLBURN_VERSION="1.9.9"
+KLBURN_VERSION="1.10.0"
+
+# ================================================================
+# 版本（edition）：这张盘是整机全测盘，还是内存专用盘
+# ================================================================
+# 同一份源码出两种盘，**构建时钉死**，现场不会再问任何人：
+#
+#   full  整机出厂老化盘。开机选范围（六个入口）、选时长，跑完出验收报告。
+#   mem   内存专用盘。**开机不问任何东西，直接开测**，只碰内存：
+#         平台认个大概（CPU / 主板 / BIOS）、逐条内存的 SN / 型号 / 频率 /
+#         容量，做一段短压测和 ECC 复查，出一份只谈内存的报告。
+#         不采网卡、不采 PCIe、不跑任何性能基准、不碰硬盘。
+#
+#     KLBURN_EDITION=mem sudo -E ./build/build-iso.sh
+#     sudo ./build/build-iso.sh --edition mem        # 等价，推荐
+#
+# ⚠️ 两种盘的差别**只在这三处**：开机拉起哪个脚本（chroot-setup.sh 改
+#    klburn.service 的 ExecStart）、报告标题、ISO 文件名。判定逻辑、
+#    四态语义、报告红线全都共用同一套代码 —— 别为了内存盘再分叉一份。
+KLBURN_EDITION="${KLBURN_EDITION:-full}"
+case "$KLBURN_EDITION" in
+  full|mem) ;;
+  *) printf 'config.sh: KLBURN_EDITION 只能是 full 或 mem，收到 "%s"\n' \
+       "$KLBURN_EDITION" >&2; exit 1 ;;
+esac
 
 # ================================================================
 # 品牌抬头
@@ -31,12 +55,22 @@ KLBURN_VERSION="1.9.9"
 #      所以公司名含中文时 banner 上不显示它（只在报告里出现），这是正常的。
 COMPANY_NAME="${KLBURN_COMPANY_NAME:-广州市鲲林科技有限公司}"
 
-# 报告大标题（客户报告和内部报告共用这一个主标题）
-REPORT_TITLE="${KLBURN_REPORT_TITLE:-服务器出厂老化测试报告}"
+# 报告大标题（客户报告和内部报告共用这一个主标题）。
+# 内存盘换一个标题 —— 一份只测了内存的报告顶着"服务器出厂老化测试报告"
+# 这个抬头，就是在说一件它没做过的事（和单项专测那条红线同一把尺子）。
+if [[ "$KLBURN_EDITION" == "mem" ]]; then
+  REPORT_TITLE="${KLBURN_REPORT_TITLE:-内存专用测试报告}"
+else
+  REPORT_TITLE="${KLBURN_REPORT_TITLE:-服务器出厂老化测试报告}"
+fi
 
 # 产品名：开机 banner、GRUB 菜单项、.disk/info 用它。
 # 只能是 ASCII —— 这三个地方都在文本控制台/引导器里，中文显示不出来。
-PRODUCT_NAME="${KLBURN_PRODUCT_NAME:-KLBurn}"
+if [[ "$KLBURN_EDITION" == "mem" ]]; then
+  PRODUCT_NAME="${KLBURN_PRODUCT_NAME:-KLBurn-MEM}"
+else
+  PRODUCT_NAME="${KLBURN_PRODUCT_NAME:-KLBurn}"
+fi
 
 # 可选 logo：把 png 放到 vendor/logo.png，留空则报告不显示 logo
 COMPANY_LOGO_FILE="${KLBURN_LOGO_FILE:-logo.png}"
@@ -226,6 +260,18 @@ PKGS_COLLECT=(
   dmidecode lshw pciutils usbutils nvme-cli smartmontools ipmitool
   ethtool jq python3 hdparm sdparm lsscsi lm-sensors numactl
   efibootmgr kmod util-linux bc gawk
+  # decode-dimms：直接读**内存条自己的 SPD 芯片**，拿到 dmidecode 给不了的
+  # 那几样 —— 生产地点、颗粒厂商、以及厂商专属数据区。
+  #
+  # 为什么要它：客户报告里的内存序列号只有 8 位十六进制（JEDEC 规定这一格
+  # 就是 4 字节，没被截断），而内存条标签上印的是十几位的生产追溯号。
+  # 长号如果有电子记录，只可能在专属区里 —— 那片字节只有读 SPD 原片才拿得到。
+  #
+  # ⚠️ 我们**只读，绝不写**，而且绝不做 i2cdetect 盲扫：服务器的 SMBus 上
+  #    还挂着 BMC、风扇控制器、背板，盲扫能把机器扫挂。只读内核驱动
+  #    （ee1004 / at24 / spd5118）已经建好的那些 eeprom 节点。
+  #    读不到一律 SKIP —— 很多服务器平台的 SMBus 归 BMC 管，主机侧本来就读不到。
+  i2c-tools
   # ↓ 基础镜像里本来就有，但**显式列出来** = 手动安装标记 = autoremove 不会碰。
   #   清理多余内核那步的 autoremove 射程比想象中远（1.5.0 第一次就顺手带走了
   #   amd64-microcode），而这几个是采集要用的。
@@ -352,5 +398,23 @@ PKGS_NVIDIA_BUILD=(
   build-essential dkms libglvnd-dev pkg-config
 )
 
+# ---------- 内存专用盘的压测时长（秒）----------
+# 只对 KLBURN_EDITION=mem 有意义。这张盘的定位是"插上去两三分钟，
+# 把内存的 SN / 型号读出来、顺手验一遍这条内存还能不能用"，
+# 所以默认给 150 秒（连采集和出报告，整轮约 3 分钟）。
+# **现场没有时长菜单** —— 开机就按这个值开跑，不问任何人。
+#
+# ⚠️ **两分钟压不出"内存能长期稳定工作"这个结论，它压的是"现在有没有明显坏"。**
+#    真要筛一批可疑内存，把这个值加大（比如 1800 = 半小时）再出一张盘；
+#    报告里会如实写出本次压了多久，不会拿两分钟的结果去冒充老化测试。
+#
+#     KLBURN_MEM_BURN_SECONDS=600 sudo -E ./build/build-iso.sh --edition mem
+MEM_BURN_SECONDS="${KLBURN_MEM_BURN_SECONDS:-150}"
+
 # ---------- 输出 ----------
-OUT_ISO_NAME="KLBurn-${KLBURN_VERSION}-$(date +%Y%m%d).iso"
+# 内存盘的文件名必须一眼区分得开 —— 两张盘长得一样、跑起来完全不是一回事。
+if [[ "$KLBURN_EDITION" == "mem" ]]; then
+  OUT_ISO_NAME="KLBurn-MEM-${KLBURN_VERSION}-$(date +%Y%m%d).iso"
+else
+  OUT_ISO_NAME="KLBurn-${KLBURN_VERSION}-$(date +%Y%m%d).iso"
+fi

@@ -20,6 +20,7 @@ SUITES=(
   test-screen-render
   test-report-render
   test-internal-report
+  test-mem-edition
   test-capture
   test-concurrent-burn
   test-batch-tools

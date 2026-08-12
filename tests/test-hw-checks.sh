@@ -2315,7 +2315,9 @@ join_continuations() {
   } END { if (buf != "") print buf }' "$@"
 }
 
-JOINED="$(join_continuations "$RT"/lib/*.sh "$RT"/factory-test.sh 2>/dev/null)"
+# memtest.sh（内存专用盘的主流程）也在里面 —— 它同样会 result_add 出中文文案，
+# 漏掉它就等于给那张盘的报告开了一扇没人看的门。
+JOINED="$(join_continuations "$RT"/lib/*.sh "$RT"/factory-test.sh "$RT"/memtest.sh 2>/dev/null)"
 
 # 先自检：拼行到底有没有生效。"此项不影响整机结论"这句只写在续行里，
 # 扫不到它就说明拼行白做了，这条守卫又变回摆设。
@@ -2352,6 +2354,7 @@ offenders="$(
   {
     printf '%s\n' "$JOINED" | grep -E '^[[:space:]]*result_add '
     cat "$RT"/report/generate_report.py 2>/dev/null
+    cat "$RT"/report/generate_mem_report.py 2>/dev/null
   } | customer_text_offenders
 )"
 check "会进报告的中文文案里不许出现内部/开发用语" "0" \

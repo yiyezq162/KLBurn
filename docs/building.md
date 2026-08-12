@@ -59,7 +59,8 @@ sudo ./build/build-iso.sh
 耗时：首次约 10~15 分钟（不含下载），增量约 5~8 分钟。
 
 ```bash
-sudo ./build/build-iso.sh                    # 常规构建
+sudo ./build/build-iso.sh                    # 常规构建（整机出厂老化盘）
+sudo ./build/build-iso.sh --edition mem      # 内存专用盘（见下）
 sudo ./build/build-iso.sh --without-nvidia   # 出一张不含显卡驱动的盘
 sudo ./build/build-iso.sh --rebuild-fs       # 强制重解 squashfs（换了源 ISO 时）
 sudo ./build/build-iso.sh --clean            # 清空工作区（保留已下载的源 ISO）
@@ -69,6 +70,29 @@ sudo ./build/build-iso.sh --skip-download    # 源 ISO 不在就报错，不去�
 
 **带不带显卡驱动是自动的**：`vendor/nvidia/*.run` 在就带上。
 `--without-nvidia` 强制不带，`--with-nvidia` 强制带（缺驱动直接报错）。
+
+### 两种盘（`--edition`）
+
+同一份源码出两种盘，**构建时钉死**，现场不会再问任何人：
+
+| | `full`（默认） | `mem` |
+|---|---|---|
+| 开机拉起 | `factory-test.sh`（选范围 + 选时长） | `memtest.sh`（**什么都不问，直接开测**） |
+| 测什么 | 整机六个阶段 | 只有内存 |
+| 报告标题 | 服务器出厂老化测试报告 | 内存专用测试报告 |
+| 产物 | `out/KLBurn-*.iso` | `out/KLBurn-MEM-*.iso` |
+
+压测时长（默认 150 秒）也是构建时钉的：
+
+```bash
+KLBURN_MEM_BURN_SECONDS=600 sudo -E ./build/build-iso.sh --edition mem
+```
+
+内存盘的完整说明见 [`mem-edition.md`](mem-edition.md)。
+
+> ⚠️ 版本差别**只在 `klburn.service` 的 `ExecStart`** 上。`chroot-setup.sh` 改完
+> 会当场 `grep -qx` 核对 —— `sed` 没匹配上是静默的，做出来会是一张
+> "文件名写着 MEM、开机却跑整机全测流程"的盘，而构建日志里一个字的异常都没有。
 
 换 HWE 内核：`KLBURN_KERNEL=hwe`（**默认 generic，别随手改默认**，
 理由和验收清单见 [`architecture.md` 的「用哪个内核」](architecture.md#用哪个内核klburn_kernelgenerichwe)）。
