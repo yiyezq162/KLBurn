@@ -167,6 +167,12 @@ MUTATIONS=(
 "gpu-d2d-int-overflow${S}显存 D2D 块大小退回 2GiB（正好溢出 32 位参数，每台大显存的卡都测不到）${S}test-log-parsing${S}$RT/lib/bench.sh${S}mut_gpu_d2d_int_overflow"
 "psu-bench-wiring-warn${S}四路电源少插一根线又变回 WARN（七个版本 11 次，一次都不是真问题）${S}test-hw-checks${S}$RT/lib/collect.sh${S}mut_psu_bench_wiring_warn"
 "disk-confirm-single-key${S}破坏性写确认第二关退回单键（按下去就擦盘，没有反悔余地）${S}test-hw-checks${S}$RT/lib/storage.sh${S}mut_disk_confirm_single_key"
+# ---- 内存专用盘（1.10.0）----
+"mem-sn-dup-warn${S}序列号重复只判 WARN（那批假条子压测全过，就靠这一条拦，判 WARN 等于放行）${S}test-mem-edition${S}$RT/lib/memcheck.sh${S}mut_mem_sn_dup_warn"
+"mem-dmesg-overreach${S}内存日志模式收回 uncorrectable（PCIe AER 也用这个词，坏阵列卡会被算成内存坏）${S}test-mem-edition${S}$RT/lib/memcheck.sh${S}mut_mem_dmesg_overreach"
+"mem-spd-unread-fail${S}读不到 SPD 判 FAIL 而不是 SKIP（SMBus 归 BMC 管的平台上，每台好机器都被拦下）${S}test-mem-edition${S}$RT/lib/memcheck.sh${S}mut_mem_spd_unread_fail"
+"mem-scope-silent${S}内存报告删掉「本报告仅针对内存」（一个孤零零的 PASS 会被当成整机验收通过）${S}test-mem-edition${S}$RT/report/generate_mem_report.py${S}mut_mem_scope_silent"
+"mem-sn-empty-slots${S}空槽位也参与序列号比对（空槽占位符都是 NO DIMM，每台没插满的机器都判假货）${S}test-mem-edition${S}$RT/lib/memcheck.sh${S}mut_mem_sn_empty_slots"
 )
 
 # ================================================================
@@ -1093,6 +1099,73 @@ mut_disk_confirm_single_key() {
   replace_line "$RT/lib/storage.sh" \
     '  if ! read_line_countdown answer2 "$final_timeout" \' \
     '  if IFS= read -r -s -t 1 -n 1 answer2; then :; elif true; then'
+}
+
+# ================================================================
+# 内存专用盘（1.10.0）
+# ================================================================
+
+# 序列号重复只判 WARN。
+#
+# 现场 2026-08-12 买到的那批假内存**压测是全过的** —— 能读能写、ECC 不涨、
+# 内核日志干净，唯一露馅的地方就是好几条的序列号一模一样。
+# 这条判定是拦住它们的**唯一**一道门，判成 WARN 就等于放行：
+# 整机结论只看有没有 FAIL，一批假条子会顶着绿色 PASS 出厂。
+mut_mem_sn_dup_warn() {
+  # ⚠️ 不能用 replace_line：这一行在 check_dimm_serial 里出现**两次**
+  #    （序列号重复那一支、读不到那一支），replace_line 要求锚点恰好命中一次，
+  #    会直接报"变异无法可靠施加"。
+  #    这里只改**第一次**出现的那个 —— 也就是重复那一支，拦假条子的那道门。
+  _apply_awk "$RT/lib/memcheck.sh" \
+    'index($0, ENVIRON["MUT_NEEDLE"]) && !done { print ENVIRON["MUT_NEW"]; done = 1; next } { print }' \
+    '    result_add "check_dimm_serial" "内存序列号核对" "$ST_FAIL" \' \
+    '    result_add "check_dimm_serial" "内存序列号核对" "$ST_WARN" \'
+}
+
+# 内存日志模式收回 uncorrectable。
+#
+# 这个词看着像内存错误，实际上 **PCIe AER 的严重级别就叫这个**
+# （"PCIe Bus Error: severity=Uncorrected"）。收回来的后果正是这张盘
+# 定死要避免的那件事：一张坏阵列卡、一块坏网卡，会让报告写"内存 FAIL"。
+# 用户 2026-08-12 当面定的口径是"只有内存坏才 FAIL"。
+mut_mem_dmesg_overreach() {
+  replace_line "$RT/lib/memcheck.sh" \
+    "  pat+='|Corrupted low memory'" \
+    "  pat+='|Corrupted low memory|uncorrectable|Uncorrected|Hardware Error'"
+}
+
+# 读不到 SPD 判 FAIL 而不是 SKIP。
+#
+# 一号红线的同款陷阱：很多服务器平台的 SMBus 归 BMC 管、或者被 BIOS 锁了，
+# 主机侧本来就读不到；DDR5 的驱动在 6.8 内核上还不存在。
+# 那是**平台的事**，跟这条内存好不好毫无关系 —— 判 FAIL 就是把一整批
+# 好机器拦在出货前，而这比漏判更糟。
+mut_mem_spd_unread_fail() {
+  replace_line "$RT/lib/memcheck.sh" \
+    '    result_add "check_spd_clone" "内存芯片信息比对" "$ST_SKIP" \' \
+    '    result_add "check_spd_clone" "内存芯片信息比对" "$ST_FAIL" \'
+}
+
+# 内存报告删掉「本报告仅针对内存」那句话。
+#
+# 和 1.9.5 给单项专测立的那条红线是同一把尺子：一份只测了内存的报告顶着
+# 一个孤零零的绿色 PASS，读报告的人会当成整机验收通过 ——
+# 而处理器、硬盘、网卡这些本轮一项都没测。
+# **把"没测"包装成"通过"，比不做这个功能还糟。**
+mut_mem_scope_silent() {
+  delete_line "$RT/report/generate_mem_report.py" \
+    "    A('<div class=\"notice notice-info\"><b>本报告仅针对内存。</b>'"
+}
+
+# 空槽位也参与序列号比对。
+#
+# 空槽的序列号占位符全都是 `NO DIMM`（或者 `Not Specified`），照单比对的话
+# 一台 16 槽只插了 8 条的机器会得到 8 个"重复"—— **每一台没插满的机器
+# 都被判成假货**。这是"占位符不是内容"那条老规矩在新判定上的复发。
+mut_mem_sn_empty_slots() {
+  replace_line "$RT/lib/memcheck.sh" \
+    '    _serial_is_bogus "$sn" && continue' \
+    '    [[ -z "$sn" ]] && continue'
 }
 
 # 1.9.8：BMC 的 USB 虚拟网口重新进判定。

@@ -636,6 +636,18 @@ for fn in select_scope select_duration confirm_disk_write config_review; do
         "$(grep -cE "^[[:space:]]*${fn}" "$MT" || true)"
 done
 
+# ⚠️ 开机第一屏的抬头。默认是「Server Factory Burn-in Test」，一张只测内存的盘
+#    顶着那句话就是在说一件它没做过的事 —— 和报告那条红线同一把尺子，
+#    只是搬到了屏幕上（那块屏经常被拍照发群里）。1.10.0 第一次出盘就错了，
+#    是看 QEMU 截图才发现的，断言全绿。
+check "开机抬头改成了内存盘自己的那句" "yes" \
+      "$(grep -q '^BRAND_TAGLINE="Memory-Only Test"' "$MT" && echo yes || echo no)"
+# 而且必须设在 source ui.sh **之前** —— ui.sh 里是 `: "${BRAND_TAGLINE:=...}"`，
+# 设晚了顶不掉默认值，改了等于没改。
+check "抬头必须设在 source ui.sh 之前（否则顶不掉默认值）" "yes" \
+      "$(awk '/^BRAND_TAGLINE=/{b=NR} /^source .*lib\/ui\.sh/{u=NR}
+              END{print (b > 0 && u > 0 && b < u) ? "yes" : "no"}' "$MT")"
+
 # 网卡只用来校时，不许产生任何网卡判定
 check "网卡只用于校时（没有 net_test / check_nic_*）" "0" \
       "$(grep -cE '^[[:space:]]*(net_test|check_nic_speed|check_nic_selftest)' "$MT" || true)"

@@ -29,6 +29,14 @@ KLB_ROOT="/opt/klburn"
 # shellcheck source=lib/core.sh
 source "$KLB_ROOT/lib/core.sh"
 [[ -f "$KLB_ROOT/klburn.conf" ]] && source "$KLB_ROOT/klburn.conf"
+# ⚠️ **必须在 source ui.sh 之前设。** ui.sh 里是 `: "${BRAND_TAGLINE:=...}"`，
+#    设晚了就顶不掉它的默认值。
+#
+#    这一行是开机第一屏的抬头，而现场那块屏经常被拍照发群里。默认值是
+#    「Server Factory Burn-in Test」—— 一张只测内存的盘顶着这句话，
+#    就是在说一件它没做过的事（和"报告不许看起来像整机验收过了"同一条红线，
+#    只是搬到了屏幕上）。1.10.0 第一次出盘就是这样，看截图才发现的。
+BRAND_TAGLINE="Memory-Only Test"
 source "$KLB_ROOT/lib/ui.sh"
 source "$KLB_ROOT/lib/storage.sh"
 # collect.sh：要的是 capture 之外的 check_memory_capacity / ecc_snapshot /

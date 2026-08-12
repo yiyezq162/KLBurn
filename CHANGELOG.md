@@ -350,6 +350,44 @@ Total Width: 72 bits / Data Width: 64 bits     <- 差值就是有没有 ECC
 顺带给整机盘的措辞红线守卫扩了射程：`memtest.sh` 和 `generate_mem_report.py`
 现在也在 `test-hw-checks.sh` 那条"会进报告的中文文案里不许出现内部用语"里。
 
+`mutate.sh` 加了 **5 条变异**（合计 120 条，全部被抓住），每条都对应一次真实的
+翻车方向：
+
+| 变异 | 放出去会怎样 |
+|---|---|
+| `mem-sn-dup-warn` | 序列号重复只判 WARN —— 那批假条子压测全过，就靠这一条拦，判 WARN 等于放行 |
+| `mem-dmesg-overreach` | 内存日志模式收回 `uncorrectable` —— PCIe AER 也用这个词，坏阵列卡会被算成内存坏 |
+| `mem-spd-unread-fail` | 读不到 SPD 判 FAIL —— SMBus 归 BMC 管的平台上每台好机器都被拦下 |
+| `mem-scope-silent` | 报告删掉「本报告仅针对内存」—— 孤零零的 PASS 会被当成整机验收通过 |
+| `mem-sn-empty-slots` | 空槽也参与序列号比对 —— 空槽占位符都是 `NO DIMM`，每台没插满的机器都判假货 |
+
+> ⚠️ `mem-sn-dup-warn` 那条不能用 `replace_line`：锚点那一行在
+> `check_dimm_serial` 里出现**两次**（重复那一支、读不到那一支），
+> 而 `replace_line` 要求恰好命中一次，会直接报"变异无法可靠施加"。
+> 改用 `_apply_awk` 只改第一次出现的那个。（第一版就是这么红的。）
+
+### e2e：内存盘单走一条
+
+`e2e-qemu.sh` 加了 `--edition mem`。必须单走，因为那张盘**开机不问任何东西** ——
+原来那条路是靠按键驱动范围菜单和时长菜单的，在内存盘上**发任何一键都是错的**：
+那些键会留在 tty 缓冲里一路飘到收尾菜单被吃掉（`[t]` 会让它当场重跑一轮，
+`[p]` 会直接关机）。
+
+内存盘整轮只有三分钟，所以**冒烟档就一路验到报告本体**：
+
+- 开机横幅是 `KLBurn MEMORY EDITION v<版本>`（构建时没带 `--edition mem` 会红在这）
+- 三份交付物（`.html` / `.csv` / `results.jsonl`）都落盘
+- **不该有** `INTERNAL_*.html`（内存盘的工程数据换成了那份 CSV）
+- 目录名带中文前缀「内存测试」，且**不带整机盘那套范围后缀**
+- `results.jsonl` 里有 `stress_mem` 和 `check_dimm_serial`（证明不是空跑）
+- `results.jsonl` 里**没有** `stress_cpu` / `collect_raid` / `check_psu` /
+  `test_nic` / `check_pcie_link` 等 8 个 id —— 混进来说明有人把整机盘的采集
+  又接回去了，那正是这次要砍掉的东西
+- 报告里有「本报告仅针对内存」那句话
+
+`--edition mem` 和 `--scope` / `--disk-stress` 不兼容的组合一律**当场停下**，
+不做静默忽略 —— 静默忽略的结果是有人以为验过了，其实没有。
+
 ---
 
 ## 1.9.9

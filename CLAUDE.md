@@ -110,6 +110,14 @@ wsl -d Ubuntu-24.04 -u root -e bash -c "cd /mnt/c/Users/li/Desktop/project/KLBur
 `config.sh` 一致** —— 所以 bump 完版本必须先重新构建再跑 e2e，否则它会红在
 "版本对不上"。那不是 bug，那正是它要拦的事（改完代码拿旧 ISO 跑）。
 验新的范围菜单用 `--scope info`（冒烟档最快）。
+**内存专用盘要单走一条**（那张盘开机不问任何东西，发任何一键都会飘到收尾菜单）：
+
+```
+wsl -d Ubuntu-24.04 -u root -e bash -c "cd /mnt/c/Users/li/Desktop/project/KLBurn && ./tests/e2e-qemu.sh --edition mem --stage smoke --workdir /home/li/klburn-e2e-mem"
+```
+
+它整轮只有三分钟，所以冒烟档就一路验到报告本体（三份交付物 + 没混进
+内存以外的判定项 + 那句「本报告仅针对内存」）。
 
 排查 e2e 时一定加 `--workdir /home/li/某个目录`：默认落 `mktemp -d`，
 而 **WSL 的 `/tmp` 跨 `wsl -e` 调用不保留**，`--keep` 也留不住，

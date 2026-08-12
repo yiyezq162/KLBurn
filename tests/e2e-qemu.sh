@@ -65,6 +65,9 @@ FIRMWARE="bios"
 NO_DATA=0
 DISK_STRESS=0
 SCOPE="full"          # 本轮测试范围（1.9.5 新增的那个菜单）
+# 验的是哪一种盘（1.10.0）。mem 盘**开机不问任何东西**，所以下面所有
+# 按键时序、范围后缀断言、INTERNAL_ 报告断言都不适用，要单走一条。
+EDITION="full"
 
 usage() {
   cat <<'EOF'
@@ -84,6 +87,10 @@ usage() {
                        脚本会在范围菜单上按对应的键，并断言报告目录名带上了
                        对应的后缀（_Full / _CPU / …）。冒烟档跑 --scope info
                        最快：那一档不做任何压测
+  --edition full|mem   验的是哪一种盘（默认 full）。mem = 内存专用盘：
+                       开机不问任何东西、约三分钟跑完，所以这条路**一次按键
+                       都不发**，断言也换成内存盘那一套（中文目录名、.csv、
+                       没有 INTERNAL_ 报告）。配 --scope 无意义，会直接报错
   --iso PATH           用指定 ISO（默认取 out/ 里 mtime 最新的）
   --net                给虚拟机接一块网卡（默认不接，网卡项会判 SKIP）
   --keep               跑完保留磁盘镜像和截图，方便手工看
@@ -103,6 +110,7 @@ while (( $# )); do
     --no-data-partition) NO_DATA=1; shift ;;
     --disk-stress) DISK_STRESS=1; shift ;;
     --scope)       SCOPE="$2";  shift 2 ;;
+    --edition)     EDITION="$2"; shift 2 ;;
     --workdir)     WORKDIR="$2"; shift 2 ;;
     --spare-disks) SPARE_N="$2"; shift 2 ;;
     -h|--help)     usage; exit 0 ;;
@@ -123,7 +131,13 @@ command_not_found_handle() {
   #    "失败 0 项"，正好是本项目最恨的那种"屏幕全绿"。（实测踩过。）
   #    所以直接把整个套件干掉，让退出码非零、run-all 能看见。
   printf "  \033[31mFAIL\033[0m 调用了不存在的命令 %s —— 多半是断言函数名打错了，\n" "$1"
-  printf "       这条断言根本没跑。中止本套件。\n"
+  # ⚠️ **必须把出事的位置打出来。**这条消息原本只有命令名，而这个脚本有
+  #    1100 行、还分成 smoke / full / disk-stress 三条互不相干的路 ——
+  #    只知道"有个叫 0 的命令"根本查不下去（1.10.0 加内存盘那一路时实测：
+  #    光靠命令名找了好几分钟，加上行号之后一眼就看到了）。
+  printf "       出事的位置：%s 第 %s 行\n" "${BASH_SOURCE[1]:-?}" "${BASH_LINENO[0]:-?}"
+  printf "       整条命令：%s\n" "${BASH_COMMAND:-?}"
+  printf "       中止本套件。\n"
   kill -TERM $$
   return 127
 }
@@ -154,6 +168,27 @@ case "$SCOPE" in
   info) SCOPE_KEY=6; SCOPE_TAG="INFO" ;;
   *) printf '致命: --scope 只能是 full/cpu/mem/gpu/disk/info，收到 %s\n' "$SCOPE" >&2; exit 2 ;;
 esac
+# ---------------------------------------------------------------- 版本（1.10.0）
+#
+# mem 盘和 full 盘是两条完全不同的现场流程，混着用只会红在完全不相干的地方。
+# 所以不兼容的组合一律**当场停下**，不做"静默忽略"——
+# 静默忽略的结果是有人以为验过了，其实没有。
+case "$EDITION" in
+  full|mem) ;;
+  *) printf '致命: --edition 只能是 full 或 mem，收到 %s\n' "$EDITION" >&2; exit 2 ;;
+esac
+if [[ "$EDITION" == "mem" ]]; then
+  # 内存盘没有范围菜单 —— 它永远只测内存。传了 --scope 说明用的人搞混了两种盘。
+  if [[ "$SCOPE" != "full" ]]; then
+    printf '致命: --edition mem 不接受 --scope（内存盘开机不问范围，它只测内存）\n' >&2
+    exit 2
+  fi
+  if (( DISK_STRESS )); then
+    printf '致命: --edition mem 不接受 --disk-stress（内存盘一个字节都不往硬盘写）\n' >&2
+    exit 2
+  fi
+fi
+
 # --disk-stress 验的是"fio 真写盘、而且不会写穿启动 U 盘"。硬盘专测那一档
 # 拿的是**全部**时长（不是全量档的 30%），跑起来久得多，而且这条路的按键
 # 时序是按全量档调的。要验硬盘专测另开一轮，别把两件事绞在一起。
@@ -416,11 +451,33 @@ if [[ "$STAGE" == "smoke" ]]; then
   # 冒烟只想知道"起没起来、认没认出数据分区"。
   # KLBurn 一开机就 mount_data_partition + log_attach，klburn.log 会立刻落盘 ——
   # 所以根本不用等它跑完，看盘上有没有东西就够了。
-  info "冒烟档：等 150 秒让它开机并建立报告目录（范围 $SCOPE）"
+  if [[ "$EDITION" == "mem" ]]; then
+    info "冒烟档（内存盘）：不按任何键，等它自己跑完一整轮"
+  else
+    info "冒烟档：等 150 秒让它开机并建立报告目录（范围 $SCOPE）"
+  fi
   # 15 秒这一张是专门为 --no-data-partition 留的：找不到数据分区时那个黄色大框
   # 警告出现在 STEP 1、只停 8 秒，等到 30 秒就已经被后面的采集日志顶走了。
   # 那条"有没有打警告"没法程序化断言，只能靠人看截图，所以至少得截到。
   sleep 15; shot "15"
+
+  # ---------------- 内存专用盘：一次按键都不发（1.10.0）----------------
+  #
+  # 这张盘开机什么都不问，直接开测。**这里发任何一键都是错的** ——
+  # 那些键会留在 tty 缓冲里，一路飘到最后的收尾菜单被吃掉
+  # （[t] 会让它当场重跑一轮，[p] 会直接关机）。
+  #
+  # 整轮约三分钟（采集几秒 + 压测 150 秒 + 复查出报告十几秒），
+  # 所以冒烟档等到它**真的跑完**，断言能一直做到报告本体。
+  if [[ "$EDITION" == "mem" ]]; then
+    info "内存盘：不发任何按键，等它自己跑完（约 3 分钟）"
+    for t in 45 75 105 135 165 195 225 255; do
+      sleep 30
+      kill -0 "$QEMU_PID" 2>/dev/null || { bad "虚拟机在第 ${t}s 意外退出了"; break; }
+      shot "$t"
+      printf '       ... %ss\n' "$t"
+    done
+  else
 
   # ---------------- 范围菜单（1.9.5）----------------
   # 它排在**建立报告目录之前**，60 秒倒计时。不按的话它超时回落全量，
@@ -439,6 +496,7 @@ if [[ "$STAGE" == "smoke" ]]; then
     shot "$t"
     printf '       ... %ss\n' "$t"
   done
+  fi   # EDITION == mem 的那一支到此为止
 elif (( DISK_STRESS )); then
   # ================================================================
   # 完整档 + 真写盘：全程按**日志锚点**走，一次盲发按键都没有
@@ -835,20 +893,116 @@ TAG="$(basename "$RUNDIR")"
 #    验收依据。所以这里既验形状、也验它确实是本轮选的那个范围。
 #    末尾可选的 _01/_02 是"同一分钟内连测两次"的去重序号（RTC 卡住的机器上
 #    是必然事件），它排在范围后缀**之后**。
-if [[ "$TAG" =~ ^[0-9]{8}_[0-9]{6}_.+_(Full|CPU|MEM|GPU|DISK|INFO)(_[0-9]{2})?$ ]]; then
+if [[ "$EDITION" == "mem" ]]; then
+  # 内存盘的目录名是用户指定的格式：内存测试_日期_时间_内存容量_CPU
+  # （注意和整机盘**顺序不同**：容量在 CPU 前面）。前缀是中文，
+  # 所以这里只验"日期_时间_容量GB_" 这一段的形状，再单独验前缀。
+  if [[ "$TAG" == 内存测试_* ]]; then
+    ok "报告目录名带中文前缀「内存测试」：$TAG"
+  else
+    bad "报告目录名没有「内存测试」前缀：$TAG"
+  fi
+  if [[ "$TAG" =~ _[0-9]{8}_[0-9]{6}_[0-9]+GB_ ]]; then
+    ok "目录名格式对（前缀_日期_时间_内存容量_CPU）"
+  else
+    bad "目录名不像话（少了日期/容量？）：$TAG"
+  fi
+  # ⚠️ 内存盘的目录名里**绝不能出现整机盘那套范围后缀** ——
+  #    两种盘的报告要一眼分得开，混起来就分不清哪份能当什么用。
+  if [[ "$TAG" =~ _(Full|CPU|GPU|DISK|INFO)(_[0-9]{2})?$ ]]; then
+    bad "内存盘的目录名不该带整机盘的范围后缀：$TAG"
+  else
+    ok "内存盘的目录名不带整机盘的范围后缀"
+  fi
+elif [[ "$TAG" =~ ^[0-9]{8}_[0-9]{6}_.+_(Full|CPU|MEM|GPU|DISK|INFO)(_[0-9]{2})?$ ]]; then
   ok "报告目录名格式对（日期_时间_CPU_内存_范围）：$TAG"
 else
   bad "报告目录名不像话（少了范围后缀？）：$TAG"
 fi
-if [[ "$TAG" =~ _${SCOPE_TAG}(_[0-9]{2})?$ ]]; then
-  ok "目录名上的范围后缀就是本轮选的那个（_${SCOPE_TAG}）"
-else
-  bad "范围后缀对不上：期望 _${SCOPE_TAG}，实际目录名是 $TAG"
-  info "  = 范围菜单那一键没打中，菜单 60 秒超时回落成了全量。"
-  info "    这是本脚本按键时间窗没打中，**不是产品的问题**。"
+if [[ "$EDITION" != "mem" ]]; then
+  if [[ "$TAG" =~ _${SCOPE_TAG}(_[0-9]{2})?$ ]]; then
+    ok "目录名上的范围后缀就是本轮选的那个（_${SCOPE_TAG}）"
+  else
+    bad "范围后缀对不上：期望 _${SCOPE_TAG}，实际目录名是 $TAG"
+    info "  = 范围菜单那一键没打中，菜单 60 秒超时回落成了全量。"
+    info "    这是本脚本按键时间窗没打中，**不是产品的问题**。"
+  fi
 fi
 
-if [[ "$STAGE" == "smoke" ]]; then
+if [[ "$EDITION" == "mem" ]]; then
+  # ================================================================
+  # 内存专用盘：整轮只有三分钟，所以冒烟档就能一路验到报告本体
+  # ================================================================
+  #
+  # 这一段回答的是"这张盘拿到现场会不会白跑一趟"：
+  # 开机自己起来了吗、真的压了内存吗、三份交付物都落盘了吗、
+  # 有没有混进它不该做的事。
+  if grep -q "KLBurn MEMORY EDITION v${EXPECT_VER}" "$RUNDIR/klburn.log" 2>/dev/null; then
+    ok "盘里跑的是内存盘、版本是 $EXPECT_VER"
+  else
+    got_v="$(grep -oE 'KLBurn [A-Z ]*v[0-9.]+' "$RUNDIR/klburn.log" 2>/dev/null | head -1)"
+    bad "开机横幅对不上：盘里是「${got_v:-?}」，期望「KLBurn MEMORY EDITION v$EXPECT_VER」"
+    info "  = 要么构建时没带 --edition mem，要么改完代码没重新构建。"
+  fi
+
+  # 三份交付物
+  [[ -s "$RUNDIR/$TAG.html" ]] && ok "交付报告 <目录名>.html 生成了" \
+                               || bad "交付报告没生成 —— 现场白跑一趟"
+  [[ -s "$RUNDIR/$TAG.csv" ]]  && ok "工程文件 <目录名>.csv 生成了" \
+                               || bad "CSV 没生成（拼总表就少了这一台）"
+  [[ -s "$RUNDIR/results.jsonl" ]] && ok "results.jsonl 非空" \
+                                   || bad "results.jsonl 空的 —— 这一轮什么都没判"
+
+  # ⚠️ 内存盘**不出**内部工程报告（工程数据换成了那份 CSV）。
+  #    冒出来说明有人把整机盘那套又接回来了。
+  if compgen -G "$RUNDIR/raw/INTERNAL_*.html" >/dev/null 2>&1; then
+    bad "内存盘不该生成 INTERNAL_ 工程报告（它的工程数据是那份 CSV）"
+  else
+    ok "没有 INTERNAL_ 工程报告（内存盘的工程数据是 CSV）"
+  fi
+
+  # meta.json：版本 + 这是内存盘
+  if [[ -s "$RUNDIR/meta.json" ]]; then
+    got_ver="$(grep -oE '"klburn_version":[^,]*' "$RUNDIR/meta.json" | cut -d'"' -f4)"
+    [[ "$got_ver" == "$EXPECT_VER" ]] \
+      && ok "meta.json 的版本是 $EXPECT_VER" \
+      || bad "meta.json 版本对不上：盘里是 [$got_ver]，源码是 [$EXPECT_VER]"
+    grep -q '"klburn_edition": *"mem"' "$RUNDIR/meta.json" \
+      && ok "meta.json 标明这是内存盘" \
+      || bad "meta.json 里没有 klburn_edition=mem"
+  else
+    bad "meta.json 不存在"
+  fi
+
+  # 真的压过内存吗 —— 这张盘的核心。没有这一条，上面全绿也可能是空跑。
+  if grep -q '"id":"stress_mem"' "$RUNDIR/results.jsonl" 2>/dev/null; then
+    ok "内存压力测试真的跑了（results.jsonl 里有 stress_mem）"
+  else
+    bad "results.jsonl 里没有 stress_mem —— 这一轮压根没压内存"
+  fi
+  # 内存明细读到了吗
+  grep -q '"id":"check_dimm_serial"' "$RUNDIR/results.jsonl" 2>/dev/null \
+    && ok "序列号核对跑了（查假条子那一条）" \
+    || bad "results.jsonl 里没有 check_dimm_serial"
+
+  # ⚠️ 这几项是这张盘**明确不做**的。冒出来说明有人把整机盘的采集又接回来了 ——
+  #    那正是这次要砍掉的东西（被测平台上这些部件可能压根没有）。
+  leaked=""
+  for id in stress_cpu stress_disk stress_gpu collect_raid check_psu \
+            test_nic check_pcie_link bench_cpu_flops; do
+    grep -q "\"id\":\"$id\"" "$RUNDIR/results.jsonl" 2>/dev/null && leaked="$leaked $id"
+  done
+  [[ -z "$leaked" ]] && ok "报告里没有混进内存以外的判定项" \
+                     || bad "内存盘里冒出了不该有的判定项：$leaked"
+
+  # 报告本体：那句红线必须在
+  if grep -qF "本报告仅针对内存" "$RUNDIR/$TAG.html" 2>/dev/null; then
+    ok "报告里写明了本轮只测内存（不能当整机验收依据）"
+  else
+    bad "报告里没有「本报告仅针对内存」——一个孤零零的 PASS 会被当成整机验收通过"
+  fi
+
+elif [[ "$STAGE" == "smoke" ]]; then
   # 冒烟到此为止：能开机、能认出数据分区、能建目录写日志，就算过。
   if grep -q "KLBurn v${EXPECT_VER}" "$RUNDIR/klburn.log" 2>/dev/null; then
     ok "日志里的版本号是 $EXPECT_VER（盘里跑的确实是这次构建的代码）"
