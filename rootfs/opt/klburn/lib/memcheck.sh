@@ -538,14 +538,27 @@ mem_export_csv() {
           if (dw   == "") { v = get(line, "Data Width");             if (v != "") dw   = v }
         }
         if (size == "" || size ~ /No Module Installed/) next
-        # 生产日期藏在 Asset Tag 后面的括号里（AMI 系 BIOS 的写法）：
-        #     P1-DIMMA1_AssetTag (date:22/51)  ->  2022-W51
-        # 认不出就留空，绝不硬猜（各家 Asset Tag 格式不一样）。
+        # 生产日期有两条来路，都拿不到就留空、绝不硬猜。
+        #
+        # ① Asset Tag 后面括号里的 date:YY/WW（AMI 系 BIOS 的私有写法）：
+        #        P1-DIMMA1_AssetTag (date:22/51)  ->  2022-W51
         if (match(at, /date:[ ]*[0-9][0-9]\/[0-9][0-9]/)) {
           d = substr(at, RSTART + 5, RLENGTH - 5)
           gsub(/ /, "", d)
           split(d, p2, "/")
           if (p2[2] + 0 >= 1 && p2[2] + 0 <= 53) dt = "20" p2[1] "-W" p2[2]
+        }
+        # ② 18 位序列号里自带的那两个字节。
+        #    JEDEC 的「模组唯一标识」是 9 字节：厂商(2)+产地(1)+日期(2)+序号(4)，
+        #    有的 BIOS 把整个 9 字节抄进 Serial Number，有的只抄后面 4 字节 ——
+        #    所以现场会看到 8 位和 18 位两种长度，**两种都正常**。
+        #        80AD01233537A7DDDD -> SK Hynix / 地点1 / 2023-W35 / 37A7DDDD
+        #    （拿 EPYC 7542 那台实测对过：和它 Asset Tag 里的 date:23/35 一致。）
+        if (dt == "" && sn ~ /^[0-9A-Fa-f][0-9A-Fa-f]{17}$/) {
+          yy = substr(sn, 7, 2); ww = substr(sn, 9, 2)
+          # 十六进制里的 BCD：直接当十进制两位读，超出 1~53 就不是日期
+          if (yy ~ /^[0-9][0-9]$/ && ww ~ /^[0-9][0-9]$/ \
+              && ww + 0 >= 1 && ww + 0 <= 53) dt = "20" yy "-W" ww
         }
         printf "%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s\n",
           q(spn), q(bmf), q(bpn), q(bsn),

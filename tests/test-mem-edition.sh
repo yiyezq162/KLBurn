@@ -305,6 +305,45 @@ check "只读到一片 -> SKIP（没有可比的对象）" "SKIP" "$(spd_clone_v
 
 # ================================================================
 echo
+echo "=== 序列号的两种长度（8 位 / 18 位）==="
+#
+# 现场 2026-08-12 问：为什么有的机器报 1BA3172A（8 位），有的报
+# 80AD01233537A7DDDD（18 位）？是主板 BIOS 有问题吗？
+#
+# 不是。**和 DDR4/DDR5 无关**（EPYC 7542 是 DDR4，报的就是 18 位），
+# 是 BIOS 抄了多少字节：SPD 里模组序列号那一格 JEDEC 只给 4 字节，
+# 但 JEDEC 同时定义了 9 字节的「模组唯一标识」＝ 厂商(2)+产地(1)+日期(2)+序号(4)。
+# 有的 BIOS 只抄后 4 字节，有的整个 9 字节抄出来。18 位那种信息更全。
+uid_field() {   # uid_field <序列号> <字段>
+  python3 -c "
+import sys, importlib.util
+spec = importlib.util.spec_from_file_location('g', '$GEN')
+m = importlib.util.module_from_spec(spec); spec.loader.exec_module(m)
+d = m.decode_module_uid(sys.argv[1])
+print('' if d is None else (d.get(sys.argv[2]) or ''))
+" "$1" "$2"
+}
+
+# 真机样本：EPYC 7542 那台（DDR4，报 18 位）。三处必须自洽 ——
+# 厂商要和同一块里的 `Module Manufacturer ID: Bank 1, Hex 0xAD` 对上，
+# 日期要和 `Asset Tag ... (date:23/35)` 对上。
+check "18 位序列号解出厂商"     "SK Hynix"        "$(uid_field 80AD01233537A7DDDD mfr)"
+check "18 位序列号解出生产日期" "2023 年第 35 周" "$(uid_field 80AD01233537A7DDDD made)"
+check "18 位序列号解出模组序号" "37A7DDDD"        "$(uid_field 80AD01233537A7DDDD serial4)"
+# Xeon Gold 6530 那台（DDR5，同样 18 位）
+check "另一台的厂商也解得对"     "SK Hynix"        "$(uid_field 80AD01220695DED917 mfr)"
+check "另一台的日期也解得对"     "2022 年第 6 周"  "$(uid_field 80AD01220695DED917 made)"
+# 同一台机器上的第二种厂商（美光）
+check "美光的厂商代码也认得"     "Micron"          "$(uid_field 802C0623163FFFAD32 mfr)"
+# 8 位那种不是模组唯一标识，绝不能硬拆
+check "8 位序列号不当成模组唯一标识" "" "$(uid_field 1BA3172A mfr)"
+check "8 位序列号也不编出生产日期"   "" "$(uid_field 175B36BA made)"
+# ⚠️ 18 位但那两个字节不像日期时，说明它只是个长序列号 —— 宁可不给，
+#    也不能编一个日期出来印进客户报告。
+check "18 位但周次不合法时整条不认" "" "$(uid_field 80AD01229999DED917 made)"
+
+# ================================================================
+echo
 echo "=== 主板字段解析 ==="
 
 cat > "$TMP/dmidecode-system.txt" <<'EOF'

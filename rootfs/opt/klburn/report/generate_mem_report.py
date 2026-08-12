@@ -198,6 +198,62 @@ def ecc_text(total_width, data_width):
     return "无（%d 位）" % d
 
 
+# ================================================================
+# 序列号有两种长度，而且**和 DDR4/DDR5 无关**
+# ================================================================
+#
+# 现场 2026-08-12 问：为什么有的机器报 `1BA3172A`（8 位），有的报
+# `80AD01233537A7DDDD`（18 位）？是主板 BIOS 有问题吗？
+#
+# 不是。翻了仓库里七个版本的现场数据（`test_out/`），结论很清楚：
+#
+#   8 位   1BA3172A / 175B36BA / 2182C77A          Jintide C5218R、Xeon 6133、海光
+#   18 位  80AD01233537A7DDDD / 80AD01220695DED917  EPYC 7542、Xeon Gold 6530
+#
+# **7542 是 DDR4，报的却是 18 位** —— 所以和内存代次没关系，是 BIOS 抄了
+# 多少字节的差别：
+#
+#   SPD 里模组序列号那一格 JEDEC 只给了 **4 字节**（打出来 8 位十六进制）。
+#   但 JEDEC 同时定义了一个 **9 字节的"模组唯一标识"**：
+#       厂商 ID(2) + 生产地点(1) + 生产日期(2, BCD) + 序列号(4)
+#   有的 BIOS 只抄后面那 4 字节，有的把整个 9 字节抄出来。
+#
+# 拿 7542 那台实测对过，三处完全自洽：
+#   80 AD -> Bank 1 / 0xAD = SK Hynix，和同一块里的
+#            `Module Manufacturer ID: Bank 1, Hex 0xAD` 一致
+#   01    -> 生产地点
+#   23 35 -> 2023 年第 35 周，和 `Asset Tag ... (date:23/35)` 一致
+#   37A7DDDD -> 真正的 4 字节序列号
+#
+# 所以 18 位那种**信息更全**，不是出错。这里把它拆开：生产日期能直接从序列号
+# 里拿到（不用再依赖 Asset Tag 那个 AMI 私有写法），厂商也能交叉核对一遍。
+#
+# ⚠️ **拆归拆，报告里显示的仍然是 BIOS 报出来的原串。** 那才是这台机器的
+#    记录，也是拿去和别的工具、和厂商对账时唯一对得上的东西。
+_UID_RE = re.compile(r"^[0-9A-Fa-f]{18}$")
+
+
+def decode_module_uid(sn):
+    """18 位那种序列号 -> {厂商, 产地, 日期, 4 字节序列号}；不是那种就返回 None。"""
+    if not sn or not _UID_RE.match(str(sn).strip()):
+        return None
+    b = bytes.fromhex(str(sn).strip())
+    y, w = _bcd(b[3]), _bcd(b[4])
+    made = None
+    # 周次 1~53 之外的说明这不是日期 —— 那这 18 位多半只是个长序列号，
+    # 别硬把它当成 9 字节标识拆开（宁可不给，也不给一个编出来的日期）。
+    if 1 <= w <= 53 and 0 <= y <= 99:
+        made = "20%02d 年第 %d 周" % (y, w)
+    else:
+        return None
+    return {
+        "mfr": _jep106(b[0], b[1]),
+        "loc": b[2],
+        "made": made,
+        "serial4": "".join("%02X" % x for x in b[5:9]),
+    }
+
+
 def size_to_mb(v):
     # "16 GB" / "16384 MB" / "No Module Installed" -> MB（认不出返回 0）
     if not v:
@@ -429,20 +485,45 @@ class Data(object):
             # 列的顺序按"拿它干什么"排：先是认条子的（槽位/容量/厂商/型号/
             # 序列号/生产日期），再是规格（Rank/ECC/频率）。
             # 查假条子的人从左往右读，前六列就够他做判断。
+            sn = clean(p.get("Serial Number"))
+            # 生产日期两条来路，都拿不到就留空：
+            #   ① Asset Tag 括号里的 date:YY/WW（AMI 系 BIOS 的私有写法）
+            #   ② 18 位序列号里自带的那两个字节（JEDEC 的 9 字节模组唯一标识）
+            # 两处都有时优先 ①，因为那是 BIOS 明确标成日期的那一格。
+            uid = decode_module_uid(sn)
+            made = dimm_made_date(p.get("Asset Tag")) or (uid or {}).get("made")
             rows.append(OrderedDict([
                 ("槽位", clean(p.get("Locator")) or clean(p.get("Bank Locator"))),
                 ("容量", clean(size)),
                 ("类型", clean(p.get("Type"))),
                 ("厂商", clean(p.get("Manufacturer"))),
                 ("型号", clean(p.get("Part Number"))),
-                ("序列号", clean(p.get("Serial Number"))),
-                ("生产日期", dimm_made_date(p.get("Asset Tag"))),
+                ("序列号", sn),
+                ("生产日期", made),
                 ("Rank", clean(p.get("Rank"))),
                 ("ECC", ecc_text(p.get("Total Width"), p.get("Data Width"))),
                 ("运行频率", speed_cfg),
                 ("标称频率", clean(p.get("Speed"))),
             ]))
         return rows
+
+    # 这台机器的 BIOS 报的是不是那种 18 位的"模组唯一标识"。
+    # 是的话报告里要多说一句 —— 否则现场看到同一批内存在两台机器上
+    # 序列号长度不一样，会以为哪台的 BIOS 坏了（真发生过）。
+    def uid_breakdown(self):
+        out = []
+        for r in self.dimms():
+            uid = decode_module_uid(r.get("序列号"))
+            if uid:
+                out.append(OrderedDict([
+                    ("槽位", r.get("槽位")),
+                    ("完整序列号", r.get("序列号")),
+                    ("其中：厂商", uid["mfr"]),
+                    ("生产地点", uid["loc"]),
+                    ("生产日期", uid["made"]),
+                    ("模组序号", uid["serial4"]),
+                ]))
+        return out
 
     # 哪几个序列号在这台机器上出现了不止一次。
     #
@@ -738,6 +819,21 @@ def build_html(data):
       "其中序列号一项另有单独结论，见下方「测试结果」。"
       "运行频率是这条内存在本机实际运行的速率，标称频率是它自身支持的最高速率，"
       "两者不同通常是被同机的其它内存条或主板设置拉低的。</p>")
+
+    # ---- 18 位序列号的拆解 ----
+    #
+    # 现场问过：为什么有的机器序列号是 8 位、有的是 18 位，是不是 BIOS 坏了。
+    # 不是 —— 18 位那种是行业标准定义的「模组唯一标识」，把厂商、生产地点、
+    # 生产日期和序列号连在一起写，**信息更全**。这里拆开摆出来，
+    # 顺便把这件事在报告里说清楚，免得下次又被当成故障。
+    uids = data.uid_breakdown()
+    if uids:
+        A("<h3>序列号里包含的出厂信息</h3>")
+        A('<p class="sub">本机主板记录的内存序列号采用行业标准的「模组唯一标识」'
+          "格式，即把厂商代码、生产地点、生产日期和模组序号连写在一起。"
+          "拆开后如下（部分主板只记录其中的模组序号部分，因此在不同机器上"
+          "看到的序列号长度可能不同，<b>两种都是正常的</b>）。</p>")
+        A(table(uids, "—"))
 
     # ---------------- 二之二、内存条芯片记录 ----------------
     #
