@@ -540,8 +540,18 @@ cat > "$RD/results.jsonl" <<'EOF'
 EOF
 
 R="$TMP/report.html"
-python3 "$GEN" --run-dir "$RD" --out "$R" 2>/dev/null
+python3 "$GEN" --run-dir "$RD" --out "$R" > "$TMP/gen.out" 2>&1
 check "报告生成成功" "0" "$?"
+
+# ⚠️ 生成器打在屏幕上的那几行**只能是 ASCII**。
+#    Linux 文本控制台显示不了中文，打中文出去就是一行 ◆◆◆ ——
+#    1.10.0 第一版这里写的是「报告已生成: <带中文的路径>」，
+#    QEMU 截图上就是一串方块，而所有断言照样全绿。看图才发现的。
+check "生成器的屏幕输出里没有非 ASCII 字节" "0" \
+      "$(LC_ALL=C grep -c '[^ -~]' "$TMP/gen.out" || true)"
+# 报告路径也不许打：内存盘的目录名带中文前缀，打出来照样是方块。
+check "生成器不把报告路径打到屏幕上" "0" \
+      "$(grep -c '/' "$TMP/gen.out" || true)"
 
 has "$R" "内存专用测试报告"  "报告标题"
 has "$R" "3A2F91C7"          "内存序列号进了报告（这张盘的存在理由）"

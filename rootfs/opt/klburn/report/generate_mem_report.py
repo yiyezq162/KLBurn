@@ -933,7 +933,15 @@ def main():
     htm = build_html(data)
     with open(args.out, "w", encoding="utf-8") as f:
         f.write(htm)
-    sys.stderr.write("报告已生成: %s (%d 字节)\n" % (args.out, len(htm.encode("utf-8"))))
+    # ⚠️ **这一行是打在现场那块屏幕上的，只能是 ASCII。**
+    #    Linux 文本控制台显示不了中文 —— 第一版这里写的是中文，
+    #    QEMU 截图上就是一行 ◆◆◆（断言全绿，看图才发现的）。
+    #    整机盘那份生成器一直是英文的，这里跟它保持一致。
+    #
+    # ⚠️ 也**不要把报告路径打出来**：内存盘的目录名带中文前缀，
+    #    打出来照样是 ◆◆◆。memtest.sh 紧接着会用 ascii_clean 打一次目录名，
+    #    那一份是能看的。
+    sys.stderr.write("Report written (%.1f KB)\n" % (len(htm.encode("utf-8")) / 1024.0))
     return 0
 
 
