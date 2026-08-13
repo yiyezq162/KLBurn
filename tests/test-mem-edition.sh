@@ -303,6 +303,48 @@ check "一片都读不到 -> SKIP（绝不是 FAIL）" "SKIP" "$(spd_clone_verdi
 ONE="$TMP/spd-one"; mkdir -p "$ONE"; cp "$SPD/0-0050.bin" "$ONE/"
 check "只读到一片 -> SKIP（没有可比的对象）" "SKIP" "$(spd_clone_verdict "$ONE")"
 
+# ---- 1.10.1：读不到的时候，至少要留下"为什么读不到" ----
+#
+# ⚠️ 现场问过两次「能不能读到内存条标签上那串十几位的长号」。仓库里两台机器
+#    （DDR4 的 6133、DDR5 的 6530）**都读不到 SPD**，`decode-dimms` 一律返回
+#    `No EEPROM found` —— 而那句话底下藏着三种完全不同的原因，处置也完全不同：
+#
+#      a) 驱动压根没装上          -> 是我们的盘缺东西，能修
+#      b) 驱动装上了、i2c 总线没出来 -> SMBus 被 BIOS 锁了 / 归 BMC 管，主机侧无解
+#      c) 总线出来了、后面没 EEPROM  -> SPD 挂在 mux 后面，或这一代要 spd5118
+#
+#    以前日志里只有一句 `no SPD EEPROM readable on this platform`，
+#    这三种分不开。现在 mem_collect_spd 会把判据落进 raw/spd-probe.txt，
+#    **下一轮任何一次跑完，答案就在盘里了**，不用为它专门再上一次机器。
+#
+# ⚠️ 它**只留档，不产生任何判定** —— 这一组断言同时钉住这一点。
+_MC_SH="$LIB/memcheck.sh"
+check "读 SPD 之前要把诊断落盘" "1" \
+      "$(grep -c 'RAW_DIR/spd-probe.txt' "$_MC_SH" || true)"
+# ⚠️ 下面几条一律**先把注释行去掉再数** —— 这个文件里"绝不做 i2cdetect 盲扫"
+#    这句话本身就写在注释里，直接 grep 会把说明当成代码数进去。
+_code() { grep -vE '^[[:space:]]*#' "$_MC_SH"; }
+check "  要记模块装上了没有（区分「盘里缺东西」和「平台不给」）" "1" \
+      "$(_code | grep -c '/proc/modules' || true)"
+check "  要记 i2c 总线出没出来（区分「SMBus 没起来」和「后面没挂 EEPROM」）" "1" \
+      "$(_code | grep -c '/sys/class/i2c-adapter' || true)"
+check "  编进内核的模块也要认（CONFIG_I2C_CHARDEV=y 不出现在 /proc/modules）" "1" \
+      "$(_code | grep -c 'sys/module/' || true)"
+# ⚠️⚠️ **绝不许做 i2cdetect 盲扫。** 服务器的 SMBus 上挂着 BMC、风扇控制器、
+#    背板，往未知地址发事务能让机器当场挂掉。诊断只读 sysfs。
+check "代码里不许真的调 i2cdetect（盲扫能让服务器当场挂掉）" "0" \
+      "$(_code | grep -c 'i2cdetect' || true)"
+check "代码里不许有任何 i2c 写操作（往 SPD 写一个字节就能把好内存变砖）" "0" \
+      "$(_code | grep -cE 'i2cset|i2ctransfer|eeprom_write' || true)"
+# 自检：注释真的被剔掉了没有（剔过头的话上面几条会变成假绿）
+check "  剔注释这一步本身有效（说明里那两处 i2cdetect 确实存在）" "2" \
+      "$(grep -c 'i2cdetect' "$_MC_SH" || true)"
+unset -f _code
+# 只留档：这个文件名不许出现在任何 result_add / 报告生成器里
+check "spd-probe 不许产生判定行" "0" \
+      "$(grep -c 'spd-probe' "$LIB"/../report/generate_mem_report.py || true)"
+unset _MC_SH
+
 # ================================================================
 echo
 echo "=== 序列号的两种长度（8 位 / 18 位）==="

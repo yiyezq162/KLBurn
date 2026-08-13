@@ -144,6 +144,60 @@ mem_collect_spd() {
   done
   udevadm settle --timeout=5 >/dev/null 2>&1 || true
 
+  # ---------------------------------------------------------------- 诊断留档
+  #
+  # ⚠️ **只写文件，不产生任何判定、不进任何报告。**加它的唯一理由是：
+  #    现场问过两次「能不能读到内存条标签上那串十几位的长号」，而我们至今
+  #    只答得出「读不到」，答不出**为什么**读不到 —— 那三种原因的处置完全不同：
+  #
+  #      a) 驱动压根没装上         -> 是我们的盘缺东西，能修
+  #      b) 驱动装上了、总线没出来  -> SMBus 被 BIOS 锁了 / 归 BMC 管，主机侧无解
+  #      c) 总线出来了、后面没 EEPROM -> SPD 挂在 mux 后面，或这一代要 spd5118
+  #
+  #    这三种在 `decode-dimms` 眼里都是同一句 `No EEPROM found`。
+  #    现在把判据落到盘里：下一轮**任何一次**跑完，答案就在 raw/spd-probe.txt 里，
+  #    不用为它专门再上一次机器。
+  #
+  # ⚠️ 全程只读 sysfs，**绝不做 i2cdetect 盲扫**（那会往未知地址发事务，
+  #    服务器 SMBus 上还挂着 BMC、风扇控制器、背板，扫到不该扫的能让机器当场挂掉）。
+  {
+    printf '# SPD 读取诊断（只留档，不参与任何判定）\n'
+    printf '# 内核: %s\n\n' "$(uname -r 2>/dev/null)"
+
+    printf '## 内核模块装上了没有\n'
+    for m in i2c_dev i2c_smbus i2c_i801 i2c_piix4 ee1004 at24 spd5118; do
+      if grep -qE "^${m}\b" /proc/modules 2>/dev/null; then
+        printf '  已加载   %s\n' "$m"
+      elif [[ -d "/sys/module/${m}" ]]; then
+        # 编进内核的（比如 CONFIG_I2C_CHARDEV=y）不会出现在 /proc/modules
+        printf '  内建     %s\n' "$m"
+      else
+        printf '  没有     %s\n' "$m"
+      fi
+    done
+
+    printf '\n## 出现了哪些 i2c 总线（没有 = SMBus 控制器没起来）\n'
+    local a nm found=0
+    for a in /sys/class/i2c-adapter/*; do
+      [[ -e "$a" ]] || continue
+      found=1
+      nm="$(cat "$a/name" 2>/dev/null)"
+      printf '  %-12s %s\n' "$(basename "$a")" "$nm"
+    done
+    (( found == 1 )) || printf '  （一条都没有）\n'
+
+    printf '\n## 这些总线上挂了什么（有 eeprom 的才读得到 SPD）\n'
+    found=0
+    for a in /sys/bus/i2c/devices/*; do
+      [[ -e "$a" ]] || continue
+      found=1
+      printf '  %-16s driver=%s%s\n' "$(basename "$a")" \
+        "$(basename "$(readlink -f "$a/driver" 2>/dev/null)" 2>/dev/null)" \
+        "$([[ -e "$a/eeprom" ]] && printf '  <- 有 eeprom')"
+    done
+    (( found == 1 )) || printf '  （一个设备都没有）\n'
+  } > "$RAW_DIR/spd-probe.txt" 2>/dev/null || true
+
   for d in /sys/bus/i2c/devices/*/eeprom; do
     [[ -r "$d" ]] || continue
     name="$(basename "$(dirname "$d")")"

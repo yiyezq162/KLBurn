@@ -64,6 +64,9 @@ WORKDIR=""
 FIRMWARE="bios"
 NO_DATA=0
 DISK_STRESS=0
+# 硬盘专测那一轮，确认屏有没有被我们**故意拒掉**（1.10.1）。
+# 拒掉之后这一轮应该作废（FAIL + 「本轮测试未执行」），而不是静默跳过继续跑。
+DISK_SCOPE_DECLINED_EXPECTED=0
 SCOPE="full"          # 本轮测试范围（1.9.5 新增的那个菜单）
 # 验的是哪一种盘（1.10.0）。mem 盘**开机不问任何东西**，所以下面所有
 # 按键时序、范围后缀断言、INTERNAL_ 报告断言都不适用，要单走一条。
@@ -173,6 +176,23 @@ case "$SCOPE" in
   info) SCOPE_KEY=6; SCOPE_TAG="INFO" ;;
   *) printf '致命: --scope 只能是 full/cpu/mem/gpu/disk/info，收到 %s\n' "$SCOPE" >&2; exit 2 ;;
 esac
+
+# ---------------------------------------------------------------- 时长菜单之后的第一条日志
+#
+# ⚠️⚠️ **这个锚点必须是「时长菜单之后」才写出来的那条，不能是它之前的。**
+#
+# 它的用途是验证"那一下 `1` 真的被时长菜单吃到了"：等到它 = 菜单过了；
+# 等不到 = 还卡在菜单上，那时候补一次按键是安全的（除了菜单没有别的读取者）。
+# 锚点要是落在菜单**之前**，这个 wait 会立刻命中，于是：
+#   * 断言永远绿，却什么都没验到（§11-13 那种空转）
+#   * 真的按漏了的时候，那个"补一次"的兜底永远不会触发，
+#     整轮静默回落到 STANDARD 档（30 分钟），冒烟档直接超时
+#
+# 1.10.1 踩过一次：原来用的是 `live media disks`（`scan_disks` 打的）。
+# 那一版把 `scan_disks` 提到了选时长**之前**（硬盘专测那一屏要列候选盘），
+# 于是这条锚点一夜之间跑到了菜单前面 —— **而它照样全绿**。
+# 现在改用 `collect_all` 的头一句，它在选时长之后、任何按键之前。
+AFTER_DURATION="Collecting system / board / CPU / memory"
 # ---------------------------------------------------------------- 版本（1.10.0）
 #
 # mem 盘和 full 盘是两条完全不同的现场流程，混着用只会红在完全不相干的地方。
@@ -512,7 +532,7 @@ elif (( DISK_STRESS )); then
   # 万一某个字串在镜像里一开始就有，轮询会在第 0 秒命中，按键就在完全错误的
   # 时刻发出去 —— 而这一轮的按键是"确认擦盘"。所以先验一遍它们现在都不在。
   preexist=""
-  for n in "Report      :" "live media disks" "verify_dmesg_boot" \
+  for n in "Report      :" "$AFTER_DURATION" "verify_dmesg_boot" \
            "Configuration review done" "Disk stress test confirmed by operator"; do
     grep -aqF -- "$n" "$IMG" 2>/dev/null && preexist="$preexist [$n]"
   done
@@ -540,11 +560,11 @@ elif (( DISK_STRESS )); then
   if wait_for_log "Report      :" 240 "开机完成，时长菜单要出来了"; then
     sleep 2
     mon "sendkey 1"
-    if ! wait_for_log "live media disks" 60 "选档已生效、开始采集"; then
+    if ! wait_for_log "$AFTER_DURATION" 60 "选档已生效、开始采集"; then
       # 还没进采集说明还卡在菜单上（这时候补一下键是安全的，
       # 因为除了菜单没有别的读取者）
       mon "sendkey 1"
-      wait_for_log "live media disks" 60 "选档已生效、开始采集" || true
+      wait_for_log "$AFTER_DURATION" 60 "选档已生效、开始采集" || true
     fi
   else
     bad "开机 240s 都没写出第一批日志 —— 后面的按键一律不发"
@@ -656,6 +676,40 @@ else
 
   wait_for_log "Report      :" 300 "KLBurn 起来了（时长菜单马上出来）" || true
 
+  # ---------------- 硬盘专测：确认屏排在时长菜单**之前**（1.10.1）----------------
+  #
+  # ⚠️⚠️ 只有 `--scope disk` 走这一段。别的范围这一屏根本不出现，
+  #    在这儿发键会一路漏到时长菜单上去。
+  #
+  # 这一段验的是 1.10.1 那个流程改动**在真机上确实是这个顺序**：
+  # 选完范围 -> 立刻问擦盘 -> 才问时长。单元测试只能验源码里的行号先后，
+  # 验不了"现场那一屏真的先出来"。
+  #
+  # **故意打一个不是 y/yes 的答案**，验的是「不确认 = 这一轮作废」那条新语义：
+  #   * 不写任何一个字节到任何一块盘（冒烟档跑得起来的前提）
+  #   * 跑出来的是 FAIL + 「本轮测试未执行」，不是一份看起来完整的绿报告
+  #   * 而 1.10.0 那版在这里是**静默跳过继续跑**，最后打绿色 PASS ——
+  #     操作员选了「只测硬盘」，拿到一份一项硬盘压测都没跑的"通过"报告
+  #
+  # ⚠️ **必须同时满足"这一轮真挂了空白盘"**（`--spare-disks` > 0）。
+  #    一块候选盘都没有时 `confirm_disk_write` 压根不会被调到（走的是
+  #    「没有可测硬盘」那条跳出），这一屏不出现 —— 那时候发出去的键会一路
+  #    漏到时长菜单上，而 `ret` 在那儿的意思是"用默认档"，冒烟档直接变 30 分钟。
+  if [[ "$SCOPE" == "disk" ]] && (( SPARE_N > 0 )); then
+    # scan_disks 的这条日志紧挨着确认屏（它就是拿它列候选盘的）
+    if wait_for_log "testable," 240 "候选盘枚举完（下一步就是擦盘确认屏）"; then
+      sleep 3
+      shot "disk-confirm"
+      # 打一个明确不是 y/yes 的答案。**绝不能发 y** —— 那是真擦盘。
+      for c in n o; do mon "sendkey $c"; done
+      mon "sendkey ret"
+      info "硬盘专测确认屏已回答 no（验的是「不确认就作废」）"
+      DISK_SCOPE_DECLINED_EXPECTED=1
+    else
+      bad "硬盘专测没等到候选盘枚举的锚点 —— 后面的键一律不发"
+    fi
+  fi
+
   # ---------------- 选档：只按一次 ----------------
   # 和 --disk-stress 那条路用同一套做法（它 1.6 就这么干了，这里是补上）。
   #
@@ -677,10 +731,10 @@ else
   #     这两条都是看截图逮到的，断言全绿。
   sleep 2
   mon "sendkey 1"
-  if ! wait_for_log "live media disks" 60 "选档已生效、开始采集"; then
+  if ! wait_for_log "$AFTER_DURATION" 60 "选档已生效、开始采集"; then
     # 还卡在菜单上就补一次（这时候除了菜单没有别的读取者，补键是安全的）
     mon "sendkey 1"
-    wait_for_log "live media disks" 60 "选档已生效、开始采集" || true
+    wait_for_log "$AFTER_DURATION" 60 "选档已生效、开始采集" || true
   fi
 
   # 配置核对那一屏没人按键了，靠它自己 60 秒倒计时往下走 ——
@@ -1113,6 +1167,43 @@ else
             && bad "说好跳出了，$leak 却还是跑了" \
             || ok "跳出之后 $leak 没有再跑"
         done
+        # ---- 1.10.1：我们是**故意拒掉擦盘确认**才作废的，理由必须写对 ----
+        #
+        # 这一段验的是那条新语义在真机上确实成立：不确认 = 这一轮作废，
+        # 而不是 1.10.0 那样静默跳过、最后打一份绿色 PASS。
+        if (( DISK_SCOPE_DECLINED_EXPECTED )); then
+          _dt="$(jq -r -s '[.[] | select(.id=="scope_target_missing")][0].detail' \
+                 "$RUNDIR/results.jsonl" 2>/dev/null)"
+          case "$_dt" in
+            *"未确认"*)   ok "作废的理由写的是「没确认擦盘」（不是「没有可测硬盘」）" ;;
+            *)            bad "作废理由不对，写的是：${_dt:0:60}" ;;
+          esac
+          # ⚠️ 这条 FAIL 说的是「这一轮作废」，**不是「这台机器坏了」**。
+          case "$_dt" in
+            *"这不是硬件故障"*) ok "而且写明了这不是硬件故障" ;;
+            *)                  bad "作废的文案没说明这不是硬件故障（会被当成机器有毛病）" ;;
+          esac
+          # 给出下一步：只想留信息不擦盘的，该选「仅导出报告」
+          case "$_dt" in
+            *"仅导出报告"*) ok "并且指了下一步该怎么做" ;;
+            *)              bad "作废的文案没告诉现场下一步该怎么办" ;;
+          esac
+          # ⚠️⚠️ **最要紧的一条：拒掉之后一个字节都不许写。**
+          #    用的是和 --disk-stress 那条路同一个证据（稀疏文件的实际占用），
+          #    只不过方向相反：那边要求涨上去，这边要求纹丝不动。
+          _wrote=0
+          for _i in "${!SPARES[@]}"; do
+            [[ -e "${SPARES[$_i]}" ]] || continue
+            _a="$(spare_alloc "${SPARES[$_i]}")"; _b="${SPARE_ALLOC_BEFORE[$_i]:-0}"
+            [[ "$_a" =~ ^[0-9]+$ ]] || _a=0
+            [[ "$_b" =~ ^[0-9]+$ ]] || _b=0
+            # 留 64MB 余量：QEMU 自己对 raw 稀疏盘的元数据也会占一点
+            (( _a > _b + 64 * 1024 * 1024 )) && _wrote=1
+          done
+          (( _wrote == 0 )) \
+            && ok "拒掉之后空白盘一个字节都没被写过（实际占用纹丝不动）" \
+            || bad "说好没确认，空白盘却被写过了 —— 这是本项目最不能犯的错"
+        fi
       else
         bad "范围 $SCOPE 不该出现 scope_target_missing"
       fi
