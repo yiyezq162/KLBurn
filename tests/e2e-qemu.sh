@@ -229,11 +229,45 @@ for t in qemu-system-x86_64 sgdisk mkfs.exfat losetup truncate; do
   command -v "$t" >/dev/null 2>&1 || die "缺 $t（apt-get install qemu-system-x86 gdisk exfatprogs）"
 done
 
+# ⚠️⚠️ **自动挑 ISO 必须按 edition 挑，不能只按 mtime。**（1.10.1）
+#
+# 原来写的是 `ls -t out/KLBurn-*.iso | head -1`，而这个通配**同时命中两种盘**：
+#     out/KLBurn-1.10.1-….iso        整机盘
+#     out/KLBurn-MEM-1.10.1-….iso    内存盘
+# 于是"先构建 full、再构建 mem、然后跑一轮整机盘的 e2e"这个再正常不过的顺序，
+# 挑到的是**刚构建的内存盘**。踩到的时候屏幕上是：
+#     ISO : out/KLBurn-MEM-1.10.1-….iso
+#     阶段 : full   范围 : disk        <- 内存盘压根没有范围菜单
+# 一路跑下去不会有任何报错，只是**验的东西和你以为的不是同一个**。
+#
+# 整机盘的文件名里没有 MEM 段，内存盘一定有 —— 按这个分开挑。
 if [[ -z "$ISO" ]]; then
-  # shellcheck disable=SC2012
-  ISO="$(ls -t out/KLBurn-*.iso 2>/dev/null | head -1)"
+  # 两种盘的文件名前缀是分得开的，直接用 glob 挑，不用 ls|grep 过滤
+  # （整机盘：KLBurn-<版本>-<日期>.iso；内存盘：KLBurn-MEM-<版本>-<日期>.iso）。
+  _cands=()
+  for _f in out/KLBurn-*.iso; do
+    [[ -f "$_f" ]] || continue
+    case "$_f" in
+      */KLBurn-MEM-*) [[ "$EDITION" == "mem"  ]] && _cands+=("$_f") ;;
+      *)              [[ "$EDITION" == "full" ]] && _cands+=("$_f") ;;
+    esac
+  done
+  # 取 mtime 最新的那个
+  for _f in "${_cands[@]}"; do
+    [[ -z "$ISO" || "$_f" -nt "$ISO" ]] && ISO="$_f"
+  done
+  unset _cands _f
 fi
-[[ -n "$ISO" && -f "$ISO" ]] || die "找不到 ISO。先 build/build-iso.sh，或用 --iso 指定"
+[[ -n "$ISO" && -f "$ISO" ]] || die "找不到 ${EDITION} 版的 ISO。先 build/build-iso.sh$([[ "$EDITION" == "mem" ]] && printf ' --edition mem')，或用 --iso 指定"
+
+# ⚠️ 显式传 --iso 时也要核一遍：传错盘和自动挑错盘的后果一模一样，
+#    而且显式传的那次更容易让人确信"我传的肯定对"。
+case "$ISO" in
+  */KLBurn-MEM-*) _iso_ed="mem" ;;
+  *)              _iso_ed="full" ;;
+esac
+[[ "$_iso_ed" == "$EDITION" ]] || \
+  die "ISO 和 --edition 对不上：$ISO 是${_iso_ed}版，而 --edition 是 ${EDITION}"
 
 KVM_ARGS=()
 if [[ -r /dev/kvm && -w /dev/kvm ]]; then
@@ -1111,6 +1145,14 @@ else
       grep -q '"profile": *"INVENTORY"' "$RUNDIR/meta.json" \
         && ok "info 档跳过了时长菜单（profile=INVENTORY）" \
         || bad "info 档的 profile 不是 INVENTORY —— 时长菜单没被跳过？"
+    elif (( DISK_SCOPE_DECLINED_EXPECTED )); then
+      # ⚠️ 同一把尺子的第二个用法（1.10.1）：硬盘专测**没确认擦盘**的那一轮
+      #    什么都不会跑，所以时长菜单也整个跳过了 —— profile 同样是 INVENTORY。
+      #    这不是"按键没打中"，是设计如此：问一个这轮不会执行的东西要跑多久，
+      #    和 info 档问"压多久"是同一句废话。
+      grep -q '"profile": *"INVENTORY"' "$RUNDIR/meta.json" \
+        && ok "拒掉擦盘之后连时长菜单都跳过了（profile=INVENTORY）" \
+        || bad "拒掉擦盘之后 profile 不是 INVENTORY —— 时长菜单没被跳过？"
     else
       grep -q '"profile": *"QUICK"' "$RUNDIR/meta.json" \
         && ok "档位确实选中了 QUICK（sendkey 生效了）" \

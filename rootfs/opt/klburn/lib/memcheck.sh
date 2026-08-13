@@ -165,18 +165,27 @@ mem_collect_spd() {
     printf '# 内核: %s\n\n' "$(uname -r 2>/dev/null)"
 
     printf '## 内核模块装上了没有\n'
+    printf '#  ⚠️ 读 SPD 真正要的是 ee1004 / at24（DDR5 要 spd5118）加一个 SMBus\n'
+    printf '#     控制器（i2c_i801 / i2c_piix4）。i2c_dev 只是给用户态程序用的\n'
+    printf '#     字符设备，我们全程读 sysfs，它有没有都不影响读 SPD。\n'
+    local m st
     for m in i2c_dev i2c_smbus i2c_i801 i2c_piix4 ee1004 at24 spd5118; do
       if grep -qE "^${m}\b" /proc/modules 2>/dev/null; then
-        printf '  已加载   %s\n' "$m"
+        st="已加载"
       elif [[ -d "/sys/module/${m}" ]]; then
         # 编进内核的（比如 CONFIG_I2C_CHARDEV=y）不会出现在 /proc/modules
-        printf '  内建     %s\n' "$m"
+        st="内建"
       else
-        printf '  没有     %s\n' "$m"
+        st="没有"
       fi
+      # i2c_dev 编进内核时连 /sys/module 都不一定有，但只要它在，
+      # /sys/class/i2c-dev 就会存在 —— 不补这一条会在这里印一个假的"没有"，
+      # 而看这份文件的人正是冲着"到底缺了什么"来的。
+      [[ "$m" == "i2c_dev" && "$st" == "没有" && -d /sys/class/i2c-dev ]] && st="内建"
+      printf '  %-7s  %s\n' "$st" "$m"
     done
 
-    printf '\n## 出现了哪些 i2c 总线（没有 = SMBus 控制器没起来）\n'
+    printf '\n## 出现了哪些 i2c 总线（一条都没有 = SMBus 控制器没起来）\n'
     local a nm found=0
     for a in /sys/class/i2c-adapter/*; do
       [[ -e "$a" ]] || continue
@@ -186,16 +195,26 @@ mem_collect_spd() {
     done
     (( found == 1 )) || printf '  （一条都没有）\n'
 
-    printf '\n## 这些总线上挂了什么（有 eeprom 的才读得到 SPD）\n'
+    printf '\n## 这些总线上挂了什么（要有 eeprom 才读得到 SPD）\n'
+    local drv dl
     found=0
     for a in /sys/bus/i2c/devices/*; do
       [[ -e "$a" ]] || continue
       found=1
-      printf '  %-16s driver=%s%s\n' "$(basename "$a")" \
-        "$(basename "$(readlink -f "$a/driver" 2>/dev/null)" 2>/dev/null)" \
-        "$([[ -e "$a/eeprom" ]] && printf '  <- 有 eeprom')"
+      # ⚠️ 没有 driver 这个软链时 `readlink -f` 会把路径原样回给你，
+      #    basename 出来就是字面量 "driver" —— 印出去像是绑了一个叫 driver
+      #    的驱动。先判在不在，不在就写 "-"。
+      dl="$a/driver"; drv="-"
+      [[ -L "$dl" ]] && drv="$(basename "$(readlink -f "$dl" 2>/dev/null)" 2>/dev/null)"
+      printf '  %-16s driver=%-12s%s\n' "$(basename "$a")" "$drv" \
+        "$([[ -e "$a/eeprom" ]] && printf '<- 有 eeprom，这一片能读')"
     done
     (( found == 1 )) || printf '  （一个设备都没有）\n'
+    printf '\n# 怎么读这份文件：\n'
+    printf '#   ee1004/at24 写「没有」            -> 盘里缺驱动，是我们能修的\n'
+    printf '#   驱动都在、上面一条 i2c 总线都没有  -> SMBus 被 BIOS 锁了或归 BMC 管，主机侧无解\n'
+    printf '#   总线有、但没有一个设备带 eeprom    -> SPD 挂在 mux 后面，或这一代要 spd5118\n'
+    printf '#                                        （内核 6.10 才有，本盘 6.8，DDR5 属于这一类）\n'
   } > "$RAW_DIR/spd-probe.txt" 2>/dev/null || true
 
   for d in /sys/bus/i2c/devices/*/eeprom; do
