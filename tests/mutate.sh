@@ -173,6 +173,14 @@ MUTATIONS=(
 "mem-spd-unread-fail${S}读不到 SPD 判 FAIL 而不是 SKIP（SMBus 归 BMC 管的平台上，每台好机器都被拦下）${S}test-mem-edition${S}$RT/lib/memcheck.sh${S}mut_mem_spd_unread_fail"
 "mem-scope-silent${S}内存报告删掉「本报告仅针对内存」（一个孤零零的 PASS 会被当成整机验收通过）${S}test-mem-edition${S}$RT/report/generate_mem_report.py${S}mut_mem_scope_silent"
 "mem-sn-empty-slots${S}空槽位也参与序列号比对（空槽占位符都是 NO DIMM，每台没插满的机器都判假货）${S}test-mem-edition${S}$RT/lib/memcheck.sh${S}mut_mem_sn_empty_slots"
+# ---- 1.10.1：逐条审完 1.9.9 / 1.10.0 现场报告之后加的 ----
+"full-scope-skips-confirm${S}全量档那道破坏性写确认也被当成已同意（不问就擦盘）${S}test-hw-checks${S}$RT/factory-test.sh${S}mut_full_scope_skips_confirm"
+"disk-declined-keeps-running${S}硬盘专测没确认擦盘时悄悄跑完并打 PASS（那一项就是那一轮的全部意义）${S}test-hw-checks${S}$RT/factory-test.sh${S}mut_disk_declined_keeps_running"
+"nic-loopback-nolink-hw${S}没插网线时回环子项又算成硬件故障（mlx5 每个空口都刷一条「自检未通过」）${S}test-hw-checks${S}$RT/lib/network.sh${S}mut_nic_loopback_nolink_hw"
+"pcie-speed-without-load${S}没加载过的卡照样判速率（内存/硬盘专测里每张显卡都刷一条 2.5GT/s）${S}test-hw-checks${S}$RT/lib/collect.sh${S}mut_pcie_speed_without_load"
+"pcie-width-needs-load${S}宽度也要「加载过」才判（宽度训练一次就定死，豁免它 = 放过真的只跑到 x8 的卡）${S}test-hw-checks${S}$RT/lib/collect.sh${S}mut_pcie_width_needs_load"
+"psu-noac-exempts-all${S}电源没进电的豁免扩大到所有 0 读数（一颗停转的机箱风扇会被顺手放过）${S}test-hw-checks${S}$RT/lib/verify.sh${S}mut_psu_noac_exempts_all"
+"sensors-state-all-scopes${S}整机部件传感器又进单项专测的结论（内存专测报告顶上挂一条没插线的 PSU）${S}test-hw-checks${S}$RT/lib/core.sh${S}mut_sensors_state_all_scopes"
 )
 
 # ================================================================
@@ -1026,10 +1034,30 @@ mut_remap_index_field() {
 # ⚠️⚠️ 全项目最危险的一条：`KLB_SCOPE=disk` 被读成"操作员已经同意擦盘"。
 # 范围只决定那道确认会不会被**问到**，绝不决定它开不开。
 # 变异之后，选了硬盘专测就直接开写 —— 盘上原有数据没了，而且没人被问过。
+#
+# ⚠️ 1.10.1 起打的是**硬盘专测那一路**的确认（缩进 2 格那条，排在选时长之前）。
+#    全量档那条缩进 4 格、在采集之后，是另一处。两条都不许被绕过。
 mut_disk_scope_skips_confirm() {
   replace_line "$RT/factory-test.sh" \
+    '  if confirm_disk_write "$DISK_CONFIRM_SECS"; then' \
+    "  if true; then"
+}
+
+# 全量档那一路的同款：不问就当已同意。
+mut_full_scope_skips_confirm() {
+  replace_line "$RT/factory-test.sh" \
     "    if confirm_disk_write 120; then" \
-    '    if [[ "$KLB_SCOPE" == "disk" ]] || confirm_disk_write 120; then'
+    "    if true; then"
+}
+
+# 1.10.1：硬盘专测没确认擦盘时，**悄悄跳过继续跑完**，报告照打绿色 PASS。
+# 这正是 1.10.0 现场那一轮的长相：操作员选了「[5] DISK ONLY」、等了 120 秒，
+# 拿到一份"硬盘压力测试 SKIP 等待 120s 无人确认"的硬盘专测报告 ——
+# 那一项就是那一轮的全部意义，跑不成就该作废，不该包装成一份看起来完整的报告。
+mut_disk_declined_keeps_running() {
+  replace_line "$RT/factory-test.sh" \
+    "    DISK_SCOPE_DECLINED=1" \
+    "    DISK_SCOPE_DECLINED=0"
 }
 
 # 「仅导出硬件信息」那一档打出和全量测试一模一样的绿色 PASS。
@@ -1068,11 +1096,15 @@ mut_pcie_idle_snapshot_verdict() {
 }
 
 # 1.9.8：没插网线的口，网卡自检失败照样判 FAIL。
-# 1.9.2 和 1.9.7 各栽过一次（Intel 的 Link test、mlx5 的 Speed Test），
-# 两次都是把一整批好机器拦在出货前。这条是那道兜底。
+# 1.9.2 / 1.9.7 / 1.10.0 各栽过一次（Intel 的 Link test、mlx5 的 Speed Test、
+# mlx5 的 Loopback Test），三次都是把一整批好机器拦在出货前。这条是那道兜底。
+#
+# ⚠️ 1.10.1 起兜底用的是**自检之前读到的**载波状态（`$carrier`），不是现场再读
+#    一次 —— offline 自检自己会把链路踢下去，跑完再读的话插着网线的口也会
+#    显示成"没插"，那就把真故障一起放过了。锚点跟着换了。
 mut_nic_selftest_nolink_fails() {
   replace_line "$RT/lib/network.sh" \
-    '    if [[ "$v" == "fail" || "$v" == "unknown_fail" ]] && ! net_iface_has_carrier "$ifn"; then' \
+    '    if [[ "$v" == "fail" || "$v" == "unknown_fail" ]] && (( carrier == 0 )); then' \
     '    if false; then'
 }
 
@@ -1099,6 +1131,57 @@ mut_disk_confirm_single_key() {
   replace_line "$RT/lib/storage.sh" \
     '  if ! read_line_countdown answer2 "$final_timeout" \' \
     '  if IFS= read -r -s -t 1 -n 1 answer2; then :; elif true; then'
+}
+
+# ================================================================
+# 1.10.1：逐条审完 1.9.9 / 1.10.0 现场报告之后加的
+# ================================================================
+
+# 没插网线的口，回环子项又被算成硬件故障。
+# mlx5 的回环要把包从真实发送队列丢出去再收回来，没有载波就发不出去
+# （内核日志原话：Failed to xmit loopback packet err(2)）。
+# 变异之后，每一个空着的光口都会刷一条「网卡自检未通过」——
+# 1.9.2 / 1.9.7 / 1.10.0 现场各栽过一次，同一个坑的三个入口。
+mut_nic_loopback_nolink_hw() {
+  replace_line "$RT/lib/network.sh" \
+    '      if (carrier + 0 == 0 && lname ~ /loopback|lb|datapath|packet|traffic|xmit/) {' \
+    '      if (0) {'
+}
+
+# 本轮压根没跑起来过的卡，照样拿它的空闲速率判 WARN。
+# 这正是 1.10.0 现场那台 6530：内存专测和硬盘专测里各刷一条
+# 「RTX 4090 速率 2.5GT/s（额定 16GT/s）」，而那两轮从头到尾没人碰过显卡。
+mut_pcie_speed_without_load() {
+  replace_line "$RT/lib/collect.sh" \
+    '    (( loaded == 1 && nsmp > 0 )) && speed_judged=1' \
+    '    (( nsmp > 0 )) && speed_judged=1'
+}
+
+# 反方向：把"要加载过才判"扩大到**宽度**。
+# 宽度在链路训练时协商一次就定死，不会为了省电变化 —— 拿"没加载过"去豁免它，
+# 等于放过一张真的只训练到 x8 的卡（1.10.0 现场那台 7542 上的 A6000 就是，
+# 实测传输带宽 13.0 GB/s，正好是 x16 的一半）。
+mut_pcie_width_needs_load() {
+  replace_line "$RT/lib/collect.sh" \
+    '    if [[ "$bw" =~ ^[0-9]+$ && "$capw" =~ ^[0-9]+$ ]] && (( bw > 0 && bw < capw )); then' \
+    '    if (( loaded == 1 )) && [[ "$bw" =~ ^[0-9]+$ && "$capw" =~ ^[0-9]+$ ]] && (( bw > 0 && bw < capw )); then'
+}
+
+# 「没接交流电的那一路电源，0 读数不再单独告警」这条豁免被扩大到所有 0 读数。
+# 一颗停转的机箱风扇是工厂最常见的缺陷之一，它和"某一路电源没插线"毫无关系。
+mut_psu_noac_exempts_all() {
+  replace_line "$RT/lib/verify.sh" \
+    '      if (lvl == "zero" && on_noac_psu(name)) lvl = "noac"' \
+    '      if (lvl == "zero") lvl = "noac"'
+}
+
+# 整机部件传感器（风扇 / 电压 / 电源）又回到每个范围都判。
+# 1.10.0 现场那份内存专项报告顶上就挂着一条没插线的 PSU3 —— 和内存毫无关系，
+# 而客户读到的是"这台机器有问题"。
+mut_sensors_state_all_scopes() {
+  replace_line "$RT/lib/core.sh" \
+    '    sensors_state)                   allow="full" ;;' \
+    '    sensors_state)                   allow="full cpu mem gpu disk" ;;'
 }
 
 # ================================================================

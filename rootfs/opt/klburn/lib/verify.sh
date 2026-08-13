@@ -718,19 +718,35 @@ verify_disk_selftest() {
 #      "装了但停转/没输出"，**从读数上分不开** —— 分不开的东西不该去染
 #      客户的结论（report-policy 二-5）。所以 0 只判 WARN 并写明两种可能。
 #   3. 没有任何数值型阈值的传感器跳过：没有可比的东西，不是"没问题"。
+#   4. **已经查明没接交流电的那几路电源，它的 0 读数另算一档**（1.10.1）。
+#      见 lib/collect.sh 里 PSU_NOAC_IDS 的那段说明：check_psu 已经把
+#      「PSU3 没插线」写进报告了，这里再报一遍 Vin/Vout/风扇 三个 0，
+#      是同一件事的第二种说法。摘掉的是重复，不是结论。
 #
-# ipmi_sensor_scan <sensor list 文件>
+# ipmi_sensor_scan <sensor list 文件> [没接交流电的电源编号，空格分开]
 #   -> 每条**可判**的传感器一行："<级别>|<名称>|<读数>|<单位>|<说明>"
-#      级别 = ok / warn / crit / zero
+#      级别 = ok / warn / crit / zero / noac
 #   调用方按级别自己数，好让"共核对了几项"和"几项越线"出自同一次扫描。
 ipmi_sensor_scan() {
-  local f="${1:-}"
+  local f="${1:-}" noac="${2:-}"
   [[ -s "$f" ]] || return 0
-  awk -F'|' '
+  awk -F'|' -v noac="$noac" '
     function t(x) { gsub(/^[[:space:]]+/, "", x); gsub(/[[:space:]]+$/, "", x); return x }
     function isnum(x) { return (x ~ /^-?[0-9]+(\.[0-9]+)?$/) }
     # 阈值和读数都是 "600.000" 这种写法，整数就去掉小数尾巴
     function fmt(v) { return (v == int(v)) ? sprintf("%d", v) : sprintf("%.2f", v) }
+    # 这条传感器是不是挂在"已知没接交流电"的那几路电源上。
+    # ⚠️ 编号后面必须紧跟非数字或行尾，否则 3 会命中 PSU31_Vin。
+    #    和 collect.sh 里 psu_status_state 那条正则是同一课。
+    function on_noac_psu(nm,   i, u) {
+      if (nnoac == 0) return 0
+      u = toupper(nm)
+      for (i = 1; i <= nnoac; i++)
+        if (u ~ ("^(PSU|PS)_?[ ]?" noacs[i] "([^0-9]|$)")) return 1
+      return 0
+    }
+    BEGIN { nnoac = split(noac, noacs, /[[:space:]]+/)
+            if (nnoac == 1 && noacs[1] == "") nnoac = 0 }
     NF >= 10 {
       name = t($1); val = t($2); unit = t($3)
       lnr = t($5); lcr = t($6); lnc = t($7); unc = t($8); ucr = t($9); unr = t($10)
@@ -747,6 +763,9 @@ ipmi_sensor_scan() {
       else if (lo_w != "" && v < lo_w) { lvl = "warn"; why = "低于主板设定的告警下限 " fmt(lo_w) }
       else if (hi_w != "" && v > hi_w) { lvl = "warn"; why = "高于主板设定的告警上限 " fmt(hi_w) }
       if (lvl == "crit" && v == 0) lvl = "zero"
+      # ⚠️ **只有"读数恰好为 0"这一档才降级。** 同一路电源的散热片温度真超了
+      #    上限，那是 crit，照样得亮 —— 没进电和部件过热是两回事。
+      if (lvl == "zero" && on_noac_psu(name)) lvl = "noac"
       printf "%s|%s|%s|%s|%s\n", lvl, name, fmt(v), unit, why
     }' "$f" 2>/dev/null
 }
@@ -785,13 +804,14 @@ verify_bmc_sensors() {
   local f="$RAW_DIR/ipmi-sensors-post.txt"
   [[ -s "$f" ]] || f="$RAW_DIR/ipmi-sensors.txt"
 
-  local rows; rows="$(ipmi_sensor_scan "$f")"
-  local n_all n_crit n_warn n_zero
+  local rows; rows="$(ipmi_sensor_scan "$f" "${PSU_NOAC_IDS:-}")"
+  local n_all n_crit n_warn n_zero n_noac
   n_all="$(printf '%s\n' "$rows"  | grep -c . || true)"
   n_crit="$(printf '%s\n' "$rows" | grep -c '^crit|' || true)"
   n_warn="$(printf '%s\n' "$rows" | grep -c '^warn|' || true)"
   n_zero="$(printf '%s\n' "$rows" | grep -c '^zero|' || true)"
-  for v in n_all n_crit n_warn n_zero; do
+  n_noac="$(printf '%s\n' "$rows" | grep -c '^noac|' || true)"
+  for v in n_all n_crit n_warn n_zero n_noac; do
     [[ "${!v}" =~ ^[0-9]+$ ]] || printf -v "$v" '%s' 0
   done
 
@@ -803,9 +823,11 @@ verify_bmc_sensors() {
     return
   fi
 
-  # 越线的逐条留一份证据文件（客户报告里只列前几条，剩下的在这儿）
+  # 越线的逐条留一份证据文件（客户报告里只列前几条，剩下的在这儿）。
+  # ⚠️ noac 那几条也写进去 —— 报告里不单列了，但排查的人要看得到我们
+  #    确实读到了、并且是**有意**降级的，不是漏掉了。
   local ev=""
-  if (( n_crit + n_warn + n_zero > 0 )); then
+  if (( n_crit + n_warn + n_zero + n_noac > 0 )); then
     ev="raw/ipmi-sensor-breach.txt"
     printf '%s\n' "$rows" | grep -v '^ok|' > "$RAW_DIR/ipmi-sensor-breach.txt" 2>/dev/null || true
   fi
@@ -824,6 +846,13 @@ verify_bmc_sensors() {
     printf '%s' "$out"
   }
 
+  # 没接交流电那几路的 0 读数：**不单列告警，但也不装作没读到。**
+  # 一句话交代清楚"这几项是因为那一路没进电才是 0，上面电源那条已经说明"，
+  # 客户对得上号，也不会以为我们漏查了几项。
+  local noac_txt=""
+  (( n_noac > 0 )) && noac_txt="（另有 ${n_noac} 项读数为 0 的电压/风扇传感器\
+挂在本次未接入交流电的电源上，属于该路没进电的必然读数，详见上方「电源」一项）"
+
   if (( n_crit > 0 )); then
     result_add "verify_bmc_sensors" "部件传感器复查" "$ST_FAIL" \
       "压测后有 ${n_crit} 项部件读数超出主板设定的临界范围：$(_sensor_list crit)。\
@@ -834,11 +863,11 @@ verify_bmc_sensors() {
     (( n_zero > 0 )) && msg="${msg}有 ${n_zero} 项部件读数为 0：$(_sensor_list zero)。\
 读数为 0 既可能是该位置未安装部件，也可能是部件已停转或无输出，两者从读数上分不开。"
     result_add "verify_bmc_sensors" "部件传感器复查" "$ST_WARN" \
-      "${msg}机器仍可正常工作，建议出货前现场确认散热与供电。" "$ev"
+      "${msg}机器仍可正常工作，建议出货前现场确认散热与供电。${noac_txt}" "$ev"
   else
     result_add "verify_bmc_sensors" "部件传感器复查" "$ST_PASS" \
-      "压测结束后核对 ${n_all} 项部件传感器（风扇转速 / 温度 / 电压 / 功率等），\
-读数均在主板设定的上下限之内" "raw/ipmi-sensors-post.txt"
+      "压测结束后核对 $(( n_all - n_noac )) 项部件传感器（风扇转速 / 温度 / 电压 / 功率等），\
+读数均在主板设定的上下限之内${noac_txt}" "raw/ipmi-sensors-post.txt"
   fi
   unset -f _sensor_list
 }
@@ -876,8 +905,10 @@ verify_all() {
     capture "sensors-post.txt" sensors
     # 测后传感器快照必须排在 verify_bmc_sensors 之前 —— 那一条判的就是这份。
     # （排反了它会退去读测前那份，于是"压测把风扇跑停了"这类事永远查不出来。）
+    # ⚠️ **快照照采，只是判定分开管**（scope_runs sensors_state）：范围窄的那几轮
+    #    raw/ 里一样留着完整的测后传感器读数，排查时对得上，只是不去染结论。
     [[ "${IPMI_OK:-0}" == "1" ]] && capture -t 60 "ipmi-sensors-post.txt" ipmitool sensor list
-    verify_bmc_sensors
+    scope_runs sensors_state && verify_bmc_sensors
   fi
   return 0
 }

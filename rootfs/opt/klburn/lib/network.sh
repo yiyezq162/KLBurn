@@ -546,7 +546,34 @@ nic_current_mbps() {
 #         在口 down 的时候压根不跑，直接返回 -EOPNOTSUPP
 #      4. 兜底：**没插网线的口，任何情况下都不判 FAIL**（见 check_nic_selftest）
 #
-# nic_selftest_subtests <ethtool -t 的输出文件>
+# ⚠️⚠️⚠️⚠️ **1.10.1 现场第三次栽在同一个坑上，而这次说明按名字认子项这条路
+#    本身就是错的。** 还是那台 7542 的 ConnectX-5，两个口都没插网线：
+#
+#        Link Test        1   ← 1.9.2 认得
+#        Speed Test       1   ← 1.9.7 认得
+#        Health Test      0   ← 卡自己说健康
+#        Loopback Test    2   ← **名字里既没有 link 也没有 speed，判成硬件故障**
+#
+#    内核日志里写着原话：
+#        mlx5_core …: [3] Loopback Test start..
+#        mlx5_core …: 	Failed to xmit loopback packet err(2)
+#        mlx5_core …: [3] Loopback Test end: result(2)
+#
+#    mlx5 的回环自检**要把包从真实发送队列丢出去再收回来**，口上没有载波
+#    就发不出去 —— 它和 Link / Speed 一样是"没插网线必然不通过"的，只是
+#    名字里没有那两个词。同一台机器上的 `eno2`（tg3，同样没接网线）反而
+#    正常走了 PASS 分支，因为博通失败的那一项恰好就叫 "link test"。
+#    **同一件事（没插网线）在两块卡上落到两个不同的结论，判据就是错的。**
+#
+#    所以判据从"名字里有没有那几个词"改成**"这个口上有没有载波"**：
+#      * 有载波：回环 / 寄存器 / 中断 / EEPROM 这些都是实打实的硬件项，照判
+#      * 没载波：**任何要走数据通路的子项都不作数**（回环是其中之一），
+#        只剩纯寄存器类还有意义 —— 而没有一家驱动会把寄存器读写做成
+#        依赖链路的。名字表留着当第二道，两道是"或"的关系。
+#    下一个厂家换成 "Cable Diag"、"PHY Test"、"Datapath Test"，
+#    第一道照样挡得住，因为它压根不看名字。
+#
+# nic_selftest_subtests <ethtool -t 的输出文件> [有没有载波: 1/0]
 #   -> "<硬件子项失败数> <网线相关子项失败数> <驱动跑不了的子项数>"
 #
 # 子项明细的格式各家驱动不完全一样，共同点是"名字在前、数值在最后一个字段，
@@ -554,10 +581,13 @@ nic_current_mbps() {
 #     Register test  (offline)\t 0     ← intel ixgbe / igb / i40e / e1000e
 #     Link Test                  0     ← mlx5 / bnxt 这类不带括号的
 # 所以按"最后一个字段是数值"来认。
+#
+# ⚠️ 第二个参数**缺省是 1（当作有载波）**。这个方向是故意的：漏传参数的
+#    后果应该是"照旧按硬件项判"，不是"悄悄把所有失败都放过"。
 nic_selftest_subtests() {
-  local f="${1:-}"
+  local f="${1:-}" carrier="${2:-1}"
   [[ -s "$f" ]] || { printf '0 0 0'; return; }
-  awk '
+  awk -v carrier="$carrier" '
     /[Tt]he test extra info/ { inx = 1; next }
     !inx { next }
     {
@@ -571,15 +601,20 @@ nic_selftest_subtests() {
       if (v + 0 == 0) next                 # 0 = 这一子项通过
       if (v + 0 <  0) { nosup++; next }    # 负数 = 驱动没跑这一项，不是失败
       name = line; sub(/ [^ ]*$/, "", name)
-      # 这三个词都是"要有网线、有对端才能过"的子项。mlx5 的 Speed Test
-      # 在没有载波时和 Link Test 一样直接返回 1，见上面那段说明。
-      if (tolower(name) ~ /link|speed|cable/) link++; else hw++
+      lname = tolower(name)
+      # 第一道：没有载波时，凡是要走数据通路的子项都归到"依赖网线"。
+      # 回环在这一档里 —— mlx5 的回环就是从真实发送队列发出去的。
+      if (carrier + 0 == 0 && lname ~ /loopback|lb|datapath|packet|traffic|xmit/) {
+        link++; next
+      }
+      # 第二道：名字里带 link / speed / cable 的，任何时候都算依赖网线。
+      if (lname ~ /link|speed|cable/) link++; else hw++
     }
     END { printf "%d %d %d", hw + 0, link + 0, nosup + 0 }
   ' "$f" 2>/dev/null
 }
 
-# nic_selftest_verdict <ethtool -t 的输出文件>
+# nic_selftest_verdict <ethtool -t 的输出文件> [有没有载波: 1/0]
 #   -> pass | fail | link_only | nosupport_only | unknown_fail | unsupported
 #
 #   fail            确实有硬件子项没过
@@ -588,13 +623,13 @@ nic_selftest_subtests() {
 #   unknown_fail    卡自己说 FAIL，但一条子项明细都拆不出来 —— 拆不开就
 #                   **不知道**是网线还是硬件，交给调用方按有没有载波来定
 nic_selftest_verdict() {
-  local f="${1:-}"
+  local f="${1:-}" carrier="${2:-1}"
   [[ -s "$f" ]] || { printf 'unsupported'; return; }
   # 先认 FAIL：`The test result is FAIL` 里也有 "test result is"，
   # 顺序反了会把失败读成通过。
   if grep -aqiE 'The test result is[[:space:]]+FAIL' "$f" 2>/dev/null; then
     local hw_bad link_bad nosup
-    read -r hw_bad link_bad nosup < <(nic_selftest_subtests "$f")
+    read -r hw_bad link_bad nosup < <(nic_selftest_subtests "$f" "$carrier")
     [[ "$hw_bad"   =~ ^[0-9]+$ ]] || hw_bad=0
     [[ "$link_bad" =~ ^[0-9]+$ ]] || link_bad=0
     [[ "$nosup"    =~ ^[0-9]+$ ]] || nosup=0
@@ -635,17 +670,21 @@ check_nic_selftest() {
   sleep 2
 
   local n_pass=0 n_fail=0 n_unsup=0 n_link=0 n_retest=0
-  local bad="" nolink="" retest="" v f
+  local bad="" nolink="" retest="" v f carrier
   for ifn in "${ifaces[@]}"; do
     f="$RAW_DIR/nic/${ifn}-selftest.txt"
+    # ⚠️ 载波状态要在**自检之前**读。offline 自检自己会把链路踢下去，
+    #    跑完再读的话，一个插着网线的口也会显示成"没插" —— 那就把
+    #    真故障一起放过了，方向正好是错的那一边。
+    if net_iface_has_carrier "$ifn"; then carrier=1; else carrier=0; fi
     # 有的驱动只实现 online 自检；offline 不支持时退一步再试一次。
     # 两次都不行就是这个驱动不提供自检。
     { timeout 90 ethtool -t "$ifn" offline 2>&1 || true; } > "$f"
-    if [[ "$(nic_selftest_verdict "$f")" == "unsupported" ]]; then
+    if [[ "$(nic_selftest_verdict "$f" "$carrier")" == "unsupported" ]]; then
       { printf '(offline unsupported, retrying online)\n'
         timeout 90 ethtool -t "$ifn" online 2>&1 || true; } >> "$f"
     fi
-    v="$(nic_selftest_verdict "$f")"
+    v="$(nic_selftest_verdict "$f" "$carrier")"
 
     # ⚠️⚠️ **最后一道兜底：没插网线的口，不判 FAIL。**
     #
@@ -656,7 +695,13 @@ check_nic_selftest() {
     #
     # 所以：口上没有载波时，把 fail / unknown_fail 一律降级成"要接线复测"。
     # 这不是把结论藏起来 —— 报告里照样写明是哪个口、请接上网线重测一次。
-    if [[ "$v" == "fail" || "$v" == "unknown_fail" ]] && ! net_iface_has_carrier "$ifn"; then
+    #
+    # ⚠️ 1.10.1 起走到这一步的口已经很少了：上面 nic_selftest_subtests 的
+    #    第一道（没载波时数据通路类子项不作数）先把 mlx5 那种情形收进了
+    #    link_only。剩下能落到这里的是"没插网线、而且**寄存器类**子项真的
+    #    没过"——那才是值得写一句"接上线复测"的事。用的是自检前读到的
+    #    载波状态，不是现在再读一次（自检已经把链路踢下去了）。
+    if [[ "$v" == "fail" || "$v" == "unknown_fail" ]] && (( carrier == 0 )); then
       printf '\n(no carrier on this port - verdict not conclusive, see lib/network.sh)\n' >> "$f"
       v="retest"
     fi
@@ -689,9 +734,10 @@ check_nic_selftest() {
     # 卡上的硬件项全过了，只有依赖网线的那几个子项没过 = 那个口没接网线。
     # 二号红线：现场没接网线不是硬件故障。
     result_add "check_nic_selftest" "网卡自检" "$ST_PASS" \
-      "$(( n_pass + n_link )) 个网口的卡上自检项（寄存器 / EEPROM / 中断 / 回环）全部通过，\
-未发现硬件故障。其中 ${n_link} 个网口（${nolink}）的「链路 / 协商速率」子项未通过 —— \
-这几项查的是网线与对端设备，现场未接网线时必然不通过，与网卡本身好坏无关${extra}" \
+      "$(( n_pass + n_link )) 个网口的卡上自检项全部通过，未发现硬件故障。\
+其中 ${n_link} 个网口（${nolink}）现场未接网线，自检里要靠网线与对端设备才能完成的\
+那几项（链路、协商速率、以及要把数据包真发出去再收回来的回环）因此未通过 —— \
+这是没接网线的必然结果，与网卡本身好坏无关${extra}" \
       "raw/nic/"
   elif (( n_pass > 0 )); then
     result_add "check_nic_selftest" "网卡自检" "$ST_PASS" \

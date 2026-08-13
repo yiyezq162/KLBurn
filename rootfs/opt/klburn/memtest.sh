@@ -111,7 +111,7 @@ try_sync_clock_via_network || CLOCK_SYNCED=0
 # ---------------------------------------------------------------- 建立运行目录
 SERIAL="$(get_serial)"
 RUN_STAMP="$(date '+%Y%m%d_%H%M%S')"
-# 用户指定的格式：内存测试_日期_内存容量_CPU
+# 用户指定的格式：日期_时间_内存容量_CPU_MEMSP（纯 ASCII，见 memcheck.sh）
 MACHINE_TAG="$(mem_run_tag "$RUN_STAMP")"
 
 # 目录重名要避开，绝不覆盖。纽扣电池没电的机器每次开机 RTC 都回退到同一个

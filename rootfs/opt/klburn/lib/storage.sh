@@ -431,27 +431,41 @@ confirm_disk_write() {
     printf '\n'
   fi
 
-  # ---------------- 第 1 关：必须原样打出 yes 再回车 ----------------
-  printf '  %sType  yes  and press ENTER to continue to the final confirmation.%s\n' "$C_BLD" "$C_RST"
+  # ---------------- 第 1 关：打 y 或 yes 再回车 ----------------
+  #
+  # ⚠️ **两关认的写法从 1.10.1 起完全一样**（用户 2026-08-13 指定）：
+  #    `y` 或 `yes`，不分大小写，前后空格无所谓，**都要按回车**。
+  #
+  #    1.9.9 那版第一关故意只认完整的 `yes`，理由是"放宽成单个字母就等于把
+  #    手滑碰到 y 变成一次真擦盘"。那个理由在当时成立，是因为**第二关那时候
+  #    是单键读**（按下 y 的一瞬间就开始擦）。1.9.9 自己已经把第二关改成整行读了
+  #    —— 现在光碰一下 y 什么都不会发生，还得按回车；而且后面还有一整关。
+  #    真正拦住手滑的是"要回车"和"有两关"，不是"第一关必须多打两个字母"。
+  #    留着两关不一样，换来的是现场每次都要想一下这一屏该打哪个 ——
+  #    而这正是 1.9.8 那次现场反馈的原话。
+  #
+  #    ⚠️ 放宽的**只有认哪些字符串**。两关都要回车、两关都在、默认全是跳过，
+  #      这三条一个都没动，test-hw-checks 和 mutate 里各有断言钉着。
+  printf '  %sType  y  or  yes  and press ENTER to continue to the final confirmation.%s\n' "$C_BLD" "$C_RST"
   printf '  %sENTER alone, any other text (typo included), or %ds timeout  ->  SKIP.%s\n\n' \
     "$C_GRY" "$timeout" "$C_RST"
 
   local answer=""
-  if ! read_line_countdown answer "$timeout" "  Type yes to continue >"; then
+  if ! read_line_countdown answer "$timeout" "  Type y or yes to continue >"; then
     warn "No input for ${timeout}s - skipping disk stress test."
     DISK_SKIP_REASON="等待 ${timeout}s 无人确认，按默认跳过（硬盘信息已采集）"
     return 1
   fi
 
-  # 去掉空格再比。只认 yes（不分大小写），打成 yea / y / YES! 之类一律跳过。
+  # 去掉空格再比。只认 y / yes（不分大小写），打成 yea / ye / YES! 之类一律跳过。
   local norm="${answer//[[:space:]]/}"
-  if [[ "${norm,,}" != "yes" ]]; then
+  if [[ "${norm,,}" != "y" && "${norm,,}" != "yes" ]]; then
     if [[ -z "$norm" ]]; then
       info "Skipped by operator (ENTER)."
       DISK_SKIP_REASON="现场选择跳过（直接回车），硬盘信息已采集"
     else
-      warn "Input was '${answer}', not 'yes' - skipping disk stress test."
-      DISK_SKIP_REASON="现场输入的是 '${answer}' 而非 yes，按默认跳过（硬盘信息已采集）"
+      warn "Input was '${answer}', not y/yes - skipping disk stress test."
+      DISK_SKIP_REASON="现场输入的是 '${answer}' 而非 y/yes，按默认跳过（硬盘信息已采集）"
     fi
     return 1
   fi

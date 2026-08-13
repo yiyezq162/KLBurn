@@ -174,9 +174,54 @@ else
   fi
 fi
 
+# ---------------------------------------------------------------- 枚举硬盘
+# ⚠️ **排在选时长之前**（1.10.1）。它本身只读 lsblk、几百毫秒，挪上来是为了
+#    下面那道硬盘专测的确认屏 —— 那一屏要把候选盘逐块列出来给人看。
+scan_disks
+
+# ---------------------------------------------------------------- 硬盘专测：先确认再问时长
+#
+# ⚠️⚠️ **选了「硬盘专测」，就在这里当场把擦盘确认问掉。**（1.10.1）
+#
+# 1.10.0 之前这道确认统一排在采集之后（配置核对屏后面），带 120 秒倒计时、
+# 超时按"跳过"处理。全量档里那样是对的：硬盘压测在全量档里是**可选项**，
+# 无人值守时跳过它、把别的照跑完，正是这张盘该有的行为。
+#
+# 但同一套逻辑套到**硬盘专测**上就荒唐了 —— 1.10.0 现场那一轮的报告里写着：
+#     硬盘压力测试  SKIP  等待 120s 无人确认，按默认跳过（硬盘信息已采集）
+# 操作员明明选的是「[5] DISK ONLY」，站在机器前面等了两分钟，最后得到一份
+# **一项硬盘压测都没跑**的硬盘专测报告。这一轮的全部意义就是那一项。
+#
+# 所以硬盘专测这一路改成：
+#   1. 选完范围**立刻**问，不用先等采集跑完（现场人就在跟前，这时候问最省事）
+#   2. 两道确认都过 -> 接着问时长，正常往下走
+#   3. 没确认（打错 / 直接回车 / 超时）-> **这一轮作废**，走 FAIL 收尾，
+#      屏幕上说清楚为什么，然后由收尾菜单给关机 / 重测
+#
+# ⚠️ 第 3 条判 FAIL 的含义是「**这一轮作废**」，不是「这台机器坏了」——
+#    和上面「选了显卡专测却没有显卡」走的是同一套语义，报告里一个字都不会
+#    往硬件头上扣。倒计时仍然留着：这张盘的硬约束是"绝不能停在一个等按键的
+#    屏上"（§11），只是超时的去向从"悄悄跳过继续跑"变成了"作废并说明"。
+# 两处确认用同一个秒数，抽成常量不是为了好看：`confirm_disk_write 120` 这行
+# 文本在两处一模一样，而 tests/mutate.sh 的锚点是**整行子串匹配** ——
+# 一模一样的两行会让"往硬盘专测这一路塞一个绕过"的变异根本施加不上，
+# 于是那条守卫看起来绿着、其实一次都没跑过（§11-13 那种空转）。
+DISK_CONFIRM_SECS=120
+
+DISK_CONFIRMED=0
+DISK_SCOPE_DECLINED=0
+if [[ "$KLB_SCOPE" == "disk" ]] && (( ${#DISK_CAND[@]} > 0 )); then
+  if confirm_disk_write "$DISK_CONFIRM_SECS"; then
+    DISK_CONFIRMED=1
+  else
+    DISK_SCOPE_DECLINED=1
+  fi
+fi
+
 # ---------------------------------------------------------------- 选时长
 # 「仅导出报告」那一档没有时长可选 —— 一个部件都不压，问"压多久"是句废话。
-if scope_has_stress; then
+# 硬盘专测没确认擦盘的那一轮同理：什么都不会跑，没有时长可选。
+if scope_has_stress && (( DISK_SCOPE_DECLINED == 0 )); then
   select_duration
 else
   DURATION_PROFILE="INVENTORY"
@@ -184,7 +229,6 @@ else
 fi
 
 # ---------------------------------------------------------------- 采集
-scan_disks
 collect_all
 # 配置一致性核对：读的全是 collect_all 已经落盘的文件，自己不跑耗时命令，
 # 所以紧跟在它后面。放在配置核对面板**之前** —— 现场那一屏就能看到
@@ -233,6 +277,37 @@ if [[ "$KLB_SCOPE" == "gpu" ]] && (( GPU_USABLE == 0 )); then
 EOF
   printf '%s\n' "$C_RST"
   warn "GPU-only scope on a machine with no usable GPU - skipping all test phases."
+  sleep 5
+
+elif [[ "$KLB_SCOPE" == "disk" ]] && (( DISK_SCOPE_DECLINED == 1 )); then
+  # 选了硬盘专测，但擦盘确认没过（打错 / 直接回车 / 超时）。
+  # 这一轮**一项硬盘压测都不会跑**，而那是这一轮的全部意义 —— 直接跳出。
+  SCOPE_ABORT=1
+  result_add "scope_target_missing" "本轮测试未执行" "$ST_FAIL" \
+    "本轮选择的是硬盘专项测试，但现场未确认「允许向硬盘写入数据」这一步，测试**未执行**。\
+硬盘压力测试会向裸设备写入数据、覆盖盘上原有内容，因此必须现场逐字确认才会开始。\
+这不是硬件故障 —— 需要测硬盘请重新测试并在确认屏输入 y 或 yes；\
+只想留存硬盘信息与 SMART 状态、不做破坏性写入，请选择「仅导出报告」。" ""
+  printf '\n'
+  printf '%s' "$C_RED$C_BLD"
+  cat <<'EOF'
+  ##############################################################
+  #  DISK WRITE NOT CONFIRMED - DISK-ONLY TEST CANNOT RUN      #
+  #                                                            #
+  #  You picked  [5] DISK ONLY , but the destructive-write     #
+  #  confirmation was not given, so there is nothing to run.   #
+  #                                                            #
+  #  The run STOPS here and is marked FAIL.                    #
+  #  This does NOT mean the hardware is faulty - it means      #
+  #  the disk write was (deliberately or not) declined.        #
+  #                                                            #
+  #  To test disks : re-run, pick [5], then type y or yes.     #
+  #  To only record disk info and SMART, with NO writing at    #
+  #  all, re-run and pick  [6] INVENTORY ONLY .                #
+  ##############################################################
+EOF
+  printf '%s\n' "$C_RST"
+  warn "Disk-only scope without write confirmation - skipping all test phases."
   sleep 5
 
 elif [[ "$KLB_SCOPE" == "disk" ]] && (( ${#DISK_CAND[@]} == 0 )); then
@@ -292,8 +367,12 @@ fi
 #
 # 反过来，不测硬盘的那几个范围里**不问**：那一屏是个 120 秒的输入框，
 # 问一个这轮根本不会执行的破坏性操作，只会让现场白等、白紧张一次。
-DISK_CONFIRMED=0
-if scope_runs stress_disk && (( SCOPE_ABORT == 0 )); then
+#
+# ⚠️ **硬盘专测那一路已经在选完范围时问过了**（见上面「硬盘专测：先确认再问
+#    时长」那一段），这里不再问第二遍 —— 同一件事问两遍，现场只会以为
+#    第一次没生效。全量档仍然在这里问：那一档硬盘压测是可选项，
+#    等采集和配置核对都过完再问，是为了让人先看到这台机器上有哪些盘。
+if scope_runs stress_disk && (( SCOPE_ABORT == 0 )) && [[ "$KLB_SCOPE" != "disk" ]]; then
   if (( ${#DISK_CAND[@]} > 0 )); then
     if confirm_disk_write 120; then
       DISK_CONFIRMED=1
@@ -301,6 +380,8 @@ if scope_runs stress_disk && (( SCOPE_ABORT == 0 )); then
   else
     DISK_SKIP_REASON="未发现可进行读写压力测试的本机硬盘（系统正在使用的磁盘不参与破坏性测试）"
   fi
+elif [[ "$KLB_SCOPE" == "disk" ]] && (( ${#DISK_CAND[@]} == 0 )); then
+  DISK_SKIP_REASON="未发现可进行读写压力测试的本机硬盘（系统正在使用的磁盘不参与破坏性测试）"
 fi
 
 # ---------------------------------------------------------------- 时间分配
@@ -417,6 +498,10 @@ if scope_has_stress && (( SCOPE_ABORT == 0 )); then
     scope_runs stress_cpu && { ( stress_cpu "$CPU_SECS" ) & BURN_PIDS+=("$!"); }
     scope_runs stress_mem && { ( stress_mem "$MEM_SECS" ) & BURN_PIDS+=("$!"); }
     if (( gpu_will_run )); then
+      # ⚠️ 登记必须在**父进程**里做。gpu_stress 是丢进子 shell 跑的，
+      #    在它里面改 PCIE_LOADED_BDFS 一出子 shell 就没了，而
+      #    check_pcie_link 是父进程在压测结束后调的。
+      pcie_mark_gpus_loaded
       ( gpu_stress "$GPU_SECS" ) & BURN_PIDS+=("$!")
     fi
 
@@ -471,9 +556,14 @@ TEST_ELAPSED=$(( $(date +%s) - TEST_START_EPOCH ))
 # 采样到此为止，然后才判 —— 判据是"全程最好的一次读数"，所以必须等所有
 # 会给设备加载的阶段都跑完。SCOPE_ABORT 那一轮什么都没跑，采样器也没起过，
 # check_pcie_link 会走"只有空闲读数、不作结论"那一支。
+#
+# ⚠️ **采样器照停、判定按范围来**（1.10.1，见 core.sh 的 scope_runs pcie_link）：
+#    内存 / CPU / 硬盘专测那几轮没有任何东西会把扩展卡跑起来，读到的只能是
+#    空闲状态下的链路速率。1.10.0 现场那台 6530 就是这么在内存专项和硬盘专项
+#    里各刷了一条「RTX 4090 速率 2.5GT/s」，而同一天同一台机器的全量档是 PASS。
 if (( SCOPE_ABORT == 0 )); then
   pcie_link_monitor_stop
-  check_pcie_link
+  scope_runs pcie_link && check_pcie_link
 fi
 
 # ---------------------------------------------------------------- 复查

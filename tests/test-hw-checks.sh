@@ -1648,49 +1648,136 @@ System Slot Information
 	Bus Address: 0000:c8:00.0
 EOF
 
+PCIE_LOADED_BDFS=""
 LAST_STATUS=""; check_pcie_link
 check "两个端点都满速 -> PASS（桥的降速不算数）" "PASS" "$LAST_STATUS"
 
-# 把 4090 改成插在 x8 槽、且只训练到 Gen1
-sed -i 's/^\t\tLnkSta:\tSpeed 16GT\/s, Width x16/\t\tLnkSta:\tSpeed 2.5GT\/s, Width x8/' "$RAW_DIR/lspci-vv.txt"
-
-# ---- 1.9.8：**只有空闲快照的时候不许判 WARN** ----
+# ================================================================
+# 1.10.1：**宽度和速率是两码事，判据也必须分开**
+# ================================================================
 #
-# 这一条钉的是 1.9.7 现场那次误报。同一台 6530、同一张 4090、同一个槽，
-# 连测六轮读出来是 16 / 2.5 / 2.5 / 2.5 / 16 / 2.5 GT/s —— 硬件一个螺丝
-# 都没动，判定结果却是掷骰子。一次空闲快照本来就不能当判据。
-rm -f "$RAW_DIR/pcie-link-samples.txt"
-LAST_STATUS=""; LAST_DETAIL=""; check_pcie_link
-check "只有空闲快照、一条加载态读数都没有 -> 不判 WARN" "PASS" "$LAST_STATUS"
-check "但数值仍要如实报出来（不判 ≠ 不说）" "1" \
-      "$(printf '%s' "$LAST_DETAIL" | grep -c 'c8:00.0')"
-check "而且要说明为什么不作结论" "1" \
-      "$(printf '%s' "$LAST_DETAIL" | grep -c '不对它们作出结论')"
+# ⚠️ 1.9.8 那版把两者合成一个 why，再拿"有没有加载态采样"整体一刀切。
+#    1.10.0 现场证明这一刀切在两个方向上都错了：
+#
+#    错一（漏判）：宽度**不会**为了省电变化 —— 它在链路训练时协商一次就定死。
+#      拿"没有加载态读数"去豁免宽度，等于把一张真的只训练到 x8 的卡放过去。
+#    错二（误判）：速率**会**动态调，而 1.9.8 的守卫看的是"采样条数 > 0"。
+#      采样器全程在跑，条数从来不为 0，于是那道守卫是空的 —— 6530 那台在
+#      内存专项和硬盘专项里各刷了一条「RTX 4090 速率 2.5GT/s」，
+#      而那两轮从头到尾没有任何东西碰过显卡。
+#
+#    所以现在：宽度照判；速率只在"这一轮真把这张卡跑起来过"时才判
+#    （lib/collect.sh 的 PCIE_LOADED_BDFS，由去加载它的那段代码登记）。
 
-# ---- 加载态一直没回满 -> 这才是真的降速，照报 ----
+# ---- 只有速率掉档，宽度是满的 ----
+sed -i 's/^\t\tLnkSta:\tSpeed 16GT\/s, Width x16/\t\tLnkSta:\tSpeed 2.5GT\/s, Width x16/' "$RAW_DIR/lspci-vv.txt"
 cat > "$RAW_DIR/pcie-link-samples.txt" <<'EOF'
 27:00.0 5 8
-c8:00.0 2.5 8
-c8:00.0 2.5 8
-c8:00.0 2.5 8
+c8:00.0 2.5 16
+c8:00.0 2.5 16
+c8:00.0 2.5 16
 EOF
+
+# 本轮没跑过这张卡 -> 速率读数只反映空闲状态，不判
+PCIE_LOADED_BDFS=""
 LAST_STATUS=""; LAST_DETAIL=""; check_pcie_link
-check "全程复读也没回满 -> WARN" "WARN" "$LAST_STATUS"
-check "WARN 文案里要点名是哪个设备" "1" "$(printf '%s' "$LAST_DETAIL" | grep -c 'c8:00.0')"
-check "WARN 文案要讲清判据是全程最好的一次读数" "1" \
+check "没加载过这张卡 -> 速率掉档不判 WARN（1.10.0 现场刷的就是这条）" "PASS" "$LAST_STATUS"
+check "  但数值仍要如实报出来（不判 ≠ 不说）" "1" \
+      "$(printf '%s' "$LAST_DETAIL" | grep -c 'c8:00.0')"
+check "  而且要说明为什么不作结论" "1" \
+      "$(printf '%s' "$LAST_DETAIL" | grep -c '不对它们的速率作出结论')"
+# ⚠️ 采样条数**不再是判据**。条数足得很（上面三条），照样不判 ——
+#    这一条专门钉住"别再退回按 nsmp 判"。
+check "  采样条数够多也照样不判（判据是加载过没有，不是采样条数）" "PASS" "$LAST_STATUS"
+
+# 同一份数据，这次登记成"跑过了" -> 那就是真的没回满，照报
+pcie_mark_loaded c8:00.0
+LAST_STATUS=""; LAST_DETAIL=""; check_pcie_link
+check "跑过这张卡、全程复读也没回满 -> WARN" "WARN" "$LAST_STATUS"
+check "  WARN 文案里要点名是哪个设备" "1" "$(printf '%s' "$LAST_DETAIL" | grep -c 'c8:00.0')"
+check "  WARN 文案要讲清判据是全程最好的一次读数" "1" \
       "$(printf '%s' "$LAST_DETAIL" | grep -c '最好')"
-check "既然已经按加载态判了，就不许再把核实推给看报告的人" "0" \
+check "  既然已经按加载态判了，就不许再把核实推给看报告的人" "0" \
       "$(printf '%s' "$LAST_DETAIL" | grep -c '请对照')"
 
 # ---- 空闲时掉档、加载后回满 -> 正常的省电行为，一个字都不该报 ----
+cat > "$RAW_DIR/pcie-link-samples.txt" <<'EOF'
+c8:00.0 2.5 16
+c8:00.0 16 16
+c8:00.0 2.5 16
+EOF
+LAST_STATUS=""; LAST_DETAIL=""; check_pcie_link
+check "加载后回满额定 -> PASS（这就是 4090 那个误报）" "PASS" "$LAST_STATUS"
+check "回满了就不许再提这张卡" "0" "$(printf '%s' "$LAST_DETAIL" | grep -c 'c8:00.0')"
+
+# ---- 宽度掉档：**加载过没有都要判**（宽度不随省电变化）----
+#
+# ⚠️ 这一条钉的是 1.10.0 现场那台 7542 上的 RTX A6000：插在 H12SSL-i 的
+#    SLOT5（手册写明是真 x16 槽），卡自己 LnkCap x16、根端口 LnkCap 也 x16，
+#    实际只训练到 x8。旁证是实测带宽 13.0 GB/s —— 同一版代码在另一台
+#    机器上量到 x16 的 4090 是 25.1 GB/s，正好一倍。**那条 WARN 是真的。**
+#    别因为"速率那半边改成要加载才判"就顺手把宽度也一起豁免掉。
+sed -i 's/^\t\tLnkSta:\tSpeed 2.5GT\/s, Width x16/\t\tLnkSta:\tSpeed 16GT\/s, Width x8/' "$RAW_DIR/lspci-vv.txt"
+cat > "$RAW_DIR/pcie-link-samples.txt" <<'EOF'
+c8:00.0 16 8
+c8:00.0 16 8
+EOF
+PCIE_LOADED_BDFS=""
+LAST_STATUS=""; LAST_DETAIL=""; check_pcie_link
+check "宽度只到 x8：没加载过也照判 WARN（宽度训练一次就定死）" "WARN" "$LAST_STATUS"
+check "  文案里要写明宽度和额定值" "1" \
+      "$(printf '%s' "$LAST_DETAIL" | grep -c '宽度 x8（额定 x16）')"
+# 一条采样都没有时同样要判：宽度靠空闲快照读也是准的
+rm -f "$RAW_DIR/pcie-link-samples.txt"
+LAST_STATUS=""; LAST_DETAIL=""; check_pcie_link
+check "宽度只到 x8：一条采样都没有也照判 WARN" "WARN" "$LAST_STATUS"
+
+# ---- 宽度真窄 + 速率判不了：两件事必须分开说 ----
+#
+# ⚠️ 1.9.8 那版把两者拼进同一个 why，于是"宽度真窄"会把一条**判不了**的
+#    速率一起拖进 WARN 的文案，读起来像是两条都查实了。
+sed -i 's/^\t\tLnkSta:\tSpeed 16GT\/s, Width x8/\t\tLnkSta:\tSpeed 2.5GT\/s, Width x8/' "$RAW_DIR/lspci-vv.txt"
+cat > "$RAW_DIR/pcie-link-samples.txt" <<'EOF'
+c8:00.0 2.5 8
+c8:00.0 2.5 8
+EOF
+PCIE_LOADED_BDFS=""
+LAST_STATUS=""; LAST_DETAIL=""; check_pcie_link
+check "宽度窄 + 没加载过 -> WARN（宽度那半边）" "WARN" "$LAST_STATUS"
+check "  结论里要有宽度" "1" \
+      "$(printf '%s' "$LAST_DETAIL" | grep -c '宽度 x8（额定 x16）')"
+check "  速率那半边必须走「不作结论」，不许混进 WARN 的判据里" "1" \
+      "$(printf '%s' "$LAST_DETAIL" | grep -c '不对它们的速率作出结论')"
+PCIE_LOADED_BDFS=""
+# 复原成两项都满，免得影响后面的用例
+sed -i 's/^\t\tLnkSta:\tSpeed 2.5GT\/s, Width x8/\t\tLnkSta:\tSpeed 16GT\/s, Width x16/' "$RAW_DIR/lspci-vv.txt"
+
+# ---- pcie_mark_loaded / pcie_was_loaded 本身 ----
+PCIE_LOADED_BDFS=""
+check "没登记过 -> 没加载过" "no" "$(pcie_was_loaded c8:00.0 && echo yes || echo no)"
+pcie_mark_loaded c8:00.0
+check "登记之后认得出" "yes" "$(pcie_was_loaded c8:00.0 && echo yes || echo no)"
+check "带 domain 前缀的写法也认（sysfs 那边一律带 0000:）" "yes" \
+      "$(pcie_was_loaded 0000:c8:00.0 && echo yes || echo no)"
+pcie_mark_loaded 0000:c8:00.0
+check "重复登记不会累出两份" "1" "$(printf '%s' "$PCIE_LOADED_BDFS" | wc -w)"
+check "别的设备不受影响" "no" "$(pcie_was_loaded 27:00.0 && echo yes || echo no)"
+# 下面 pcie_link_best 那一组用的是这份采样，恢复回来（上面的用例改过它）
 cat > "$RAW_DIR/pcie-link-samples.txt" <<'EOF'
 c8:00.0 2.5 8
 c8:00.0 16 16
 c8:00.0 2.5 8
 EOF
-LAST_STATUS=""; LAST_DETAIL=""; check_pcie_link
-check "加载后回满额定 -> PASS（这就是 4090 那个误报）" "PASS" "$LAST_STATUS"
-check "回满了就不许再提这张卡" "0" "$(printf '%s' "$LAST_DETAIL" | grep -c 'c8:00.0')"
+# GPU 那条批量登记：从 GPU_PCI_LIST 的每行第一个字段取 BDF
+PCIE_LOADED_BDFS=""
+GPU_PCI_LIST="c8:00.0 VGA compatible controller [0300]: NVIDIA Corporation AD102 [10de:2684]
+c9:00.0 3D controller [0302]: NVIDIA Corporation AD102 [10de:2684]"
+pcie_mark_gpus_loaded
+check "pcie_mark_gpus_loaded 把每张卡都登记上" "c8:00.0 c9:00.0" "$PCIE_LOADED_BDFS"
+GPU_PCI_LIST=""
+PCIE_LOADED_BDFS=""
+pcie_mark_gpus_loaded
+check "一张显卡都没有时不许登记出空条目" "" "$PCIE_LOADED_BDFS"
 
 # ---- 纯函数：全程最好的一次 ----
 check "pcie_link_best 取全程最大值和采样条数" "16 16 3" \
@@ -2603,6 +2690,8 @@ verify_ecc    full cpu mem
 verify_throttle full cpu
 verify_disk   full disk
 verify_common full cpu mem gpu disk
+sensors_state full
+pcie_link     full gpu info
 EOF
 }
 
@@ -2618,7 +2707,25 @@ while read -r group allow; do
   done
 done < <(scope_spec)
 check "范围映射表逐格对得上（共 $n_cells 格）" "" "$bad_cells"
-check "映射表真的被逐格验过了（不是零格空转）" "114" "$n_cells"
+check "映射表真的被逐格验过了（不是零格空转）" "126" "$n_cells"
+
+# ⚠️ **「这一轮出没出错」和「这个部件现在什么状态」必须分开管。**（1.10.1）
+#    verify_common 那几条判的是**差值**（压测前后比一比），差值和压了哪个
+#    部件无关，所以每个范围都跑 —— 这一条不许被顺手收窄，
+#    否则"只压了 CPU 的那一轮里 BMC 记了电源掉电"就查不出来了。
+for s in full cpu mem gpu disk; do
+  check "内核日志/SEL/AER 这类差值复查在 $s 下必须照跑" "yes" \
+        "$(scope_runs verify_common "$s" && echo yes || echo no)"
+done
+#    反过来，绝对状态那两条只在能说得清的范围里跑。
+for s in cpu mem gpu disk; do
+  check "整机部件传感器不进 $s 专测的结论" "no" \
+        "$(scope_runs sensors_state "$s" && echo yes || echo no)"
+done
+for s in cpu mem disk; do
+  check "PCIe 链路不进 $s 专测的结论（那几轮没人会把扩展卡跑起来）" "no" \
+        "$(scope_runs pcie_link "$s" && echo yes || echo no)"
+done
 
 # 认不出来的组名一律**跑**。新加判定忘了登记的后果应该是"多跑一项"，
 # 而不是"那条结论从报告里静悄悄消失"—— 后者没有任何人会发现。
@@ -2697,18 +2804,58 @@ check "shell 不认识瞎编的范围" "no" "$(scope_valid nonsense && echo yes 
 #    往裸设备写数据会毁掉盘上原有内容，confirm_disk_write 是唯一的闸门。
 #    这条断言钉的是"没有任何一条路径能在不问的情况下把 DISK_CONFIRMED 置 1"。
 FT_SH="$LIB/../factory-test.sh"
-check "DISK_CONFIRMED=1 在主流程里只有一处" "1" \
+# 1.10.1 起有两处：硬盘专测那一路在选完范围时就问（提前问），
+# 全量档仍然在采集之后问。两处都必须是 confirm_disk_write 的成功分支。
+check "DISK_CONFIRMED=1 在主流程里只有这两处" "2" \
       "$(grep -c '^\s*DISK_CONFIRMED=1\s*$' "$FT_SH" || true)"
 # ⚠️ 别写成 `... | grep -q ...`：grep -q 命中就关管道，上游吃 SIGPIPE 退 141，
 #    而本脚本开着 pipefail，整条管道于是返回失败 —— 输出短的时候时好时坏。
 #    先接进变量再比（同一个坑 1.9.5 在 test-screen-render 里真踩到过）。
-_dc_ctx="$(grep -B1 '^\s*DISK_CONFIRMED=1\s*$' "$FT_SH" || true)"
-check "那一处必须紧跟在 confirm_disk_write 的成功分支里" "yes" \
-      "$(case "$_dc_ctx" in *'if confirm_disk_write'*) echo yes ;; *) echo no ;; esac)"
-# 两处：一处是"要不要问破坏性写确认"，一处是"要不要真跑 fio"。
-# 两处都得在，缺前一处 = 硬盘专测不问就跑，缺后一处 = 问了却不跑。
+#
+# ⚠️⚠️ **逐处都要查，不能只查第一处。**只看 grep -B1 的头一条，第二处
+#    偷偷改成无条件置 1 也照样全绿 —— 而那一处正好是全量档那条路。
+_dc_bad=0
+while IFS= read -r _dc_line; do
+  case "$_dc_line" in *'if confirm_disk_write'*) ;; *) _dc_bad=$(( _dc_bad + 1 )) ;; esac
+done < <(grep -B1 '^\s*DISK_CONFIRMED=1\s*$' "$FT_SH" | grep -v '^\s*DISK_CONFIRMED=1\s*$' | grep -v '^--$')
+check "每一处 DISK_CONFIRMED=1 都必须紧跟在 confirm_disk_write 的成功分支里" "0" "$_dc_bad"
+# 两处：一处是"全量档要不要问破坏性写确认"，一处是"要不要真跑 fio"。
+# 两处都得在，缺前一处 = 全量档不问就跑，缺后一处 = 问了却不跑。
 check "破坏性写确认和硬盘压测两段都由 scope_runs stress_disk 管" "2" \
       "$(grep -c 'scope_runs stress_disk' "$FT_SH" || true)"
+
+# ---- 硬盘专测：确认屏必须排在选时长之前（1.10.1）----
+#
+# ⚠️⚠️ 1.10.0 现场那一轮的报告里写着：
+#        硬盘压力测试  SKIP  等待 120s 无人确认，按默认跳过（硬盘信息已采集）
+#    操作员选的是「[5] DISK ONLY」，站在机器前等了两分钟，拿到一份**一项硬盘
+#    压测都没跑**的硬盘专测报告。那一项就是那一轮的全部意义。
+#    现在改成：选完范围立刻问，不确认就整轮作废（FAIL），不再默默跳过。
+_p_scan="$(grep -n '^scan_disks$'          "$FT_SH" | head -1 | cut -d: -f1)"
+_p_conf="$(grep -nF '  if confirm_disk_write "$DISK_CONFIRM_SECS"; then' "$FT_SH" | head -1 | cut -d: -f1)"
+_p_dur="$(grep -n '^  select_duration$'    "$FT_SH" | head -1 | cut -d: -f1)"
+_p_coll="$(grep -n '^collect_all$'         "$FT_SH" | head -1 | cut -d: -f1)"
+check "scan_disks 要排在选时长之前（确认屏要列出候选盘）" "yes" \
+      "$( [[ -n "$_p_scan" && -n "$_p_dur" && "$_p_scan" -lt "$_p_dur" ]] && echo yes || echo no )"
+check "硬盘专测的确认屏排在选时长之前" "yes" \
+      "$( [[ -n "$_p_conf" && -n "$_p_dur" && "$_p_conf" -lt "$_p_dur" ]] && echo yes || echo no )"
+check "而且排在采集之前（现场人就在跟前，这时候问最省事）" "yes" \
+      "$( [[ -n "$_p_conf" && -n "$_p_coll" && "$_p_conf" -lt "$_p_coll" ]] && echo yes || echo no )"
+check "没确认时要把这一轮作废，不许悄悄跳过继续跑" "1" \
+      "$(grep -c '^    DISK_SCOPE_DECLINED=1$' "$FT_SH" || true)"
+check "作废那一路要判 FAIL（走 SCOPE_ABORT 那套「本轮未执行」语义）" "yes" \
+      "$(grep -A6 'DISK_SCOPE_DECLINED == 1' "$FT_SH" | grep -q 'SCOPE_ABORT=1' && echo yes || echo no)"
+# ⚠️ 判 FAIL 的含义是「这一轮作废」，**不是**「这台机器坏了」。
+#    文案里一个字都不许往硬件头上扣 —— 和"选了显卡专测却没有显卡"同一把尺子。
+_decl_txt="$(grep -A9 'DISK_SCOPE_DECLINED == 1' "$FT_SH" | grep 'result_add' -A5 || true)"
+check "作废的文案要说明这不是硬件故障" "1" \
+      "$(printf '%s' "$_decl_txt" | grep -c '这不是硬件故障' || true)"
+check "作废的文案要给出下一步怎么做" "1" \
+      "$(printf '%s' "$_decl_txt" | grep -c '仅导出报告' || true)"
+# 硬盘专测不许被问两遍 —— 同一件事问两遍，现场会以为第一次没生效
+check "全量档那处确认要把硬盘专测排除掉（否则问两遍）" "1" \
+      "$(grep -c 'scope_runs stress_disk .*KLB_SCOPE" != "disk"' "$FT_SH" || true)"
+unset _dc_bad _dc_line _p_scan _p_conf _p_dur _p_coll _decl_txt
 
 # ---- 两道确认必须是**同一种交互**（1.9.9）----
 #
@@ -2723,15 +2870,22 @@ check "两道确认都必须走整行读（不许有单键读）" "2" \
       "$(printf '%s\n' "$_confirm" | grep -c 'read_line_countdown' || true)"
 check "确认面板里不许再出现单键读（按下去就擦盘，没有反悔余地）" "0" \
       "$(printf '%s\n' "$_confirm" | grep -c 'read -r -s -t 1 -n 1' || true)"
-# 第二关接受 y 和 yes 两种写法（现场记不住到底该打哪个，两个都认）
+# 两关接受的写法从 1.10.1 起完全一样：y 或 yes，不分大小写，都要回车。
+# （1.9.9 那版第一关只认 yes，理由是"手滑碰到 y 就擦盘"——那个理由在
+#  第二关还是单键读的时候成立；两关都改成整行读之后，真正拦住手滑的是
+#  "要回车"和"有两关"，而不是"第一关必须多打两个字母"。）
 check "第二关要认单个 y" "1" \
       "$(grep -cF '"${norm2,,}" == "y"' "$_ST_SH" || true)"
 check "第二关也要认完整的 yes（现场记不住该打哪个，两个都得认）" "1" \
       "$(grep -cF '"${norm2,,}" == "yes"' "$_ST_SH" || true)"
-# ⚠️ 但**第一关仍然只认 yes**：那是整套流程里最外面的一道闸，
-#    放宽成单个字母就等于把"手滑按到 y"变成一次真擦盘。
-check "第一关仍然只认完整的 yes（不许放宽成 y）" "1" \
-      "$(grep -c '"${norm,,}" != "yes"' "$_ST_SH" || true)"
+check "第一关也要认单个 y" "1" \
+      "$(grep -cF '"${norm,,}" != "y" ' "$_ST_SH" || true)"
+check "第一关也要认完整的 yes" "1" \
+      "$(grep -cF '"${norm,,}" != "yes"' "$_ST_SH" || true)"
+# ⚠️⚠️ **放宽的只有"认哪些字符串"。这三条一个都没动，也不许动：**
+#    两关都在、两关都要回车、默认（打错/回车/超时）全部是不擦。
+check "第一关的提示语要写明 y 或 yes 都行（屏幕和判据必须一致）" "1" \
+      "$(printf '%s\n' "$_confirm" | grep -c 'Type  y  or  yes  and press ENTER' || true)"
 check "面板上不许再印那个多余的 \[n\]（不擦是默认动作，不需要按键）" "0" \
       "$(printf '%s\n' "$_confirm" | grep -c '\[n\]' || true)"
 unset _ST_SH _confirm
@@ -2742,11 +2896,20 @@ unset _ST_SH _confirm
 # 打绿色 PASS，下面还写着"本轮只对显卡做了压力测试与专项诊断"——一项都没做。
 check "gpu 范围 + 没有可用显卡 -> 置 SCOPE_ABORT" "1" \
       "$(grep -cE 'if \[\[ "\$KLB_SCOPE" == "gpu" \]\] && \(\( GPU_USABLE == 0 \)\); then' "$FT_SH" || true)"
+# ⚠️ 要连**下一行**一起看。`KLB_SCOPE == "disk" && ${#DISK_CAND[@]} == 0`
+#    这个条件在 factory-test.sh 里出现两次：一次是这条跳出分支，另一次是
+#    破坏性写确认那一段用来填 DISK_SKIP_REASON。只数条件本身会数出 2，
+#    而那个 2 里有一个根本不是跳出。
 check "disk 范围 + 没有可测硬盘 -> 置 SCOPE_ABORT" "1" \
-      "$(grep -cE 'elif \[\[ "\$KLB_SCOPE" == "disk" \]\] && \(\( \$\{#DISK_CAND\[@\]\} == 0 \)\); then' "$FT_SH" || true)"
-check "两档各落一条 scope_target_missing 的 FAIL" "2" \
+      "$(grep -A1 -E 'elif \[\[ "\$KLB_SCOPE" == "disk" \]\] && \(\( \$\{#DISK_CAND\[@\]\} == 0 \)\); then' "$FT_SH" \
+         | grep -c '^\s*SCOPE_ABORT=1$' || true)"
+# 1.10.1 起第三档：选了硬盘专测、但擦盘确认没过。同样是"这一轮跑不成"，
+# 走的是同一套语义（大红 FAIL + 报告写明未执行 + 一个字不往硬件上扣）。
+check "disk 范围 + 没确认擦盘 -> 也置 SCOPE_ABORT" "1" \
+      "$(grep -cE 'elif \[\[ "\$KLB_SCOPE" == "disk" \]\] && \(\( DISK_SCOPE_DECLINED == 1 \)\); then' "$FT_SH" || true)"
+check "三档各落一条 scope_target_missing 的 FAIL" "3" \
       "$(grep -c 'result_add "scope_target_missing"' "$FT_SH" || true)"
-check "两条判定的状态都必须是 FAIL" "2" \
+check "三条判定的状态都必须是 FAIL" "3" \
       "$(grep -A1 'result_add "scope_target_missing"' "$FT_SH" | grep -c 'ST_FAIL' || true)"
 # ⚠️ **只管显卡和硬盘。**CPU / 内存不做这件事：没有这两样机器根本开不了机，
 #    "选了 CPU 专测却没有 CPU"这件事不存在。多写一档就是凭空多一条误判路径。
@@ -2758,9 +2921,9 @@ check "不许给 cpu / mem 也加这条（没有它们机器开不了机）" "0"
 check "SCOPE_ABORT 要挡住六段（核对屏 / 写确认 / 基准 / 压测 / PCIe / 复查）" "6" \
       "$(grep -cE 'SCOPE_ABORT == 0' "$FT_SH" || true)"
 # ⚠️ 这条 FAIL 说的是「这一轮作废」，**不是「这台机器坏了」**。
-#    没装显卡 / 没有可测盘的机器本身没有任何毛病 —— 两条文案里都必须写明，
-#    否则就撞上一号红线（能力缺失 ≠ 硬件故障）。
-check "两条文案都要写明这不是硬件故障" "2" \
+#    没装显卡 / 没有可测盘 / 现场没确认擦盘，机器本身都没有任何毛病 ——
+#    三条文案里都必须写明，否则就撞上一号红线（能力缺失 ≠ 硬件故障）。
+check "三条文案都要写明这不是硬件故障" "3" \
       "$(grep -c '这不是硬件故障' "$FT_SH" || true)"
 # 硬盘那条要把两种情况都说到：真没装盘 / 盘都在使用中
 check "硬盘那条要说清楚「盘都在使用中」也算" "1" \
@@ -2812,13 +2975,40 @@ check "主流程里要起 PCIe 链路采样器" "1" \
 check "而且要在判定之前停掉它" "1" \
       "$(grep -c '^  pcie_link_monitor_stop$' "$FT_SH" || true)"
 check "主流程里要调用 check_pcie_link" "1" \
-      "$(grep -c '^  check_pcie_link$' "$FT_SH" || true)"
+      "$(grep -c '^  scope_runs pcie_link && check_pcie_link$' "$FT_SH" || true)"
+# ⚠️ 判定要按范围来（1.10.1）：内存 / CPU / 硬盘专测那几轮没有任何东西会把
+#    扩展卡跑起来，读到的只能是空闲速率。把这个 scope_runs 去掉不会有任何
+#    报错，只会让那几轮的报告重新长出一条「速率 2.5GT/s」的黄。
+check "而且要按范围决定判不判（不能无条件判）" "1" \
+      "$(grep -c 'scope_runs pcie_link &&' "$FT_SH" || true)"
 check "采样器起在压测之前、判定排在压测之后" "yes" \
       "$( [[ "$(grep -n 'pcie_link_monitor_start' "$FT_SH" | head -1 | cut -d: -f1)" \
-             -lt "$(grep -n '^  check_pcie_link$' "$FT_SH" | head -1 | cut -d: -f1)" ]] \
+             -lt "$(grep -n 'check_pcie_link' "$FT_SH" | head -1 | cut -d: -f1)" ]] \
           && echo yes || echo no)"
 check "异常退出时也要收掉采样器（否则它会一直往 raw/ 里追加）" "1" \
       "$(grep -c 'pcie_link_monitor_stop 2>/dev/null' "$FT_SH" || true)"
+# ⚠️ **采样器不受范围管。**判定按范围收窄了，采样照旧全程跑 —— raw/ 里那份
+#    逐秒读数在排查时永远有用，而且它是 check_pcie_link 唯一的加载态数据源。
+check "采样器本身不许被 scope_runs 包起来" "0" \
+      "$(grep -c 'scope_runs.*pcie_link_monitor' "$FT_SH" || true)"
+
+# ---- 谁去加载了设备，谁负责登记（1.10.1）----
+#
+# ⚠️ gpu_stress 是丢进子 shell 跑的（`( gpu_stress ... ) &`），在它**里面**
+#    登记的话一出子 shell 就没了，而 check_pcie_link 是父进程在压测结束后调的。
+#    所以登记必须写在父进程里，紧挨着那句 `( gpu_stress ... ) &`。
+check "显卡压测前要在父进程里登记（子 shell 里登记会丢）" "1" \
+      "$(grep -c '^      pcie_mark_gpus_loaded$' "$FT_SH" || true)"
+check "登记要排在 gpu_stress 之前" "yes" \
+      "$( [[ "$(grep -n 'pcie_mark_gpus_loaded' "$FT_SH" | head -1 | cut -d: -f1)" \
+             -lt "$(grep -n 'gpu_stress "\$GPU_SECS"' "$FT_SH" | head -1 | cut -d: -f1)" ]] \
+          && echo yes || echo no)"
+# ⚠️ 这条查的是 bench.sh 的**文件内容**，不是 declare -f —— 本套件没有
+#    source bench.sh（它顶上要 BENCH_LOG_DIR 那一堆），函数根本不在这个
+#    shell 里。写成 declare -f 的话它恒等于"没有"，而 check 期望的是 no，
+#    于是这条断言永远绿、永远什么都没验（§11-13 那种空转）。
+check "显卡带宽基准也要登记（仅导出报告那一档只有它会跑显卡）" "1" \
+      "$(grep -c '^  pcie_mark_gpus_loaded$' "$LIB/bench.sh" || true)"
 
 # 上面那两组必须**有能力变红**：这个项目栽过"从没红过的测试等于没写"。
 # 拿一个真不存在的函数名喂给同一条判据，它必须给出 no。
@@ -3232,6 +3422,53 @@ printf 'The test result is FAIL\nThe test extra info:\nSpeed Test 1\nEeprom test
 check "网线相关项 + 真硬件项同时失败 -> 仍然 fail" "fail" \
       "$(nic_selftest_verdict "$TMP/nst-mixed.txt")"
 
+# ---- 1.10.1：同一块 ConnectX-5，回环这次返回的是正数 2 ----
+#
+# ⚠️⚠️ **同一个坑的第三个入口，而这次说明"按名字认子项"这条路本身就是错的。**
+#
+#    1.10.0 现场那台 7542（还是那两个没插网线的口）：
+#        Link Test        1     ← 1.9.2 认得
+#        Speed Test       1     ← 1.9.7 认得
+#        Health Test      0     ← 卡自己说健康
+#        Loopback Test    2     ← **名字里既没有 link 也没有 speed**
+#    内核日志里写着为什么是 2：
+#        mlx5_core …: 	Failed to xmit loopback packet err(2)
+#    mlx5 的回环要把包从**真实发送队列**丢出去再收回来，没有载波就发不出去。
+#    上一版按 `-95`（EOPNOTSUPP）豁免过一次，那是"口是 down 的"那种情形；
+#    这次口是 up 的、只是没插线，返回的就变成了正数，豁免不到。
+#
+#    判据因此从"名字"改成**"这个口上有没有载波"**。下面两条一起钉：
+#      1. 没载波 -> 回环归到"依赖网线"，整条 link_only
+#      2. 有载波 -> 回环仍然是实打实的硬件项，照判 fail（**豁免不许扩大化**）
+cat > "$TMP/nst-mlx5-lb2.txt" <<'EOF'
+The test result is FAIL
+The test extra info:
+Link Test	 1
+Speed Test	 1
+Health Test	 0
+Loopback Test	 2
+EOF
+check "mlx5 回环返回正数 2、口上没载波 -> link_only" "link_only" \
+      "$(nic_selftest_verdict "$TMP/nst-mlx5-lb2.txt" 0)"
+check "  这条绝不能判成 fail（1.10.0 现场刷的就是它）" "0" \
+      "$(nic_selftest_verdict "$TMP/nst-mlx5-lb2.txt" 0 | grep -c '^fail$' || true)"
+check "  没载波时子项计数：三项全归网线相关" "0 3 0" \
+      "$(nic_selftest_subtests "$TMP/nst-mlx5-lb2.txt" 0)"
+# ⚠️ 反方向：**插着网线的口，回环失败就是回环失败。**
+#    豁免只在"没插网线"这个前提下成立，前提没了豁免也必须没。
+check "同一份输出、口上有载波 -> fail（豁免不许扩大化）" "fail" \
+      "$(nic_selftest_verdict "$TMP/nst-mlx5-lb2.txt" 1)"
+check "  有载波时子项计数：回环算硬件项" "1 2 0" \
+      "$(nic_selftest_subtests "$TMP/nst-mlx5-lb2.txt" 1)"
+# 缺省值的方向：漏传参数要落在"照旧按硬件项判"，不是"悄悄全放过"
+check "不传载波参数时按有载波算（漏传的后果是多判，不是漏判）" "fail" \
+      "$(nic_selftest_verdict "$TMP/nst-mlx5-lb2.txt")"
+# 寄存器 / EEPROM 这类不走数据通路的，没插网线也照样是真故障
+printf 'The test result is FAIL\nThe test extra info:\nLink Test 1\nEeprom test 1\n' \
+  > "$TMP/nst-nolink-hw.txt"
+check "没插网线、但 EEPROM 子项没过 -> 仍然 fail" "fail" \
+      "$(nic_selftest_verdict "$TMP/nst-nolink-hw.txt" 0)"
+
 # ---- 兜底那一层：没插网线的口，任何情况下都不判 FAIL ----
 #
 # 上面几条钉的是**纯函数**怎么拆子项。但那份名单是按我们见过的驱动列的，
@@ -3441,6 +3678,56 @@ check "读数为 0 -> zero（降级），不是 crit" "1" \
 check "读数为 0 时不许出现 crit" "0" \
       "$(ipmi_sensor_scan "$TMP/sensors-zero.txt" | grep -c '^crit|' || true)"
 
+# ---- 1.10.1：已经查明没接交流电的那一路，它的 0 不再单独报一遍 ----
+#
+# ⚠️ 下面是 1.10.0 现场那台 6530 的原样片段。四路电源、PSU3 没插线：
+#    check_psu 判 PASS 并写明「其中 PSU3 本次未接入交流电（现场接线条件）；
+#    其余 3 路供电正常…仍具备电源冗余」，紧接着「部件传感器复查」又把
+#    同一个 PSU3 的三个 0 报成 WARN —— 一份报告两种说法，而且那是那台机器
+#    全量档报告里**唯一的一条黄**。
+#
+# 注意 PSU3_Hs_Temp / PSU3_Amb_Temp 都读得到而且正常：模块在位、就是没进电。
+cat > "$TMP/sensors-noac.txt" <<'EOF'
+PSU1_Vin         | 222.000    | Volts      | ok    | 76.000    | 80.000    | 86.000    | 280.000   | 290.000   | 304.000
+PSU3_Vin         | 0.000      | Volts      | nr    | 76.000    | 80.000    | 86.000    | 280.000   | 290.000   | 304.000
+PSU3_Vout        | 0.000      | Volts      | nr    | 10.500    | 11.000    | 11.400    | 12.800    | 13.000    | 13.500
+PSU3_FanSpeed    | 0.000      | RPM        | nr    | 1200.000  | 1400.000  | 1600.000  | 40000.000 | 42000.000 | 45000.000
+PSU3_Hs_Temp     | 36.000     | degrees C  | ok    | -15.000   | -10.000   | -5.000    | 108.000   | 112.000   | 115.000
+EOF
+check "不告诉它 PSU3 没进电 -> 照旧三条 zero（这就是 1.10.0 现场那三条）" "3" \
+      "$(ipmi_sensor_scan "$TMP/sensors-noac.txt" | grep -c '^zero|' || true)"
+check "告诉它 PSU3 没进电 -> 三条降级成 noac" "3" \
+      "$(ipmi_sensor_scan "$TMP/sensors-noac.txt" 3 | grep -c '^noac|' || true)"
+check "  降级之后一条 zero 都不剩" "0" \
+      "$(ipmi_sensor_scan "$TMP/sensors-noac.txt" 3 | grep -c '^zero|' || true)"
+check "  同一路的散热片温度正常，照旧是 ok" "1" \
+      "$(ipmi_sensor_scan "$TMP/sensors-noac.txt" 3 | grep -c '^ok|PSU3_Hs_Temp' || true)"
+check "  别的电源一个字都不动" "1" \
+      "$(ipmi_sensor_scan "$TMP/sensors-noac.txt" 3 | grep -c '^ok|PSU1_Vin' || true)"
+# ⚠️ 豁免只认那一路。编号对不上就不许降级 —— 否则一条真停转的风扇会被
+#    "反正有电源没插线"顺手放过，那是这条改动最危险的失败方式。
+check "豁免的是 PSU4 时，PSU3 的三个 0 照样亮" "3" \
+      "$(ipmi_sensor_scan "$TMP/sensors-noac.txt" 4 | grep -c '^zero|' || true)"
+# 编号后面必须紧跟非数字：豁免 3 不许命中 PSU31
+cat > "$TMP/sensors-noac2.txt" <<'EOF'
+PSU31_Vin        | 0.000      | Volts      | nr    | 76.000    | 80.000    | 86.000    | 280.000   | 290.000   | 304.000
+EOF
+check "豁免 3 不许命中 PSU31（编号后要紧跟非数字）" "1" \
+      "$(ipmi_sensor_scan "$TMP/sensors-noac2.txt" 3 | grep -c '^zero|' || true)"
+# ⚠️ 非电源的 0 读数**一条都不许**被这个豁免碰到。机箱风扇停转是工厂最常见的
+#    缺陷之一，它和"某一路电源没插线"毫无关系。
+cat > "$TMP/sensors-noac3.txt" <<'EOF'
+InFAN3_Speed     | 0.000      | RPM        | lcr   | 400.000   | 600.000   | 800.000   | 23000.000 | 25000.000 | 28000.000
+PSU3_Vin         | 0.000      | Volts      | nr    | 76.000    | 80.000    | 86.000    | 280.000   | 290.000   | 304.000
+EOF
+check "机箱风扇停转不受电源豁免影响（照旧 zero）" "1" \
+      "$(ipmi_sensor_scan "$TMP/sensors-noac3.txt" 3 | grep -c '^zero|InFAN3_Speed' || true)"
+# 多路没进电时列表要都认
+check "豁免列表可以有多路" "3" \
+      "$(ipmi_sensor_scan "$TMP/sensors-noac.txt" "2 3 4" | grep -c '^noac|' || true)"
+check "空豁免列表 = 什么都不豁免（默认方向是多报，不是漏报）" "3" \
+      "$(ipmi_sensor_scan "$TMP/sensors-noac.txt" "" | grep -c '^zero|' || true)"
+
 # 上告警线（unc）和上临界线（ucr）要分开：一个是 WARN 一个是 FAIL
 cat > "$TMP/sensors-temp.txt" <<'EOF'
 VRMCpu1 Temp     | 96.000     | degrees C  | unc   | 5.000     | 5.000     | 10.000    | 95.000    | 100.000   | 105.000
@@ -3478,21 +3765,54 @@ check "认不出来的单位原样留着，绝不吞信息" "1" \
 # 一条新判定最危险的失败方式不是漏判，是每台好机器都刷红 —— 那会让整份报告
 # 失去可信度，而且没人会先怀疑判据。所以这条守卫直接吃 test_out 下的真文件，
 # 有几份吃几份（仓库里没有这些数据时自动跳过，不影响 CI）。
+#
+# ⚠️⚠️ **回放要连 check_psu 一起跑，不能只喂传感器文件。**（1.10.1）
+#    1.10.0 那台 6530 是四路电源、PSU3 没插线，于是 PSU3_Vin / PSU3_Vout /
+#    PSU3_FanSpeed 三个 0 让这一条在**六份**真机数据上同时跑红。那三个 0
+#    不是新信息 —— check_psu 已经把「PSU3 本次未接入交流电」写进报告了。
+#    降级的判据（PSU_NOAC_IDS）是 check_psu 填的，所以这里必须真的跑一遍
+#    check_psu，才算验到了那条链路。只喂文件的话，验的是一个现实中不存在的
+#    调用方式，而真机上照样红。
 REPO_ROOT="$(cd "$LIB/../../../.." && pwd)"
 real_n=0
+real_noac_seen=0
 while IFS= read -r real; do
   [[ -s "$real" ]] || continue
   real_n=$(( real_n + 1 ))
-  tag="$(basename "$(dirname "$(dirname "$real")")" | cut -c1-26)"
+  realraw="$(dirname "$real")"
+  tag="$(basename "$(dirname "$realraw")" | cut -c1-26)"
+
+  # ⚠️ **绝不能把 RAW_DIR 指到 test_out 里**：check_psu 会往 RAW_DIR 写
+  #    ipmi-sel-psu.txt，result_add 会往 RUN_DIR 追加 results.jsonl ——
+  #    那是用户的现场数据，测试不许改动它。所以先拷需要的几个文件出来。
+  rm -rf "$TMP/realpsu"; mkdir -p "$TMP/realpsu/raw"
+  for _f in ipmi-sensors.txt ipmi-sensors-post.txt dmidecode-psu.txt \
+            ipmi-sel-pre.txt ipmi-sdr.txt; do
+    [[ -f "$realraw/$_f" ]] && cp "$realraw/$_f" "$TMP/realpsu/raw/$_f"
+  done
+  RAW_DIR="$TMP/realpsu/raw"; RUN_DIR="$TMP/realpsu"
+  PSU_NOAC_IDS=""
+  IPMI_OK=1 check_psu >/dev/null 2>&1 || true
+  realnoac="$PSU_NOAC_IDS"
+  [[ -n "$realnoac" ]] && real_noac_seen=$(( real_noac_seen + 1 ))
+  RAW_DIR="$TMP"; RUN_DIR="$TMP"
+
   check "真机 ${tag}…：可判传感器数 > 0" "yes" \
         "$( [[ "$(ipmi_sensor_scan "$real" | grep -c . || true)" -gt 0 ]] && echo yes || echo no )"
+  # noac 也算"没亮"：那几条是 check_psu 已经解释过的、没接交流电那一路的 0
   check "真机 ${tag}…：一条都不许亮" "0" \
-        "$(ipmi_sensor_scan "$real" | grep -vc '^ok|' || true)"
+        "$(ipmi_sensor_scan "$real" "$realnoac" | grep -vcE '^(ok|noac)\|' || true)"
 done < <(find "$REPO_ROOT/test_out" -name 'ipmi-sensors.txt' 2>/dev/null | sort)
+PSU_NOAC_IDS=""
 # 自检：上面那个循环真的吃到东西了没有。吃到 0 份也会"全绿"，
 # 而那正是"只在玩具输入上为绿"的另一种长相。
 check "真机传感器样本至少吃到一份（否则上面整组是空转）" "yes" \
       "$( (( real_n > 0 )) && echo yes || echo no )"
+# ⚠️ 同款自检，钉的是**这次新加的那条链路**：真机数据里必须至少有一台
+#    check_psu 真的判出了"某一路没接交流电"。一台都没有的话，上面那一组
+#    就没验到降级这件事，而它照样全绿 —— 正是 §11-13 那种"断言悄悄空转"。
+check "真机数据里至少有一台判出了没接交流电的电源（否则降级那条没被验到）" "yes" \
+      "$( (( real_noac_seen > 0 )) && echo yes || echo no )"
 
 # ---- 判定出口：四态各走一遍 ----
 sensor_case() {

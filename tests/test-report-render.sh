@@ -548,8 +548,10 @@ count_of() {   # count_of <文件> <状态中文名>
 }
 # fixture 共 10 条：PASS 3（collect_system / test_nic / verify_smart）
 #                   WARN 4（内存容量 / 电源 / 热节流 / AER）FAIL 1  SKIP 2
-# 藏掉 stress_disk(SKIP) 和 verify_smart(PASS) 之后：PASS 2  WARN 4  FAIL 1  SKIP 1
-check "抬头「通过」数按客户看得到的算" "2" "$(count_of "$OUT" 通过)"
+# 藏掉 stress_disk(SKIP)、verify_smart(PASS)，1.10.1 起再加 collect_system(PASS)
+# ——「硬件信息采集 主板/BIOS/CPU/内存信息采集完成」是纯采集行，PASS 时没话可说。
+# 剩下：PASS 1  WARN 4  FAIL 1  SKIP 1
+check "抬头「通过」数按客户看得到的算" "1" "$(count_of "$OUT" 通过)"
 check "抬头「跳过」数按客户看得到的算" "1" "$(count_of "$OUT" 跳过)"
 check "「失败」数不受影响"             "1" "$(count_of "$OUT" 失败)"
 check "「告警」数不受影响"             "4" "$(count_of "$OUT" 告警)"
@@ -574,7 +576,40 @@ echo "=== 判的是我们、不是机器的那些项，不进客户报告（1.7.
 # 「供日后追溯」这种话本身也是内部口径（report-policy 二-1）。
 has_no "$OUT" "扩展信息留档"  "这一项判的是我们的存档，不是机器"
 has_no "$OUT" "供日后追溯"    "连它的文案也不该出现在交付报告里"
-has    "$OUT" "硬件信息采集"  "反过来：这一项失败客户是会在意的，必须留着"
+
+# ---- 1.10.1：纯采集行**只在 PASS 时**不进报告 ----
+#
+# ⚠️ 上面那句标准（"这一项失败了客户会在意吗"）一直是对的，只是以前把
+#    这一条实现成了"整个 id 无条件留着"，于是每份报告顶上都挂着一行
+#        PASS  硬件信息采集  主板/BIOS/CPU/内存信息采集完成
+#    ——它说的是"我们跑过 dmidecode 了"，采到的东西本来就在「一、硬件清单」
+#    里逐条摆着。真正该留的是它**失败**的那一次。所以判据改成看状态。
+#
+# 这一对断言必须成对存在：只验"藏了"会让"连 FAIL 也藏了"溜过去，
+# 而那正是这条改动唯一不能犯的错。
+has_no "$OUT" "主板/BIOS/CPU/内存信息采集完成" "PASS 的采集行没话可说，不进报告"
+RD4="$TMP/run-collectfail"
+cp -r "$RD" "$RD4"
+sed -i 's/{"id":"collect_system","name":"硬件信息采集","status":"PASS","detail":"[^"]*"/{"id":"collect_system","name":"硬件信息采集","status":"FAIL","detail":"未能读取主板 BIOS 记录的硬件信息"/' \
+       "$RD4/results.jsonl"
+OUT4="$TMP/report-collectfail.html"
+if python3 "$GEN" --run-dir "$RD4" --out "$OUT4" >/dev/null 2>&1; then
+  has "$OUT4" "硬件信息采集"                 "同一条判 FAIL 时必须照常显示（藏的规则不许扩大化）"
+  has "$OUT4" "未能读取主板 BIOS 记录的硬件信息" "而且要带上原因"
+else
+  bad "硬件信息采集 FAIL 的场景没能生成报告"
+fi
+# WARN 那一支同理：「本机未安装硬盘」讲的是被测机器的事实，客户有权知道
+RD5="$TMP/run-nodisk"
+cp -r "$RD" "$RD5"
+printf '%s\n' '{"id":"collect_disk","name":"硬盘信息采集","status":"WARN","detail":"本机未安装硬盘（未检测到任何内置存储设备）","ref":"","time":"t"}' \
+  >> "$RD5/results.jsonl"
+OUT5="$TMP/report-nodisk.html"
+if python3 "$GEN" --run-dir "$RD5" --out "$OUT5" >/dev/null 2>&1; then
+  has "$OUT5" "本机未安装硬盘" "采集行判 WARN 时也必须照常显示"
+else
+  bad "未安装硬盘的场景没能生成报告"
+fi
 
 echo
 echo "=== 阵列卡：BMC 全哑那条提示不进客户报告（1.7.7）==="
@@ -1011,17 +1046,25 @@ check "硬件清单必须有 8 个小节（没装的硬件标未安装，不是�
 #        不是硬件有没有毛病，和 collect_deep 同一把尺子，无条件藏
 #      - **带 `"origin":"self"` 的 SKIP** —— "我们没带那个程序 / 没量到"，
 #        跟被测机器毫无关系（1.9.3 印出去过，客户当场发火）
+#    1.10.1 起再多一类：
+#      - **纯采集行的 PASS**（硬件信息采集 / 硬盘信息采集 / 网卡 / GPU /
+#        IPMI / 阵列卡 / 扩展信息留档）—— 那几行说的是"我们跑过这条命令了"，
+#        采到的东西本来就在「一、硬件清单」里逐条摆着。
+#        ⚠️ **只藏 PASS**：同一个 id 的 WARN（本机未安装硬盘）/ FAIL /
+#        SKIP（未安装独立显卡）讲的是被测机器的事实，一条都不许藏。
 HIDE_RE='"id":"(stress_disk|verify_smart)","name":"[^"]*","status":"(PASS|SKIP)"'
 INTERNAL_RE='"id":"(collect_deep|collect_fwts|check_sn_consistency)"'
 SELF_RE='"status":"SKIP".*"origin":"self"'
+COLLECT_RE='"id":"(collect_system|collect_disk|collect_nic|collect_ipmi|collect_raid|collect_extra|gpu_detect)","name":"[^"]*","status":"PASS"'
 disk_skipped() { grep -qE '"id":"stress_disk","name":"[^"]*","status":"SKIP"' "$1"; }
 n_hidden="$(grep -cE "$INTERNAL_RE" "$RD/results.jsonl" || true)"
 n_hidden=$(( n_hidden + $(grep -cE "$SELF_RE" "$RD/results.jsonl" || true) ))
+n_hidden=$(( n_hidden + $(grep -cE "$COLLECT_RE" "$RD/results.jsonl" || true) ))
 if disk_skipped "$RD/results.jsonl"; then
   n_hidden=$(( n_hidden + $(grep -cE "$HIDE_RE" "$RD/results.jsonl" || true) ))
 fi
-check "本 fixture 该藏起来的正好三条（stress_disk + verify_smart + collect_deep）" \
-      "3" "$n_hidden"
+check "本 fixture 该藏起来的正好四条（stress_disk + verify_smart + collect_deep + 采集行）" \
+      "4" "$n_hidden"
 
 check "报告里的判定条数 = results.jsonl 条数 - 故意藏起来的（吞一条 = 那项结论凭空消失）" \
       "$(( $(grep -c . "$RD/results.jsonl") - n_hidden ))" \
@@ -1033,6 +1076,11 @@ for st in PASS FAIL SKIP WARN; do
   want=$(( want - $(grep -cE "$INTERNAL_RE.*\"status\":\"$st\"" "$RD/results.jsonl" || true) ))
   if [[ "$st" == "SKIP" ]]; then
     want=$(( want - $(grep -cE "$SELF_RE" "$RD/results.jsonl" || true) ))
+  fi
+  # 纯采集行只藏 PASS —— 这里也只在 PASS 那一轮扣，扣错状态的话下面
+  # 那条"状态串了"就查不出来了
+  if [[ "$st" == "PASS" ]]; then
+    want=$(( want - $(grep -cE "$COLLECT_RE" "$RD/results.jsonl" || true) ))
   fi
   if disk_skipped "$RD/results.jsonl" && [[ "$st" == "PASS" || "$st" == "SKIP" ]]; then
     h="$(grep -cE "\"id\":\"(stress_disk|verify_smart)\",\"name\":\"[^\"]*\",\"status\":\"$st\"" \
@@ -1049,7 +1097,8 @@ if [[ -f "$OUT2" ]]; then
   check "跑过硬盘压测时硬盘那几条要全在（藏的规则不许扩大化）" \
         "$(( $(grep -c . "$RD2/results.jsonl") \
              - $(grep -cE "$INTERNAL_RE" "$RD2/results.jsonl" || true) \
-             - $(grep -cE "$SELF_RE" "$RD2/results.jsonl" || true) ))" \
+             - $(grep -cE "$SELF_RE" "$RD2/results.jsonl" || true) \
+             - $(grep -cE "$COLLECT_RE" "$RD2/results.jsonl" || true) ))" \
         "$(cnt "$OUT2" '<div class="result-row r-[A-Z]+"')"
 fi
 
@@ -1167,6 +1216,7 @@ check "分成三节之后，判定总条数一条都不许少" \
       "$(( $(grep -c . "$RDA/results.jsonl") \
            - $(grep -cE "$INTERNAL_RE" "$RDA/results.jsonl" || true) \
            - $(grep -cE "$SELF_RE" "$RDA/results.jsonl" || true) \
+           - $(grep -cE "$COLLECT_RE" "$RDA/results.jsonl" || true) \
            - $(grep -cE "$HIDE_RE" "$RDA/results.jsonl" || true) ))" \
       "$(cnt "$OUTA" '<div class="result-row r-[A-Z]+"')"
 # 性能数字**不参与**整机结论 —— 基准项永远不会是 FAIL/WARN。

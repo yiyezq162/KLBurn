@@ -474,8 +474,11 @@ echo "=== 成对断言：固件自检只进内部（1.9.2）==="
 # 对我们有价值（同一批板子的 BIOS 有没有共性问题），所以留在内部。
 FRD="$TMP/run-fwts"; mkdir -p "$FRD/raw/deep"
 cp "$RD/meta.json" "$FRD/meta.json"
+# ⚠️ 反面自检那条用的是**内存容量核对**，不是 collect_system：1.10.1 起
+#    纯采集行的 PASS 不进交付报告了，拿它当"证明报告渲染出来了"的锚点
+#    会永远红。锚点要挑一条**在交付报告里永远留着**的普通判定。
 cat > "$FRD/results.jsonl" <<'EOF'
-{"id":"collect_system","name":"硬件信息采集","status":"PASS","detail":"主板/BIOS/CPU/内存信息采集完成","ref":"","time":"t"}
+{"id":"check_mem_cap","name":"内存容量核对","status":"PASS","detail":"装机 64GB，系统识别 62GB，一致（差值在固件保留的正常范围内）","ref":"","time":"t"}
 {"id":"collect_fwts","name":"固件自检留档","status":"WARN","detail":"固件自检（内核日志中的固件相关报错）报出 0 项失败、3 项告警，详情已留档。此项只留档、不参与整机结论。","ref":"raw/deep/fwts.log","time":"t"}
 EOF
 : > "$FRD/metrics.jsonl"
@@ -498,7 +501,7 @@ check "它被藏掉之后整机结论不受影响（是 WARN，不是 FAIL）" "
 has_no "$FC" "ACPI" "客户报告里连 ACPI 这个词都不该出现"
 # 反面自检：同一份 fixture 里那条普通判定必须照常出现在客户报告里，
 # 否则"客户报告里没有固件自检"可能只是因为整份报告压根没渲染出来。
-has "$FC" "硬件信息采集" "同一份 fixture 里的普通判定照常进客户报告（证明上面不是空转）"
+has "$FC" "内存容量核对" "同一份 fixture 里的普通判定照常进客户报告（证明上面不是空转）"
 
 echo
 echo "=== 成对断言：显存的累计 / 历史读数只进内部（1.9.0）==="

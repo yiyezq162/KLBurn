@@ -348,6 +348,9 @@ bench_gpu_bandwidth() {
   fi
 
   info "[BENCH] GPU host/device transfer bandwidth on $GPU_USABLE card(s) ..."
+  # 这一段会把每张卡的 PCIe 链路真跑满 —— 登记一下，好让 check_pcie_link
+  # 知道它读到的速率不是空闲读数（见 collect.sh 里 PCIE_LOADED_BDFS 那段）。
+  pcie_mark_gpus_loaded
   local log="$BENCH_LOG_DIR/gpu-bandwidth.log"
   : > "$log"
 
@@ -822,6 +825,49 @@ dmi_channel_count() {
   printf '%s' "$n"
 }
 
+# MLC 要的大页。**AMD 平台上不给它就一个数都出不来。**（1.10.1）
+#
+# 1.9.9 / 1.10.0 那台 EPYC 7542 的日志全文只有这几行，然后程序就退了：
+#     *** Hugepages need to be allocated using /proc/sys/vm/nr_hugepages
+#     *** We need at least 1000 2M pages per numa node
+#     *** echo 4000 > /proc/sys/vm/nr_hugepages
+# 于是报告里恒定写着「本次未能测得内存的读取带宽（测试程序未返回有效结果）」——
+# **每一台 AMD 机器这一项都测不到**，而那句文案听起来像是机器读不出来。
+# 同一类错（能力缺失被写成机器的毛病）1.9.9 在显存带宽上刚踩过一次。
+#
+# 按它自己那句提示分配，跑完原样还原：
+#   * 只在跑 MLC 的这几十秒里占着，之后立刻放回去
+#   * 分配不成功（内存碎片化到凑不出连续 2M 页）就照跑 —— Intel 平台上
+#     没有大页也能出结果，那种情况下少一点精度总比一个数都没有强
+#
+# ⚠️ 还原必须无条件做。这一段中途 return 的话大页就一直占着
+#    （4000 × 2M = 8 GB），后面的内存压测会少覆盖那么多。
+mlc_hugepages_setup() {
+  local f=/proc/sys/vm/nr_hugepages nodes want
+  MLC_HP_SAVED=""
+  [[ -w "$f" ]] || return 0
+  MLC_HP_SAVED="$(cat "$f" 2>/dev/null)"
+  [[ "$MLC_HP_SAVED" =~ ^[0-9]+$ ]] || { MLC_HP_SAVED=""; return 0; }
+  # 它要的是"每个 NUMA 节点至少 1000 个 2M 页"
+  local d
+  nodes=0
+  for d in /sys/devices/system/node/node[0-9]*; do
+    [[ -d "$d" ]] && nodes=$(( nodes + 1 ))
+  done
+  (( nodes > 0 )) || nodes=1
+  want=$(( nodes * 1000 ))
+  (( want > MLC_HP_SAVED )) || { MLC_HP_SAVED=""; return 0; }
+  printf '%s' "$want" > "$f" 2>/dev/null || true
+  dbg "mlc hugepages: $MLC_HP_SAVED -> $(cat "$f" 2>/dev/null) (${nodes} numa node(s))"
+}
+
+mlc_hugepages_restore() {
+  [[ -n "${MLC_HP_SAVED:-}" ]] || return 0
+  printf '%s' "$MLC_HP_SAVED" > /proc/sys/vm/nr_hugepages 2>/dev/null || true
+  dbg "mlc hugepages restored to $MLC_HP_SAVED"
+  MLC_HP_SAVED=""
+}
+
 bench_mem_bandwidth() {
   local exe
   if ! exe="$(bench_tool mlc_avx512 mlc)"; then
@@ -830,6 +876,13 @@ bench_mem_bandwidth() {
   fi
 
   info "[BENCH] Memory read bandwidth ..."
+  # ⚠️ 排在 MLC 之前把页缓存放掉、把空闲页整理一遍。
+  #    见 bench_all 顶上那段：全量档量出来的数只有内存档的六成，
+  #    根子是内存脏了之后每线程 391 MiB 的缓冲区落到了别的 NUMA 节点上。
+  #    两条都是"尽力而为"，失败了不影响后面。
+  sync 2>/dev/null || true
+  [[ -w /proc/sys/vm/drop_caches ]]    && printf '3' > /proc/sys/vm/drop_caches 2>/dev/null
+  [[ -w /proc/sys/vm/compact_memory ]] && printf '1' > /proc/sys/vm/compact_memory 2>/dev/null
   local log="$BENCH_LOG_DIR/mem-bandwidth.log"
 
   # ⚠️ 先把 msr 模块加载上。没有它 MLC 改不了硬件预取器，会打
@@ -847,7 +900,11 @@ bench_mem_bandwidth() {
   # 只跑峰值注入带宽那一组：完整跑一遍要十几分钟，而我们要的就是 ALL Reads。
   local bufkib; bufkib="$(mlc_buffer_kib)"
   dbg "mlc buffer: ${bufkib} KiB/thread"
+  # ⚠️ 大页要在 mlc_buffer_kib 之后再分配：那个函数按**当前可用内存**算缓冲区
+  #    大小，先占掉 8GB 大页的话它会算小一档，测出来的数就不是同一个口径了。
+  mlc_hugepages_setup
   bench_run "$log" "$exe" --peak_injection_bandwidth "-b${bufkib}" || true
+  mlc_hugepages_restore
 
   local got; got="$(mlc_parse_all_reads "$log")"
   if [[ -z "$got" ]]; then
@@ -1001,15 +1058,31 @@ bench_disk_bandwidth() {
 # ⚠️ 「仅导出报告」那一档（info）这五项**全都跑**：每项几十秒，而且一个字节
 #    都不往盘上写（bench_disk_bandwidth 在没确认写盘时是 rw=read + direct=1）。
 #    它跳过的是老化压测和专项验证，不是基准。
+# ⚠️⚠️ **内存带宽必须排在第一个。**（1.10.1）
+#
+# 1.9.9 和 1.10.0 两版现场数据里，同一台 6133、同一个工具、同样的 buffer、
+# 同样 2666 MT/s，两个范围量出来差 65%：
+#     全量档   78650.8 MB/s   （1.9.9: 78833.5）
+#     内存档  129522.0 MB/s   （1.9.9: 129299.3）
+# 区别只有一个：全量档里内存带宽排在 CPU 算力后面跑，而那一步是 40000 阶的
+# 矩阵（约 12.8 GB），跑完释放掉之后空闲页被打散；MLC 要给每个线程各分
+# 391 MiB，这时候拿到的页很可能落在**别的 NUMA 节点**上，双路机器于是
+# 整条测量都在跨 UPI，正好腰斩。内存档里它是第一个跑的，内存还是干净的。
+#
+# 两台机器的报告里，出货主报告（全量档）印的一直是低的那个数。
+# 性能数字只报不判（四号红线），但**报一个错的数字仍然是错的** ——
+# 客户拿它去对验收单，对不上的是我们量错的那一半。
+#
+# 所以：内存带宽排到最前面，并且在它之前把页缓存放掉、把空闲页整理一遍。
 bench_all() {
   local write_ok="${1:-0}"
   bench_init
+  scope_runs bench_mem  && bench_mem_bandwidth
   if scope_runs bench_gpu; then
     bench_gpu_bandwidth
     bench_gpu_p2p
   fi
   scope_runs bench_cpu  && bench_cpu_flops
-  scope_runs bench_mem  && bench_mem_bandwidth
   scope_runs bench_disk && bench_disk_bandwidth "$write_ok"
   # 上面几条是 `判断 && 命令` 的形式，最后一条不成立时整个函数会返回非零。
   # 主流程没开 set -e，所以不会中断，但返回码会误导调用方 —— 显式收口。

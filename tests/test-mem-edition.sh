@@ -469,17 +469,28 @@ check "主板型号在每一条内存的行上都有" "2" \
 # ================================================================
 echo
 echo "=== 报告目录名 ==="
-# 用户指定的格式：内存测试_日期_内存容量_CPU
-tag="$(MEM_DIR_PREFIX=内存测试 mem_run_tag 20260812_143022)"
-check "目录名以中文前缀开头" "yes" \
-      "$(if [[ "$tag" == 内存测试_* ]]; then echo yes; else echo no; fi)"
-check "目录名里有日期时间" "yes" \
-      "$(if [[ "$tag" == *_20260812_143022_* ]]; then echo yes; else echo no; fi)"
+# 用户指定的格式（1.10.1 起）：日期_时间_内存容量_CPU_MEMSP
+#   20260812_171151_32GB_2x-INTEL-XEON-GOLD-6530_MEMSP
+tag="$(mem_run_tag 20260812_143022)"
+check "目录名以日期时间开头" "yes" \
+      "$(if [[ "$tag" == 20260812_143022_* ]]; then echo yes; else echo no; fi)"
+check "目录名以 MEMSP 结尾（一眼看出是内存专用盘出的）" "yes" \
+      "$(if [[ "$tag" == *_MEMSP ]]; then echo yes; else echo no; fi)"
 check "容量排在 CPU 前面（用户指定的顺序）" "yes" \
-      "$(if [[ "$tag" =~ _[0-9]+GB_ ]]; then echo yes; else echo no; fi)"
-# 前缀可换成纯 ASCII（现场只有文本控制台时用）
-check "前缀可以换掉" "yes" \
-      "$(if [[ "$(MEM_DIR_PREFIX=MEMTEST mem_run_tag 20260812_143022)" == MEMTEST_* ]]; \
+      "$(if [[ "$tag" =~ ^[0-9]{8}_[0-9]{6}_[0-9]+GB_ ]]; then echo yes; else echo no; fi)"
+# ⚠️⚠️ **整个目录名必须是纯 ASCII。**（1.10.1，用户 2026-08-13 指定）
+#    1.10.0 用的是中文前缀 `内存测试_…`。这个串要同时活在三个地方：
+#    现场那块 **Linux 文本控制台**（没有中文字体，整段显示成方块）、
+#    exFAT 目录名、以及 SHA256SUMS 和批次汇总工具的输入。
+#    一个跨三种环境的标识串，不值当为了那点可读性冒险 —— MEMSP 后缀
+#    一样认得出是哪一批，而且哪儿都不会出问题。
+# ⚠️ 用 case 的通配，不用 `LC_ALL=C [[ ... ]]` —— 变量赋值只能加在**简单命令**
+#    前面，`[[` 是复合命令，那么写是语法错误（bash 会当场停掉整个脚本，
+#    而屏幕上看起来只是"跑到一半没了"）。
+check "目录名里一个非 ASCII 字符都不许有" "yes" \
+      "$(case "$tag" in *[!A-Za-z0-9_.-]*) echo no ;; *) echo yes ;; esac)"
+check "  换个后缀也照样是纯 ASCII 的形状" "yes" \
+      "$(if [[ "$(MEM_DIR_SUFFIX=MEMX mem_run_tag 20260812_143022)" == *_MEMX ]]; \
          then echo yes; else echo no; fi)"
 
 # ================================================================
@@ -511,7 +522,7 @@ cat > "$RD/meta.json" <<'EOF'
   "report_title":   "内存专用测试报告",
   "product_name":   "KLBurn-MEM",
   "serial":         "S12345X",
-  "machine_tag":    "内存测试_20260812_143022_64GB_2x-Intel-Xeon-Gold-6430",
+  "machine_tag":    "20260812_143022_64GB_2x-Intel-Xeon-Gold-6430_MEMSP",
   "planned_secs":   150,
   "elapsed_secs":   153,
   "start_time":     "2026-08-12 14:30:22",

@@ -733,6 +733,68 @@ check "只取 ALL Reads 那一行（样本是 v3.12 真输出）" "32848.9" \
 check "标签自带冒号的那几行不能被误取" "1" \
       "$(printf '%s\n' "$(mlc_parse_all_reads "$TMP/mlc.log")" | grep -c '^32848\.9$')"
 
+# ---- 1.10.1：AMD 平台上没有大页时 MLC 直接退出，一个数都不给 ----
+#
+# ⚠️ 下面这份是 1.10.0 现场那台 EPYC 7542 的**日志全文**（真的就这么长，
+#    打完这几行程序就结束了）。后果是**每一台 AMD 机器**的
+#    「内存读取带宽」都恒定 SKIP，报告里写着「测试程序未返回有效结果」——
+#    听起来像机器读不出来，实际是我们没按它的要求分配大页。
+#    和 1.9.9 那次显存带宽（参数溢出）是同一类：能力缺失被写成机器的毛病。
+cat > "$TMP/mlc-nohuge.log" <<'EOF'
+Intel(R) Memory Latency Checker - v3.12
+Command line parameters: --peak_injection_bandwidth -b250387
+
+Using buffer size of 244.519MiB/thread for reads and an additional 244.519MiB/thread for writes
+
+*************   Hugepages need to be allocated using /proc/sys/vm/nr_hugepages ******
+*************   Without large pages, the latencies are not accurate
+*************   We need at least 1000 2M pages per numa node
+*************   Adjust 4000 below to account for # of NUMA nodes
+*************   and execute the following and re-run
+*************   echo 4000 > /proc/sys/vm/nr_hugepages
+EOF
+check "没有大页时那份日志里确实一个 ALL Reads 都没有" "" \
+      "$(mlc_parse_all_reads "$TMP/mlc-nohuge.log")"
+# 跑之前分配、跑完还原 —— 两边都必须在，缺后一半的话 8GB 大页会一直占着，
+# 后面的内存压测就少覆盖那么多（而且不会有任何报错）。
+_BENCH_SH="$LIB/bench.sh"
+check "跑 MLC 之前要按它的提示分配大页" "1" \
+      "$(grep -c '^  mlc_hugepages_setup$' "$_BENCH_SH" || true)"
+check "跑完必须还原（否则大页一直占着，内存压测少覆盖 8GB）" "1" \
+      "$(grep -c '^  mlc_hugepages_restore$' "$_BENCH_SH" || true)"
+check "还原要紧跟在这一次 MLC 之后，不能拖到函数末尾（中途 return 会漏）" "yes" \
+      "$( [[ "$(grep -n '^  bench_run "\$log" "\$exe" --peak_injection_bandwidth' "$_BENCH_SH" | head -1 | cut -d: -f1)" \
+             -lt "$(grep -n '^  mlc_hugepages_restore$' "$_BENCH_SH" | head -1 | cut -d: -f1)" ]] \
+          && echo yes || echo no )"
+# ⚠️ 分配必须排在 mlc_buffer_kib **之后**：那个函数按当前可用内存算缓冲区，
+#    先占掉 8GB 的话它会算小一档，量出来的数就不是同一个口径了。
+check "分配要排在算缓冲区大小之后（否则缓冲区被算小一档）" "yes" \
+      "$( [[ "$(grep -n 'bufkib="\$(mlc_buffer_kib)"' "$_BENCH_SH" | head -1 | cut -d: -f1)" \
+             -lt "$(grep -n '^  mlc_hugepages_setup$' "$_BENCH_SH" | head -1 | cut -d: -f1)" ]] \
+          && echo yes || echo no )"
+
+# ---- 1.10.1：内存带宽要排在基准的第一项 ----
+#
+# ⚠️ 同一台 6133、同一个工具、同样 2666 MT/s，两个范围量出来差 65%：
+#      全量档  78650.8 MB/s     内存档 129522.0 MB/s
+#    （1.9.9 那版同样是 78833.5 / 129299.3，两版都复现。）
+#    区别只有一个：全量档里它排在 CPU 算力（40000 阶、约 12.8 GB 矩阵）后面，
+#    空闲页被打散之后，MLC 每线程 391 MiB 的缓冲区落到了别的 NUMA 节点上，
+#    双路机器整条测量都在跨 UPI，正好腰斩。
+#    **出货主报告（全量档）印的一直是低的那个数。**
+_p_mem="$(grep -n 'scope_runs bench_mem  && bench_mem_bandwidth' "$_BENCH_SH" | head -1 | cut -d: -f1)"
+_p_cpu="$(grep -n 'scope_runs bench_cpu  && bench_cpu_flops'     "$_BENCH_SH" | head -1 | cut -d: -f1)"
+_p_gpu="$(grep -n '    bench_gpu_bandwidth$'                     "$_BENCH_SH" | head -1 | cut -d: -f1)"
+check "内存带宽排在 CPU 算力之前（否则量的是被打散之后的内存）" "yes" \
+      "$( [[ -n "$_p_mem" && -n "$_p_cpu" && "$_p_mem" -lt "$_p_cpu" ]] && echo yes || echo no )"
+check "内存带宽也排在显卡基准之前（显卡那几项同样会分走大块内存）" "yes" \
+      "$( [[ -n "$_p_mem" && -n "$_p_gpu" && "$_p_mem" -lt "$_p_gpu" ]] && echo yes || echo no )"
+check "跑之前要放掉页缓存" "1" \
+      "$(grep -c 'drop_caches' "$_BENCH_SH" || true)"
+check "跑之前要整理一遍空闲页（这条才是治跨 NUMA 落点的）" "1" \
+      "$(grep -c 'compact_memory' "$_BENCH_SH" || true)"
+unset _BENCH_SH _p_mem _p_cpu _p_gpu
+
 echo
 echo "=== 内存带宽：缓冲区大小必须自己定，不能让 MLC 自己挑 ==="
 #

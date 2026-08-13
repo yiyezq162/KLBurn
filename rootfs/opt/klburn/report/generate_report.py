@@ -1777,6 +1777,47 @@ def build_html(data):
     INTERNAL_ONLY_ROWS = ("collect_deep", "collect_fwts", "check_sn_consistency")
     shown = [r for r in shown if r.get("id") not in INTERNAL_ONLY_ROWS]
 
+    # ---------------- 纯采集行：PASS 的时候没话可说 ----------------
+    #
+    # ⚠️ 下面这几条**只在 PASS 时**不进交付报告（1.10.1，用户现场提的）。
+    #
+    #     PASS  硬件信息采集   主板/BIOS/CPU/内存信息采集完成
+    #     PASS  硬盘信息采集   共 1 块盘，已采集型号/序列号/固件/容量与 SMART 健康状态
+    #     PASS  网卡          共 4 个物理网口，已采集型号/固件/协商速率/链路状态
+    #     PASS  GPU          识别到 1 张显卡：0, NVIDIA RTX A6000
+    #     PASS  IPMI/BMC     BMC 在线，已采集传感器读数
+    #     PASS  阵列卡        已采集阵列卡型号、固件版本与逻辑盘状态
+    #     PASS  扩展信息留档   已完整保存本机的固件版本、插槽、传感器…
+    #
+    # 这几行说的全是**"我们跑过这条命令了"**，一个字都不回答"这台机器硬件
+    # 有没有毛病"。而它们采到的东西本来就在「一、硬件清单」里逐条摆着：
+    # 板号、BIOS 版本、每块盘的型号序列号、每个网口的型号固件、每张卡的型号，
+    # 客户要核对的是那几张表，不是这里的七行"完成"。
+    # 一份 47 条判定的报告里有 8 条是这种，读的人得先把它们跳过去才找得到
+    # 真正的结论 —— 而"训练看报告的人跳行"正是 1.9.9 砍掉那条电源误报时
+    # 说的同一件事。
+    #
+    # ⚠️⚠️ **只藏 PASS。WARN / FAIL / SKIP 一条都不许藏。**
+    #    同一个 id 在别的状态下句句都是实话，而且往往是最要紧的那句：
+    #      WARN  硬盘信息采集  本机未安装硬盘（未检测到任何内置存储设备）
+    #      WARN  网卡         未发现物理网口
+    #      FAIL  阵列卡        阵列卡报告逻辑盘降级
+    #      SKIP  GPU          未安装独立显卡
+    #      FAIL  硬件信息采集   未能读取主板 BIOS 记录的硬件信息
+    #    这些讲的是**被测机器的事实**，客户有权知道 —— 和 origin=self
+    #    那条的边界是同一把尺子（"这台机器上没有可测的东西"不是 self）。
+    #
+    # ⚠️ `check_psu`（电源）**故意不在这张表里**：它的 PASS 文案说的是
+    #    「交流输入与模块状态均正常」/「PSU3 本次未接入交流电…仍具备电源冗余」，
+    #    那是实打实的判定结论，不是"我们采集完了"。
+    COLLECT_ONLY_ROWS = (
+        "collect_system", "collect_disk", "collect_nic",
+        "collect_ipmi", "collect_raid", "collect_extra", "gpu_detect",
+    )
+    shown = [r for r in shown
+             if not (r.get("status") == "PASS"
+                     and r.get("id") in COLLECT_ONLY_ROWS)]
+
     # ---------------- 「我们没测到」的那些 SKIP ----------------
     #
     # `origin=self` 是产生结论的那一处自己打的标（lib/core.sh 的 result_add）：

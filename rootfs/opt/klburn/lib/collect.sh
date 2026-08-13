@@ -1014,9 +1014,30 @@ psu_is_real() {
 #
 # 只接了一半电源线在测试台上是常态，所以"没进电"判 WARN 而不是 FAIL；
 # 但如果 BMC 明明读到有交流输入、DMI 又报 Critical/Failed，那就是模块本身坏了，判 FAIL。
+# ⚠️⚠️ **本轮哪几路电源没接交流电** —— 编号，空格分开，check_psu 填，
+#      verify_bmc_sensors 读（见那边的说明）。
+#
+# 为什么要有它：1.10.0 现场那台 6530 是四路电源、PSU3 没插线。check_psu
+# 已经把这件事查清楚了，报告里明写着「其中 PSU3 本次未接入交流电（现场接线
+# 条件）；其余 3 路供电正常…仍具备电源冗余」，判 PASS。**结果同一份报告的
+# 「部件传感器复查」又把同一个 PSU3 报了一遍**：
+#     有 3 项部件读数为 0：电压 PSU3_Vin：0 V，低于主板设定的临界下限 80 V；
+#     电压 PSU3_Vout：0 V…；风扇 PSU3_FanSpeed：0 RPM…
+# 一份报告里对同一件事给了两种说法，而且那是 6530 全量档报告里**唯一的一条黄**。
+#
+# 没接交流电的电源，Vin / Vout / 风扇转速本来就该是 0，这三个 0 一个字的
+# 新信息都没有。所以按编号把它们从传感器复查里摘出去 —— 摘的是**重复**，
+# 不是把结论藏起来：那一路没进电这件事 check_psu 那条照样写着。
+#
+# ⚠️ 只摘"读数恰好为 0"那一档。同一个 PSU 的散热片温度要是真超了上限，
+#    照样得亮 —— 没进电和温度过高是两回事（6530 那台 PSU3 的
+#    Inlet/Hs/Amb 三个温度都读得到、都正常，说明模块在位、就是没插线）。
+: "${PSU_NOAC_IDS:=}"
+
 check_psu() {
   info "Checking power supplies ..."
 
+  PSU_NOAC_IDS=""
   local psus=() line
   while IFS= read -r line; do [[ -n "$line" ]] && psus+=("$line"); done < <(dmi_psu_list)
 
@@ -1099,6 +1120,10 @@ check_psu() {
 
     if [[ "$ac" == "absent" ]]; then
       noac+=("$loc")
+      # ⚠️ 编号（不是位置名）要单独攒一份给 verify_bmc_sensors 用，理由见
+      #    PSU_NOAC_IDS 的定义处。位置名各家写法不一（PSU3 / PS3 / Power Supply 3），
+      #    而传感器名里跟着的是编号，所以这里存 $n。
+      PSU_NOAC_IDS="${PSU_NOAC_IDS}${PSU_NOAC_IDS:+ }${n}"
     else
       [[ "$ac" == "present" ]] && live=$((live+1))
     fi
@@ -1414,6 +1439,59 @@ pcie_link_best() {
   ' "$f" 2>/dev/null
 }
 
+# ================================================================
+# 本轮**真的被加载过**的 PCIe 设备
+# ================================================================
+#
+# ⚠️⚠️ **链路速率和链路宽度不是一回事，判据也不该一样。**（1.10.1）
+#
+#   宽度  在链路训练时协商一次就定下来，之后不会为了省电变化。
+#         比额定值窄，一定是电气/机械/配置的问题 —— 照判。
+#   速率  设备**自己会动态调**（ASPM L0s/L1、L1 子状态、NVIDIA 的动态链路速率）。
+#         空闲时降到 2.5GT/s 是正常的省电行为，加载后才会回满。
+#
+# 1.9.8 给速率加过一道守卫，但守的是"采样条数 > 0"。1.10.0 现场证明那道守卫
+# 是空的：6530 那台在**内存专项**和**硬盘专项**里各刷了一条
+#     c8:00.0 … RTX 4090：速率 2.5GT/s（额定 16GT/s）
+# 而那两轮采样条数分别是 131 和 256 条 —— 条数足得很，问题是**那两轮从头到尾
+# 没有任何东西碰过显卡**，131 条采样条条都是空闲读数。同一台机器同一天的
+# 全量 / CPU / 显卡 / 仅导出四个范围全是 PASS，因为那几轮显卡真被跑起来过。
+# 报告里那句"已排除空闲降速这一正常的省电行为"在那两轮里是**假的**。
+#
+# 所以判据换成"这张卡本轮到底被加载过没有"，而这件事只有**去加载它的那段
+# 代码**知道。谁加载了谁登记，别在这里猜。
+#
+# ⚠️ 缺省是空 = 一张都没加载过 = 速率一律不判。方向是故意的：忘了登记的后果
+#    是"少判一项"，不是"拿空闲读数吓客户"。宽度不受这个开关影响，照判。
+: "${PCIE_LOADED_BDFS:=}"
+
+# pcie_mark_loaded <BDF>... —— 登记"这几个设备本轮被真的跑起来过"
+pcie_mark_loaded() {
+  local b
+  for b in "$@"; do
+    [[ -n "$b" ]] || continue
+    b="${b#0000:}"
+    [[ " $PCIE_LOADED_BDFS " == *" $b "* ]] && continue
+    PCIE_LOADED_BDFS="${PCIE_LOADED_BDFS}${PCIE_LOADED_BDFS:+ }${b}"
+  done
+}
+
+# 把本机所有 NVIDIA 显卡登记成"被加载过"。显卡基准和显卡压测都调它 ——
+# 两者都是把卡真跑满的，不管跑的是哪一张，同一条链路上的卡都会被带起来。
+pcie_mark_gpus_loaded() {
+  local line bdf
+  while IFS= read -r line; do
+    bdf="${line%% *}"
+    [[ "$bdf" =~ ^[0-9a-fA-F:.]+$ ]] && pcie_mark_loaded "$bdf"
+  done < <(printf '%s\n' "${GPU_PCI_LIST:-}" | grep -a . || true)
+}
+
+# pcie_was_loaded <BDF> —— 本轮加载过没有
+pcie_was_loaded() {
+  local b="${1:-}"; b="${b#0000:}"
+  [[ -n "$b" && " $PCIE_LOADED_BDFS " == *" $b "* ]]
+}
+
 PCIE_MON_PID=""
 pcie_link_monitor_start() {
   local out="$RAW_DIR/pcie-link-samples.txt"
@@ -1486,34 +1564,57 @@ check_pcie_link() {
     awk -v a="$stasp" -v b="$bsp" 'BEGIN{exit !(a+0 > b+0)}' && bsp="$stasp"
     [[ "$staw" =~ ^[0-9]+$ ]] && (( staw > bw )) && bw="$staw"
 
-    local why=""
+    # ⚠️ **宽度和速率必须分开算**（1.10.1，见上面 PCIE_LOADED_BDFS 那一大段）。
+    #    宽度训练一次就定死，比额定值窄一定有问题，照判；
+    #    速率是设备自己动态调的，只有在"本轮真的加载过这张卡"时才作数。
+    local why_w="" why_s=""
     # 宽度是整数，直接比；速率带小数（2.5），交给 awk 比
     if [[ "$bw" =~ ^[0-9]+$ && "$capw" =~ ^[0-9]+$ ]] && (( bw > 0 && bw < capw )); then
-      why="宽度 x${bw}（额定 x${capw}）"
+      why_w="宽度 x${bw}（额定 x${capw}）"
     fi
     if awk -v a="$bsp" -v b="$capsp" 'BEGIN{exit !(a+0 < b+0 && a+0 > 0)}'; then
-      [[ -n "$why" ]] && why="${why}、"
-      why="${why}速率 ${bsp}GT/s（额定 ${capsp}GT/s）"
+      why_s="速率 ${bsp}GT/s（额定 ${capsp}GT/s）"
     fi
 
-    printf '%-12s %-8s %-22s cap=x%-3s %-6sGT/s  idle=x%-3s %-6sGT/s  best=x%-3s %-6sGT/s  n=%-4s %s\n' \
+    # 这一轮到底有没有把这张卡跑起来过。没有的话速率读数只反映空闲状态。
+    local loaded=0 speed_judged=0
+    pcie_was_loaded "$bdf" && loaded=1
+    (( loaded == 1 && nsmp > 0 )) && speed_judged=1
+
+    # 可判的那部分 = 宽度 + （加载过的话）速率
+    local why="$why_w"
+    if [[ -n "$why_s" ]] && (( speed_judged == 1 )); then
+      why="${why}${why:+、}${why_s}"
+    fi
+    # 判不了的那部分 = 没加载过时的速率
+    local why_idle=""
+    [[ -n "$why_s" ]] && (( speed_judged == 0 )) && why_idle="$why_s"
+
+    # raw 里那一行给排查的人看，四种情况都要能一眼看明白
+    local note="$why"
+    [[ -n "$why_idle" ]] && \
+      note="${note}${note:+；}${why_idle}（本轮未加载这张卡，速率不作结论）"
+    [[ -n "$note" ]] || note="满足额定值"
+    printf '%-12s %-8s %-22s cap=x%-3s %-6sGT/s  idle=x%-3s %-6sGT/s  best=x%-3s %-6sGT/s  n=%-4s load=%s  %s\n' \
       "$bdf" "$where" "${slot_name[$bdf]:--}" "$capw" "$capsp" \
-      "$staw" "$stasp" "$bw" "$bsp" "$nsmp" \
-      "${why:-满足额定值}" >> "$RAW_DIR/pcie-link.txt"
+      "$staw" "$stasp" "$bw" "$bsp" "$nsmp" "$loaded" "$note" \
+      >> "$RAW_DIR/pcie-link.txt"
 
     if [[ "$where" == "slot" ]]; then
       slot_total=$((slot_total+1))
-      if [[ -n "$why" ]]; then
+      if [[ -n "$why" || -n "$why_idle" ]]; then
         # metric 会进客户报告的「其他实测指标」，所以只记插槽上的
         metric_add "pcie" "${bdf} 链路" "x${bw} ${bsp}GT/s / 额定 x${capw} ${capsp}GT/s"
-        if (( nsmp > 0 )); then
-          degraded+=("${bdf} ${name}：${why}")
-        else
-          # 一次加载态读数都没有（本轮压根没跑到采样那一步）——
-          # 只有空闲快照的话，上面那段说明里的"掷骰子"问题原样还在，
-          # 不能拿它判 WARN。数值照报，判定让开。
-          unjudged+=("${bdf} ${name}：${why}")
-        fi
+      fi
+      if [[ -n "$why" ]]; then
+        degraded+=("${bdf} ${name}：${why}")
+      fi
+      # ⚠️ 没加载过的速率短缺**单独走 unjudged**，而且和上面那一支不互斥：
+      #    一张卡完全可能宽度真的窄（判）+ 速率只有空闲读数（不判）。
+      #    1.9.8 那版把两者合成一个 why，于是"宽度真窄"会把一条判不了的
+      #    速率一起拖进 WARN 的文案里，读起来像是两条都查实了。
+      if [[ -n "$why_idle" ]]; then
+        unjudged+=("${bdf} ${name}：${why_idle}")
       fi
     else
       board_total=$((board_total+1))
@@ -1530,10 +1631,16 @@ check_pcie_link() {
   fi
 
   # 只有空闲读数、判不了的那几张，单独一句挂在结论后面（数值照报，不判）
+  #
+  # ⚠️ 这段文案的前提是**这张卡本轮压根没被跑起来过**（见 PCIE_LOADED_BDFS）。
+  #    1.9.8 那版写的是"本轮只读到空闲读数"，但判据是采样条数 —— 采样器全程
+  #    在跑，条数从来不为 0，于是这一支实际上永远走不到，所有速率短缺都被
+  #    当成实锤判了 WARN。现在判据换成"加载过没有"，这句话才是真的。
   local unj_txt=""
   (( ${#unjudged[@]} > 0 )) && unj_txt="。另有 $(printf '%s；' "${unjudged[@]}")\
-这几张卡本轮只读到空闲状态下的链路读数 —— 空闲时主动降速是正常的省电行为，\
-加载后会自动回满，仅凭空闲读数无法判断，故本项不对它们作出结论"
+本轮的测试范围里没有会让这几张卡跑起来的项目，读到的只能是空闲状态下的链路速率 —— \
+空闲时主动降速是设备正常的省电行为，加载后会自动回满，仅凭空闲读数无法判断，\
+故本项不对它们的速率作出结论（链路宽度不受此影响，已照常核对）"
 
   if (( ${#degraded[@]} > 0 )); then
     result_add "check_pcie_link" "PCIe 链路" "$ST_WARN" \
