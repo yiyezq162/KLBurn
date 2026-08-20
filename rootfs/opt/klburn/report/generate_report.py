@@ -1269,6 +1269,18 @@ class Data(object):
                     ("BIOS版本", grab("VBIOS Version")),
                     ("驱动版本", drv),
                     ("PCIe最大代数", grab_under("PCIe Generation", "Max")),
+                    # 卡上另外两处固件版本。验收单点名要"GPU 固件版本"时，
+                    # 显示 BIOS 只是其中一处 —— GSP 是驱动加载后跑在卡上的
+                    # 那颗微控制器的固件，InfoROM 是卡上那块记录板载信息的
+                    # 存储的映像版本。两者都随卡走，同批次应当一致。
+                    #
+                    # ⚠️ 只取 nvidia-smi 真的给的这几样。验收单上那串
+                    #    erot / hmc / pcie_retimer / nv_switch / main_switchboard
+                    #    是 HGX 整机基板上的固件，要走 BMC 或厂商刷写工具才读得到，
+                    #    PCIe 插卡的机器上压根没有这些部件 —— 读不到就是没有这几行，
+                    #    绝不能凭空补一个"N/A"进固件清单让人以为读过了。
+                    ("GSP固件", grab("GSP Firmware Version")),
+                    ("InfoROM映像", grab_under("Inforom Version", "Image Version")),
                 ]))
         if not out:
             for line in read_text(self.rawpath("gpu-lspci.txt")).splitlines():
@@ -1542,7 +1554,10 @@ class Data(object):
         # ⚠️ 只列显卡自己的显示 BIOS，**不列驱动版本**：驱动是我们这套测试环境
         #    带的，不是这台机器上的东西，混进"这台机器的固件清单"里会误导批次比对。
         for i, g in enumerate(self.gpus()):
-            add("显卡显示 BIOS", "显卡%d %s" % (i, g.get("型号") or ""), g.get("BIOS版本"))
+            where = "显卡%d %s" % (i, g.get("型号") or "")
+            add("显卡显示 BIOS", where, g.get("BIOS版本"))
+            add("显卡 GSP 固件", where, g.get("GSP固件"))
+            add("显卡 InfoROM", where, g.get("InfoROM映像"))
         return rows
 
 
@@ -1882,7 +1897,8 @@ def build_html(data):
     CONFORM_IDS = (
         "check_dimm_uniform", "check_nic_uniform", "check_disk_uniform",
         "check_gpu_uniform", "check_gpu_ecc", "check_gpu_remap",
-        "check_bios_profile", "check_virtual_dev", "check_sn_consistency",
+        "check_bios_profile", "check_fan_policy",
+        "check_virtual_dev", "check_sn_consistency",
         "check_mem_cap", "check_pcie_link", "check_nic_speed",
     )
     conform_rows = [r for r in shown if r.get("id") in CONFORM_IDS]
@@ -2579,10 +2595,19 @@ def build_html(data):
     # ⚠️ 藏的只是**这张表里的裸数字**：check_gpu_ecc / check_gpu_remap 两条判定
     #    连同 WARN/FAIL 的全文照常出现在第二节，metrics.jsonl 和内部报告
     #    一个字段都没少。**任何 WARN/FAIL 一条都不许藏**那条红线没有被碰。
+    # ⚠️ ECC 分项那四格（1.10.2 新增）和上面两格是同一把尺子：结论那句话里
+    #    已经写清了"其中显存颗粒（DRAM）不可纠正 N 次"，表里再印一遍裸数字
+    #    就是同一个数在一页上出现两遍。
+    # ⚠️⚠️ 「显存ECC累计-*」那两格另有一层理由，别把它们挪出去：**累计 =
+    #    出厂以来**，讲的是这台机器过去经历了什么，不是这一轮测出了什么
+    #    （§11-50，和硬盘通电时间同一类）。它们只进内部报告和 metrics.jsonl。
     INTERNAL_ONLY_METRICS = {
         ("cpu", "失败压测项"), ("mem", "测试工具"),
         ("gpu", "显存ECC可纠正"), ("gpu", "显存ECC不可纠正"),
         ("gpu", "显存重映射不可纠正行"),
+        ("gpu", "显存ECC分项-SRAM可纠正"), ("gpu", "显存ECC分项-SRAM不可纠正"),
+        ("gpu", "显存ECC分项-DRAM可纠正"), ("gpu", "显存ECC分项-DRAM不可纠正"),
+        ("gpu", "显存ECC累计-SRAM可纠正"), ("gpu", "显存ECC累计-SRAM不可纠正"),
     }
     # 逐卡的满载运行读数（1.9.0 新增）。这几个**不是**历史类数据，就是这一轮
     # 测出来的 —— 藏它们的理由只有一条：`check_gpu_load` 那条结论已经把同样的
@@ -2602,6 +2627,9 @@ def build_html(data):
     INTERNAL_ONLY_GPU_LOAD_KEYS = {
         "满载最低频率MHz", "满载平均频率MHz", "满载平均功耗W",
         "峰值风扇转速%", "距温度上限最小余量", "距降频阈值最小余量",
+        # 同理：「N 次采样中有 M 次显卡自报正因过热降频」已经写在那句结论里，
+        # 表里再来一格裸的 "3/1240" 只会让人问这是什么。
+        "热降频采样占比",
     }
 
     def _internal_only(m):

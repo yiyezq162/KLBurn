@@ -191,6 +191,49 @@ python3 "$DIFF" "$DA" "$DB" > "$TMP/diff2.log" 2>&1
 check "性能数字的波动不许被报成差异" "0" \
       "$(grep -cE 'GFlops|算力|带宽' "$TMP/diff2.log" || true)"
 
+# ---- 显卡固件与卡数（1.10.2）----
+# 验收单上「关键板卡固件版本一致」在多卡机器上说的主要就是显卡，
+# 而它是**批次之间**才比得出来的。
+gpu_smi() {   # gpu_smi <VBIOS> <GSP> -> 一份两卡的 nvidia-smi -q 骨架
+  cat <<EOF
+==============NVSMI LOG==============
+Driver Version                            : 595.84
+
+GPU 00000000:01:00.0
+    Product Name                          : NVIDIA GeForce RTX 5090
+    Serial Number                         : N/A
+    VBIOS Version                         : $1
+    GSP Firmware Version                  : $2
+    Inforom Version
+        Image Version                     : G002.0000.00.03
+
+GPU 00000000:41:00.0
+    Product Name                          : NVIDIA GeForce RTX 5090
+    Serial Number                         : N/A
+    VBIOS Version                         : $1
+    GSP Firmware Version                  : $2
+    Inforom Version
+        Image Version                     : G002.0000.00.03
+EOF
+}
+gpu_smi 95.02.18.00.01 595.84 > "$DA/raw/gpu-smi-full.txt"
+gpu_smi 95.02.18.00.01 595.84 > "$DB/raw/gpu-smi-full.txt"
+python3 "$DIFF" "$DA" "$DB" > "$TMP/diff3.log" 2>&1
+check "两台显卡固件一致时不报差异" "0" \
+      "$(grep -cE '显卡[0-9]' "$TMP/diff3.log" || true)"
+# B 台第 1 张卡的显示 BIOS 落后一版
+gpu_smi 95.02.17.00.01 595.84 > "$DB/raw/gpu-smi-full.txt"
+python3 "$DIFF" "$DA" "$DB" > "$TMP/diff4.log" 2>&1
+has "$TMP/diff4.log" "显示 BIOS" "显卡固件落后一版要查得出来"
+# B 台少一张卡
+gpu_smi 95.02.18.00.01 595.84 | head -11 > "$DB/raw/gpu-smi-full.txt"
+python3 "$DIFF" "$DA" "$DB" > "$TMP/diff5.log" 2>&1
+has "$TMP/diff5.log" "显卡数量" "少一张卡要查得出来"
+# ⚠️ 序列号 / UUID / PCI 地址本来就每台每卡都不同，混进来的话每次对比都刷
+#    一屏"不一致"，真正的差异就淹没了。
+check "序列号那类每台必然不同的字段不许进对比" "0" \
+      "$(grep -cE '显卡[0-9]+ (序列号|UUID)' "$TMP/diff5.log" || true)"
+
 echo
 echo "=== GRUB 菜单：追加 memtest86+ 绝不能碰第一条（1.9.2）==="
 #

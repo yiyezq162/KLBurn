@@ -21,7 +21,7 @@ out\20260810_202916_2x-INTEL-XEON-GOLD-6530_512GB_Full\
 ├── metrics.jsonl                      零散实测数值
 ├── klburn.log                         全程运行日志
 ├── sys_metrics.csv                    压测期间每 5 秒一采：CPU 温度/频率/功耗/ECC 计数
-├── gpu_metrics.csv                    同上，逐卡（有显卡且跑了显卡压测才有）
+├── gpu_metrics.csv                    同上，逐卡（有显卡且跑了显卡压测才有）；20 列，见下
 ├── SHA256SUMS                         整个目录的校验清单
 │
 └── raw\                            ❌ 整个目录不外发
@@ -39,6 +39,25 @@ out\20260810_202916_2x-INTEL-XEON-GOLD-6530_512GB_Full\
 ```
 
 实测一份完整档：**128 个文件、1.5MB**。
+
+### `gpu_metrics.csv` 的 20 列（1.10.2 起）
+
+压测期间每 5 秒逐卡一行。客户验收单点名要的那一串监控字段就落在这里，
+所以列**只增不改**，位置一旦定下就不动（[§11-73](architecture.md#十一不变量清单改代码前必读)）：
+
+```
+1  time          6  clock_sm_mhz   11 pci_bus_id      16 ecc_ue_sram_parity
+2  index         7  util_pct       12 serial          17 ecc_ue_sram_secded
+3  name          8  mem_used_mb    13 vbios_version   18 ecc_ce_dram
+4  temp_c        9  fan_pct        14 util_mem_pct    19 ecc_ue_dram
+5  power_w       10 temp_tlimit_c  15 ecc_ce_sram     20 sw_thermal_slowdown
+```
+
+采不到的列**留空**，不是 0 —— 消费级卡（5090 这类）没有 ECC，
+那五列整片是 `[N/A]`；老驱动没有 `temp_tlimit_c`。
+**空和 0 是两件事**，别在读这份 CSV 的时候把空当成 0。
+
+八卡跑满八小时约 46000 行、十几 MB，落在 U 盘的 exFAT 分区上。
 
 ### 谁交给客户
 

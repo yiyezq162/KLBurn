@@ -400,6 +400,60 @@ gpu_ecc_scan() {
     END { printf "%d %d %d", n+0, c+0, u+0 }' "$f" 2>/dev/null
 }
 
+# ---------------------------------------------------------------- ECC 分项
+# 常见验收要求把显存 ECC 拆成 **SRAM / DRAM** 两处分别要求为 0
+# （SRAM 那一路还再分奇偶校验和 SEC-DED 两种）。两者坏的东西不一样：
+#   DRAM  = 显存颗粒本身
+#   SRAM  = 芯片内部的缓存 / 寄存器阵列（L2、SM、微控制器）
+# 判定口径不变（不可纠正 -> FAIL），拆开只是为了在结论里说清是哪一路 ——
+# 修的时候这两句话指向的是完全不同的两件事。
+#
+# gpu_ecc_detail_scan <csv> ->
+#   "<有效卡数> <本次SRAM可纠正> <本次SRAM不可纠正> <本次DRAM可纠正> <本次DRAM不可纠正>
+#    <累计SRAM可纠正> <累计SRAM不可纠正>"
+#
+# 列序就是下面 --query-gpu 里写的那十一个，**改查询就得改这里**：
+#   $1 index
+#   $2 v.sram.ce  $3 v.sram.ue.parity  $4 v.sram.ue.secded  $5 v.dram.ce  $6 v.dram.ue
+#   $7 a.sram.ce  $8 a.sram.ue.parity  $9 a.sram.ue.secded  $10 a.dram.ce $11 a.dram.ue
+#
+# ⚠️ 和 gpu_ecc_scan 一样：不支持 ECC 的卡在这几列里给的是 "[N/A]"，
+#    **那不是 0**。只统计本次（volatile）五列全是数字的卡，一张都没有就当读不到。
+gpu_ecc_detail_scan() {
+  local f="${1:-}"
+  [[ -s "$f" ]] || { printf '0 0 0 0 0 0 0'; return; }
+  awk -F, '
+    function num(x) { gsub(/[[:space:]]/, "", x); return (x ~ /^[0-9]+$/) ? x + 0 : -1 }
+    {
+      vsc = num($2); vsp = num($3); vss = num($4); vdc = num($5); vdu = num($6)
+      if (vsc < 0 || vsp < 0 || vss < 0 || vdc < 0 || vdu < 0) next
+      n++
+      sce += vsc; sue += vsp + vss; dce += vdc; due += vdu
+      # 累计那一路允许读不到（老驱动少几列），读到才加
+      asc = num($7); asp = num($8); ass = num($9)
+      if (asc >= 0) asce += asc
+      if (asp >= 0) asue += asp
+      if (ass >= 0) asue += ass
+    }
+    END { printf "%d %d %d %d %d %d %d", n+0, sce+0, sue+0, dce+0, due+0, asce+0, asue+0 }' \
+    "$f" 2>/dev/null
+}
+
+# gpu_ecc_detail_cn <SRAM可纠正> <SRAM不可纠正> <DRAM可纠正> <DRAM不可纠正>
+#   -> "（其中 …）" 这样一句补充，四个数全是 0 时输出空串
+#
+# 抽成纯函数是为了能脱机回归：这句话会原样进客户报告。
+gpu_ecc_detail_cn() {
+  local sce="${1:-0}" sue="${2:-0}" dce="${3:-0}" due="${4:-0}" p=""
+  # 排序有意为之：不可纠正的排前面 —— 那是要修的，可纠正的只是要留意。
+  (( due > 0 )) && p="${p}${p:+，}显存颗粒（DRAM）不可纠正 ${due} 次"
+  (( sue > 0 )) && p="${p}${p:+，}芯片内缓存（SRAM）不可纠正 ${sue} 次"
+  (( dce > 0 )) && p="${p}${p:+，}显存颗粒（DRAM）可纠正 ${dce} 次"
+  (( sce > 0 )) && p="${p}${p:+，}芯片内缓存（SRAM）可纠正 ${sce} 次"
+  [[ -n "$p" ]] && printf '（其中%s）' "$p"
+  return 0
+}
+
 check_gpu_ecc() {
   (( ${GPU_USABLE:-0} > 0 )) || return 0
   local f="$RAW_DIR/gpu-ecc.csv"
@@ -411,6 +465,17 @@ check_gpu_ecc() {
   timeout 60 nvidia-smi \
     --query-gpu=index,ecc.errors.corrected.volatile.total,ecc.errors.uncorrected.volatile.total,ecc.errors.corrected.aggregate.total,ecc.errors.uncorrected.aggregate.total \
     --format=csv,noheader,nounits > "$f" 2>/dev/null || true
+
+  # 分项（SRAM / DRAM）单独一条查询、单独一个文件。
+  #
+  # ⚠️ **不能和上面那条合并。** 那条只用最老的 *.total 字段，任何驱动都认；
+  #    分项里的 `...volatile.sram.parity` / `.secded` 是后来才加的，老驱动
+  #    不认就整条查询报错退出 —— 合在一起的话，一台老驱动的机器连总数都读不到，
+  #    这一项直接从"读到了"退化成 SKIP。分开写，分项拿不到就只是少一句补充。
+  local fd="$RAW_DIR/gpu-ecc-detail.csv"
+  timeout 60 nvidia-smi \
+    --query-gpu=index,ecc.errors.corrected.volatile.sram,ecc.errors.uncorrected.volatile.sram.parity,ecc.errors.uncorrected.volatile.sram.secded,ecc.errors.corrected.volatile.dram,ecc.errors.uncorrected.volatile.dram,ecc.errors.corrected.aggregate.sram,ecc.errors.uncorrected.aggregate.sram.parity,ecc.errors.uncorrected.aggregate.sram.secded,ecc.errors.corrected.aggregate.dram,ecc.errors.uncorrected.aggregate.dram \
+    --format=csv,noheader,nounits > "$fd" 2>/dev/null || true
 
   local n ce ue
   read -r n ce ue < <(gpu_ecc_scan "$f")
@@ -424,19 +489,37 @@ check_gpu_ecc() {
   metric_add "gpu" "显存ECC可纠正" "$ce"
   metric_add "gpu" "显存ECC不可纠正" "$ue"
 
+  # 分项：读到了就补一句"是哪一路"，读不到就当没有这句 —— 判定不受影响。
+  local dn dsce dsue ddce ddue dasce dasue split=""
+  read -r dn dsce dsue ddce ddue dasce dasue < <(gpu_ecc_detail_scan "$fd")
+  if (( dn > 0 )); then
+    split="$(gpu_ecc_detail_cn "$dsce" "$dsue" "$ddce" "$ddue")"
+    metric_add "gpu" "显存ECC分项-SRAM可纠正"   "$dsce"
+    metric_add "gpu" "显存ECC分项-SRAM不可纠正" "$dsue"
+    metric_add "gpu" "显存ECC分项-DRAM可纠正"   "$ddce"
+    metric_add "gpu" "显存ECC分项-DRAM不可纠正" "$ddue"
+    # 出厂以来累计的那两个只进内部报告（§11-50：那讲的是这台机器过去
+    # 经历了什么，不是这一轮测出了什么）。放进 metrics 是为了内部报告有得看，
+    # 交付报告侧由 generate_report.py 的 INTERNAL_ONLY_METRICS 挡着。
+    metric_add "gpu" "显存ECC累计-SRAM可纠正"   "$dasce"
+    metric_add "gpu" "显存ECC累计-SRAM不可纠正" "$dasue"
+  fi
+
   if (( ue > 0 )); then
     result_add "check_gpu_ecc" "显卡显存 ECC" "$ST_FAIL" \
-      "${n} 张显卡本次上电以来累计出现 ${ue} 次不可纠正的显存 ECC 错误。\
+      "${n} 张显卡本次上电以来累计出现 ${ue} 次不可纠正的显存 ECC 错误${split}。\
 不可纠正错误意味着该处显存的数据已经出错且无法自动修复，属于显存故障，需检修后复测。" \
       "raw/deep/nvidia-ecc.txt"
   elif (( ce > 0 )); then
     result_add "check_gpu_ecc" "显卡显存 ECC" "$ST_WARN" \
-      "${n} 张显卡本次上电以来累计出现 ${ce} 次可纠正的显存 ECC 错误（已被硬件自动纠正，\
+      "${n} 张显卡本次上电以来累计出现 ${ce} 次可纠正的显存 ECC 错误${split}（已被硬件自动纠正，\
 数据未受影响）。偶发数次属正常；数量偏大时建议出货前复测确认。" \
       "raw/deep/nvidia-ecc.txt"
   else
+    local zero=""
+    (( dn > 0 )) && zero="（芯片内缓存与显存颗粒两路分别核对，均为 0）"
     result_add "check_gpu_ecc" "显卡显存 ECC" "$ST_PASS" \
-      "${n} 张显卡本次上电以来的显存 ECC 错误计数均为 0" "raw/deep/nvidia-ecc.txt"
+      "${n} 张显卡本次上电以来的显存 ECC 错误计数均为 0${zero}" "raw/deep/nvidia-ecc.txt"
   fi
 }
 
@@ -764,6 +847,112 @@ check_bios_profile() {
 这几项是主板设置，与硬件好坏无关，可对照订单要求逐项核对。" "raw/lscpu.txt"
 }
 
+# ---------------------------------------------------------------- 风扇策略
+# 常见验收要求：「服务器风扇策略为全速，且断电后不失效」。
+#
+# 这一条我们只能答半句，所以话要说清楚：
+#
+#   能答的   —— 当前的风扇策略是什么、这一刻各风扇转到多少转
+#   答不了的 —— "断电后不失效"。那要真的断一次电再上电复查，而这张盘是
+#               一次开机跑完就出报告的，做不到。报告里必须写明这半句没测，
+#               不能让人以为整条都过了。
+#
+# ⚠️⚠️ **读风扇策略的命令是厂商私有的，必须按厂商 ID 严格分流。**
+# IPMI 标准里没有"风扇模式"这个东西，各家用的是自己的 OEM netfn。
+# 同一条 `raw 0x30 0x45 ...` 在超微上是"读风扇模式"，在别家 BMC 上可能
+# 完全是另一件事 —— 认不出厂商就**什么都不发**，判 SKIP。
+# 这里发的也只有**读**命令，任何情况下都不会去改 BMC 的设置。
+#
+# ⚠️ 整项只报状态、不判对错（和平台设置同一把尺子）：风扇策略是订单要求，
+#    不是硬件好坏。读不到就是 SKIP，永远不判 FAIL。
+
+# bmc_vendor_id <ipmi-mcinfo.txt> -> IANA 厂商编号；读不到打印空
+bmc_vendor_id() {
+  local f="${1:-}"
+  [[ -s "$f" ]] || return 0
+  awk -F: '/^[[:space:]]*Manufacturer ID/ {
+             gsub(/[^0-9]/, "", $2); if ($2 != "") { print $2; exit }
+           }' "$f" 2>/dev/null
+}
+
+# fan_mode_supermicro_cn <ipmitool raw 的输出> -> 中文策略名；认不出打印空
+#
+# 超微 BMC 的 `raw 0x30 0x45 0x00`（读）返回一个字节的模式号。
+# 认不出的编码**照实说"未知编码"**，不要往最近的一档上凑。
+fan_mode_supermicro_cn() {
+  local raw="${1:-}" code
+  code="$(printf '%s' "$raw" | tr -d '[:space:]')"
+  case "$code" in
+    00|0) printf '标准（Standard）' ;;
+    01|1) printf '全速（Full Speed）' ;;
+    02|2) printf '节能优化（Optimal）' ;;
+    04|4) printf '重载 IO（Heavy IO）' ;;
+    "")   ;;
+    *)    printf '未知编码 0x%s' "$code" ;;
+  esac
+}
+
+# fan_rpm_stats <ipmitool sensor list 的输出> -> "<有读数的风扇数> <最低RPM> <最高RPM>"
+#
+# 列：名称 | 读数 | 单位 | 状态 | ...。只认单位是 RPM 且读数是数字的行 ——
+# 没插风扇的槽位在这张表里是 "na"，把它当成 0 转就等于报告上多出一颗停转的风扇。
+fan_rpm_stats() {
+  local f="${1:-}"
+  [[ -s "$f" ]] || { printf '0 0 0'; return; }
+  awk -F'|' '
+    {
+      val = $2; unit = $3
+      gsub(/[[:space:]]/, "", val); gsub(/[[:space:]]/, "", unit)
+      if (toupper(unit) != "RPM") next
+      if (val !~ /^[0-9]+(\.[0-9]+)?$/) next
+      v = val + 0
+      n++
+      if (lo == "" || v < lo) lo = v
+      if (hi == "" || v > hi) hi = v
+    }
+    END { printf "%d %d %d", n+0, lo+0, hi+0 }' "$f" 2>/dev/null
+}
+
+check_fan_policy() {
+  local sens="$RAW_DIR/ipmi-sensors.txt"
+  local nfan lo hi
+  read -r nfan lo hi < <(fan_rpm_stats "$sens")
+
+  # 这一刻的实测转速：任何机器上都读得到（只要有 BMC），和厂商无关。
+  (( nfan > 0 )) && metric_add "platform" "风扇转速（本项读取时）" \
+    "$(printf '%d 颗在位，%d ~ %d RPM' "$nfan" "$lo" "$hi")"
+
+  if [[ "${IPMI_OK:-0}" != "1" ]]; then
+    result_add "check_fan_policy" "风扇策略" "$ST_SKIP" \
+      "本机未提供管理控制器，读不到风扇策略，本项未做核对。此项不影响整机结论。" ""
+    return 0
+  fi
+
+  local vendor mode="" raw=""
+  vendor="$(bmc_vendor_id "$RAW_DIR/ipmi-mcinfo.txt")"
+  case "$vendor" in
+    10876)  # Super Micro
+      raw="$(timeout 30 ipmitool raw 0x30 0x45 0x00 2>/dev/null || true)"
+      mode="$(fan_mode_supermicro_cn "$raw")"
+      ;;
+  esac
+
+  if [[ -z "$mode" ]]; then
+    # 认不出厂商、或者这台 BMC 没回答 —— 都只是我们读不到，不是机器有毛病。
+    result_add "check_fan_policy" "风扇策略" "$ST_SKIP" \
+      "本机管理控制器未提供可读取的风扇策略接口（该项的读取方式因厂商而异），\
+本项未做核对。此项不影响整机结论。" "raw/ipmi-sensors.txt"
+    return 0
+  fi
+
+  metric_add "platform" "风扇策略" "$mode"
+  result_add "check_fan_policy" "风扇策略" "$ST_PASS" \
+    "已读取本机当前风扇策略：${mode}（见下方「平台关键设置」）。\
+这是管理控制器的设置项，与硬件好坏无关，可对照订单要求核对。\
+本项只读取了当前设置，「断电后是否保持」需断电重启后再测一次才能确认。" \
+    "raw/ipmi-sensors.txt"
+}
+
 # ---------------------------------------------------------------- 运行环境自检
 #
 # ⚠️ **这一项判的是"我们这轮测试跑在什么上面"，不是"客户装完系统之后有没有
@@ -939,6 +1128,7 @@ conformance_all() {
     check_gpu_remap
   fi
   check_bios_profile
+  check_fan_policy
   check_virtual_dev
   check_sn_consistency
 }

@@ -113,6 +113,10 @@ MUTATIONS=(
 "bogus-prefix-drop${S}Python 那份占位符名单丢掉「to be filled」前缀兜底（三份名单又不一致了）${S}test-hw-checks${S}$RT/report/generate_report.py${S}mut_bogus_prefix_drop"
 "conform-bogus-uniq${S}一致性比对不再过滤占位符（BIOS 没填 PN 的机器被判成内存混插）${S}test-hw-checks${S}$RT/lib/conformance.sh${S}mut_conform_bogus_uniq"
 "gpu-ecc-na-as-zero${S}显存 ECC 把 [N/A] 当成 0（没有 ECC 的卡被报成「ECC 全部正常」）${S}test-hw-checks${S}$RT/lib/conformance.sh${S}mut_gpu_ecc_na_as_zero"
+"gpu-eccdetail-na-as-zero${S}ECC 分项把 [N/A] 当成 0（5090 这类没有 ECC 的卡被报成「两路分别核对均为 0」）${S}test-hw-checks${S}$RT/lib/conformance.sh${S}mut_gpu_eccdetail_na_as_zero"
+"gpu-csv-col-by-pos${S}采样列退回按位置拼（少采几列时 ECC 的数字写进风扇转速那一格）${S}test-hw-checks${S}$RT/lib/gpu.sh${S}mut_gpu_csv_col_by_pos"
+"gpu-burn-tc-noprobe${S}不探就直接上 -tc（没有张量核的老卡非零退出 -> 好卡被判成坏卡）${S}test-hw-checks${S}$RT/lib/gpu.sh${S}mut_gpu_burn_tc_noprobe"
+"fan-policy-fail${S}风扇策略不是全速就判 FAIL（那是订单要求，不是硬件好坏）${S}test-hw-checks${S}$RT/lib/conformance.sh${S}mut_fan_policy_fail"
 "linpack-col-by-pos${S}算力按列位置取而不是按列名取（计时表第 4 列是秒，「跑了几次」也数不出来）${S}test-log-parsing${S}$RT/lib/bench.sh${S}mut_linpack_col_by_pos"
 "gpu-clkmin-noskip${S}满载最低频率不再跳过前两个采样点（每台机器都凭空多出一条严重降频）${S}test-log-parsing${S}$RT/lib/gpu.sh${S}mut_gpu_clkmin_noskip"
 "disk-tool-name${S}硬盘压测文案重新写上工具名（1.8.4 漏掉 fio 的那条，走源码那一路）${S}test-hw-checks${S}$RT/lib/stress.sh${S}mut_disk_tool_name"
@@ -760,6 +764,35 @@ mut_gpu_ecc_na_as_zero() {
   replace_line "$RT/lib/conformance.sh" \
     '      if (ce ~ /^[0-9]+$/ && ue ~ /^[0-9]+$/) { n++; c += ce; u += ue }' \
     '      { n++; c += ce; u += ue }'
+}
+
+# 分项那一路的同款：把 [N/A] 解析成 -1 之后不再拦，直接当有效卡算进去。
+mut_gpu_eccdetail_na_as_zero() {
+  replace_line "$RT/lib/conformance.sh" \
+    '      if (vsc < 0 || vsp < 0 || vss < 0 || vdc < 0 || vdu < 0) next' \
+    '      if (0) next'
+}
+
+# 列号映射退回"查询第几个字段就落第几列"，也就是 1.10.2 之前那种按位置拼。
+# 少采几列（老驱动没有 tlimit / 被动散热卡没有风扇）时，后面的列全体左移。
+mut_gpu_csv_col_by_pos() {
+  replace_line "$RT/lib/gpu.sh" \
+    '    c="$(gpu_field_col "$f")"' \
+    '    c=$(( ${#out} == 0 ? 2 : $(printf "%s" "$out" | tr "," "\n" | tail -1) + 1 ))'
+}
+
+# 不探就直接上 -tc。老卡上程序非零退出 -> gpu_stress 判「异常退出」-> FAIL。
+mut_gpu_burn_tc_noprobe() {
+  replace_line "$RT/lib/gpu.sh" \
+    '  gpu_burn_probe_tc' \
+    '  GPU_BURN_TC=1'
+}
+
+# 风扇策略不是全速就判 FAIL —— 那是订单要求，不是硬件好坏（§二-2 / 四号红线）。
+mut_fan_policy_fail() {
+  replace_line "$RT/lib/conformance.sh" \
+    '  metric_add "platform" "风扇策略" "$mode"' \
+    '  metric_add "platform" "风扇策略" "$mode"; [[ "$mode" == 全速* ]] || result_add "check_fan_policy" "风扇策略" "$ST_FAIL" "风扇策略不是全速" ""'
 }
 
 # 算力按列位置取而不是按列名取。LINPACK 的日志里有两张表头几乎一样的表，

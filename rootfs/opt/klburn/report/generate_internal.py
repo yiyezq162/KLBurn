@@ -497,6 +497,21 @@ RAW_INDEX = (
      "显存 ECC 判 WARN/FAIL 时",
      "列是 index,volatile_ce,volatile_ue,aggregate_ce,aggregate_ue；"
      "`[N/A]` 表示该型号不支持 ECC，**不是 0**"),
+    (r"^gpu-ecc-detail\.csv$", "GPU",
+     "逐卡的显存 ECC **分项**计数：SRAM（芯片内缓存）和 DRAM（显存颗粒）分开，"
+     "SRAM 的不可纠正还再分奇偶校验和 SEC-DED 两种",
+     "显存 ECC 判 WARN/FAIL 时想知道坏的是缓存还是显存颗粒 —— 这两处要修的东西完全不同",
+     "列是 index，然后本次上电以来五列（sram_ce, sram_ue_parity, sram_ue_secded, "
+     "dram_ce, dram_ue），再是出厂累计的同样五列；"
+     "`[N/A]` 表示该型号不支持 ECC，**不是 0**。"
+     "整个文件为空 = 这版驱动不认这几个分项字段（老驱动），"
+     "那时总数仍然由 gpu-ecc.csv 读到，判定不受影响，只是结论里少一句补充"),
+    (r"^stress/gpu-burn-tc-probe\.log$", "GPU",
+     "开压前那次 5 秒的张量核试跑",
+     "想知道这一轮的显卡压测到底跑的是张量核还是默认模式时",
+     "日志里出现逐卡结论行（GPU N: OK）就说明张量核那一档跑得通，"
+     "正式压测会用它；跑不通就退回默认模式 —— 那是我们这边的能力限制，"
+     "**不是显卡有问题**，不会因此判 FAIL"),
     (r"^gpu-remapped-rows\.csv$", "GPU",
      "逐卡的显存行重映射状态（一行一张卡，无卡号列）",
      "显存行重映射判 WARN/FAIL 时",

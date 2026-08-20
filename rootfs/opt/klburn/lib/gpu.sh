@@ -199,9 +199,13 @@ gpu_burn_progress_steps() {
 # gpu_load_stats <gpu_metrics.csv> <卡号>
 #   -> "<最低SM频率> <平均SM频率> <峰值风扇%> <距温度上限最小余量> <平均功耗W>"
 #
-# 列序（表头在 gpu_monitor_start）：
+# 列序（表头 GPU_CSV_HEADER 在 gpu_monitor_start 上面）：
 #   1 time  2 index  3 name  4 temp_c  5 power_w  6 clock_sm_mhz
 #   7 util_pct  8 mem_used_mb  9 fan_pct  10 temp_tlimit_c
+#   11 pci_bus_id  12 serial  13 vbios_version  14 util_mem_pct
+#   15~19 ECC（SRAM 可纠正 / SRAM 奇偶 / SRAM SEC-DED / DRAM 可纠正 / DRAM 不可纠正）
+#   20 sw_thermal_slowdown
+# 本函数只用前十列 —— 那十列的位置是钉死的，后面加多少列都不影响。
 #
 # ⚠️ **要跳过每张卡的前两个采样点。**采样器和 gpu_burn 是同一刻起来的，
 #    头一两个点采到的还是空载降频后的频率（实测几百 MHz），算进去的话
@@ -416,38 +420,111 @@ ${rest}此项不影响整机结论。" \
 #
 # 采哪几列：**先探一次再定**。
 #
-# `temperature.gpu.tlimit`（离降温阈值还差几度）和 `fan.speed` 不是每个驱动
-# 每张卡都有：老驱动不认 tlimit，被动散热的数据中心卡没有风扇。
-# 而 nvidia-smi 的行为是"**只要有一个字段不认，整条查询直接报错退出**" ——
-# 也就是说，为了多采两列而写死一个长查询，代价是在老驱动上**一行采样都拿不到**，
-# 然后报告里显卡温度/功耗曲线整个消失。所以按"全 -> 少 -> 最少"探三档，
+# nvidia-smi 的行为是"**只要有一个字段不认，整条查询直接报错退出**"，而不是
+# 每个驱动每张卡都认全部字段：老驱动不认 `temperature.gpu.tlimit`、被动散热的
+# 数据中心卡没有 `fan.speed`、消费级卡（5090 这类）没有 ECC 那五列、
+# `clocks_event_reasons.*` 在老驱动上叫 `clocks_throttle_reasons.*`。
+# 为了多采几列而写死一条长查询，代价是在那些机器上**一行采样都拿不到**，
+# 然后报告里显卡温度/功耗曲线整个消失。所以按"全 -> 少 -> 最少"逐档探，
 # 第一档能跑通就用第一档。
 #
-# CSV 的表头是固定的（列只增不改，见 stress.sh 里 monitor_start 的说明），
-# 探到的字段少于表头时，采样行在末尾补空列 —— 报告生成器按列名取值，
-# 补空只会让那一列没有数据，绝不会让别的列错位。
-GPU_QUERY_BASE="index,name,temperature.gpu,power.draw,clocks.sm,utilization.gpu,memory.used"
-GPU_CSV_COLS=9      # time + 上面 7 列 + fan_pct + temp_tlimit_c
+# ⚠️⚠️ **CSV 列序固定、列只增不改，而且少采到的列不能让别的列整体左移。**
+#
+# 1.10.2 之前这道阶梯只从**尾巴**上砍，"少采到的列一定在最后"，所以在末尾
+# 补空列就够了。现在字段多了，砍的顺序也不再是简单的后缀 ——
+# `clocks_event_reasons` 换成老名字 `clocks_throttle_reasons` 是**同一列**的
+# 两种写法，按位置拼就会把 ECC 的数字写进风扇转速那一格。
+# 改成**按字段名定位**：每个字段占 CSV 的哪一列写死在 gpu_field_col() 里，
+# 采样行由 awk 按这张表往对应格子里填，没采到的格子留空。
+#
+# 列号一旦定下就不许改：lib/ui.sh 的仪表盘和 gpu_load_stats 都是按列号读
+# 前十列的，盘外还有人拿旧 run-dir 重新出报告。
+GPU_CSV_HEADER="time,index,name,temp_c,power_w,clock_sm_mhz,util_pct,mem_used_mb,fan_pct,temp_tlimit_c,pci_bus_id,serial,vbios_version,util_mem_pct,ecc_ce_sram,ecc_ue_sram_parity,ecc_ue_sram_secded,ecc_ce_dram,ecc_ue_dram,sw_thermal_slowdown"
+GPU_CSV_COLS=20
+
+# 阶梯上各段。第 1~10 列那几段的位置不许动（见上面）。
+GPU_Q_BASE="index,name,temperature.gpu,power.draw,clocks.sm,utilization.gpu,memory.used"
+GPU_Q_ID="pci.bus_id,serial,vbios_version,utilization.memory"
+GPU_Q_FAN="fan.speed"
+GPU_Q_TL="temperature.gpu.tlimit"
+GPU_Q_SLOW="clocks_event_reasons.sw_thermal_slowdown"
+GPU_Q_SLOW_OLD="clocks_throttle_reasons.sw_thermal_slowdown"
+GPU_Q_ECC="ecc.errors.corrected.volatile.sram,ecc.errors.uncorrected.volatile.sram.parity,ecc.errors.uncorrected.volatile.sram.secded,ecc.errors.corrected.volatile.dram,ecc.errors.uncorrected.volatile.dram"
+
+# gpu_field_col <nvidia-smi 字段名> -> 它在 gpu_metrics.csv 里的列号（1 起）
+#
+# 认不出来的字段给 0；调用方碰到 0 会把整条查询丢掉 —— 宁可少采一列，
+# 也不能把一个值填进不知道是哪一格的位置。
+gpu_field_col() {
+  case "${1:-}" in
+    index)                  printf '2'  ;;
+    name)                   printf '3'  ;;
+    temperature.gpu)        printf '4'  ;;
+    power.draw)             printf '5'  ;;
+    clocks.sm)              printf '6'  ;;
+    utilization.gpu)        printf '7'  ;;
+    memory.used)            printf '8'  ;;
+    fan.speed)              printf '9'  ;;
+    temperature.gpu.tlimit) printf '10' ;;
+    pci.bus_id)             printf '11' ;;
+    serial)                 printf '12' ;;
+    vbios_version)          printf '13' ;;
+    utilization.memory)     printf '14' ;;
+    ecc.errors.corrected.volatile.sram)          printf '15' ;;
+    ecc.errors.uncorrected.volatile.sram.parity) printf '16' ;;
+    ecc.errors.uncorrected.volatile.sram.secded) printf '17' ;;
+    ecc.errors.corrected.volatile.dram)          printf '18' ;;
+    ecc.errors.uncorrected.volatile.dram)        printf '19' ;;
+    # 同一列的新旧两种写法：CUDA 12.x 起叫 event，之前叫 throttle
+    clocks_event_reasons.sw_thermal_slowdown)    printf '20' ;;
+    clocks_throttle_reasons.sw_thermal_slowdown) printf '20' ;;
+    *) printf '0' ;;
+  esac
+}
+
+# gpu_field_colmap <逗号分隔的字段列表> -> 逗号分隔的列号，和字段一一对应
+# 任何一个字段认不出来就整条失败（返回 1），调用方跳过那一档。
+gpu_field_colmap() {
+  local list="${1:-}" f c out=""
+  local IFS=,
+  for f in $list; do
+    c="$(gpu_field_col "$f")"
+    [[ "$c" == "0" ]] && return 1
+    out="${out}${out:+,}${c}"
+  done
+  [[ -n "$out" ]] || return 1
+  printf '%s' "$out"
+}
 
 gpu_query_fields() {
   local q
-  for q in "$GPU_QUERY_BASE,fan.speed,temperature.gpu.tlimit" \
-           "$GPU_QUERY_BASE,fan.speed" \
-           "$GPU_QUERY_BASE"; do
+  for q in "$GPU_Q_BASE,$GPU_Q_ID,$GPU_Q_FAN,$GPU_Q_TL,$GPU_Q_SLOW,$GPU_Q_ECC" \
+           "$GPU_Q_BASE,$GPU_Q_ID,$GPU_Q_FAN,$GPU_Q_TL,$GPU_Q_SLOW_OLD,$GPU_Q_ECC" \
+           "$GPU_Q_BASE,$GPU_Q_ID,$GPU_Q_FAN,$GPU_Q_TL,$GPU_Q_ECC" \
+           "$GPU_Q_BASE,$GPU_Q_ID,$GPU_Q_FAN,$GPU_Q_TL,$GPU_Q_SLOW" \
+           "$GPU_Q_BASE,$GPU_Q_ID,$GPU_Q_FAN,$GPU_Q_TL,$GPU_Q_SLOW_OLD" \
+           "$GPU_Q_BASE,$GPU_Q_ID,$GPU_Q_FAN,$GPU_Q_TL" \
+           "$GPU_Q_BASE,$GPU_Q_ID,$GPU_Q_FAN" \
+           "$GPU_Q_BASE,$GPU_Q_ID" \
+           "$GPU_Q_BASE"; do
+    gpu_field_colmap "$q" >/dev/null || continue
     if timeout 20 nvidia-smi --query-gpu="$q" --format=csv,noheader,nounits \
          >/dev/null 2>&1; then
       printf '%s' "$q"; return 0
     fi
   done
-  printf '%s' "$GPU_QUERY_BASE"
+  printf '%s' "$GPU_Q_BASE"
 }
 
 GPU_MONITOR_PID=""
 gpu_monitor_start() {
   local csv="$RUN_DIR/gpu_metrics.csv"
-  local q; q="$(gpu_query_fields)"
+  local q map
+  q="$(gpu_query_fields)"
+  map="$(gpu_field_colmap "$q")" || map=""
   dbg "gpu sampler fields: $q"
-  echo "time,index,name,temp_c,power_w,clock_sm_mhz,util_pct,mem_used_mb,fan_pct,temp_tlimit_c" > "$csv"
+  dbg "gpu sampler colmap: $map"
+  echo "$GPU_CSV_HEADER" > "$csv"
   (
     while :; do
       local now; now="$(date '+%H:%M:%S')"
@@ -455,9 +532,25 @@ gpu_monitor_start() {
         | while IFS= read -r line; do
             # 只压掉逗号周围的空格，不能用 tr -d ' '——那会把显卡型号里的
             # 空格也吃掉，报告图例会变成 NVIDIAGeForceRTX4090
-            printf '%s,%s\n' "$now" "$(printf '%s' "$line" | sed 's/[[:space:]]*,[[:space:]]*/,/g')"
+            printf '%s' "$line" | sed 's/[[:space:]]*,[[:space:]]*/,/g'
           done \
-        | awk -F, -v OFS=, -v n="$GPU_CSV_COLS" '{ while (NF < n) $(NF+1) = ""; print }' \
+        | awk -F, -v OFS=, -v n="$GPU_CSV_COLS" -v t="$now" -v map="$map" '
+            BEGIN { m = split(map, mc, ",") }
+            {
+              # ⚠️ 掉卡时 nvidia-smi 往 stdout 吐的是一整句错误文案
+              #    （"No devices were found"）。**绝不能把它补成 20 列**：
+              #    lib/ui.sh 的仪表盘正是靠"这一行凑不够列数"认出卡掉了的，
+              #    补满之后屏幕上会一直挂着掉线前那一刻的温度和功耗，
+              #    而且没有任何提示（1.8.0 现场就是这样）。
+              #    原样留档 —— 时间戳还在，事后照样查得出是哪一刻掉的。
+              if (NF < 2 || $1 !~ /^[0-9]+$/) { print t "," $0; next }
+              for (i = 1; i <= n; i++) o[i] = ""
+              o[1] = t
+              for (i = 1; i <= m && i <= NF; i++) o[mc[i]] = $i
+              s = o[1]
+              for (i = 2; i <= n; i++) s = s OFS o[i]
+              print s
+            }' \
         >> "$csv"
       sleep 5
     done
@@ -477,6 +570,48 @@ gpu_monitor_stop() {
 # 现在和 CPU / 内存并发跑（factory-test.sh 里用 `( gpu_stress ... ) &`），
 # 不再自己画进度条 / 打整块横幅，原因见 stress.sh 里 stress_cpu() 顶部注释：
 # 三个并发子 shell 同时刷屏会互相打架。
+
+# ---------------------------------------------------------------- 张量核模式
+# gpu_burn 的 `-tc` 走 cublasGemmEx，压的是张量核，比默认的 FP32/FP64 更接近
+# 真实训练负载，温度和功耗也更高。客户验收单点名要这一档。
+#
+# ⚠️⚠️ **必须先探一次再用，探不通就退回默认模式。**
+# 没有张量核的老卡、或者盘里这版 gpu_burn 不认这个参数时，`-tc` 会让它
+# 非零退出 —— 而下面 gpu_stress 把"gpu_burn 异常退出"判成显卡故障。
+# 那就是拿我们这边的能力缺失去判客户的卡坏了，二号红线。
+#
+# 探测跑 5 秒。光看退出码不够：有的版本认不出参数会打一段用法然后**正常退出**，
+# 所以还要求日志里真的出现逐卡结论行（"GPU 0: OK"）。
+GPU_BURN_TC=0
+gpu_burn_probe_tc() {
+  GPU_BURN_TC=0
+  [[ -x "$KLB_TOOLS/gpu_burn" ]] || return 0
+  local log="$STRESS_LOG_DIR/gpu-burn-tc-probe.log"
+  if ( cd "$KLB_TOOLS" && timeout 300 ./gpu_burn -tc 5 ) > "$log" 2>&1; then
+    grep -qiE 'GPU +[0-9]+: +(OK|FAULTY)' "$log" && GPU_BURN_TC=1
+  fi
+  dbg "gpu_burn -tc supported: $GPU_BURN_TC"
+  return 0
+}
+
+# ---------------------------------------------------------------- 热降频事件
+# gpu_slowdown_samples <gpu_metrics.csv> <卡号> -> "<Active 的采样数> <有效采样数>"
+#
+# 第 20 列是 nvidia-smi 的 `clocks_event_reasons.sw_thermal_slowdown`，
+# 取值是 "Active" / "Not Active"（老驱动那边字段叫 clocks_throttle_reasons，
+# 取值一样）。读不到那一列时两个数都是 0 —— 调用方据此跳过，
+# **不能当成"没有降频"**（读不出来的标记不是内容）。
+gpu_slowdown_samples() {
+  local csv="${1:-}" idx="${2:-}"
+  [[ -f "$csv" ]] || { printf '0 0'; return; }
+  awk -F, -v i="$idx" '
+    NR > 1 && $2 == i && $20 != "" {
+      n++
+      if (tolower($20) ~ /^active$/) a++
+    }
+    END { printf "%d %d", a+0, n+0 }' "$csv" 2>/dev/null
+}
+
 gpu_stress() {
   local secs="$1"
 
@@ -493,11 +628,21 @@ gpu_stress() {
     return 0
   fi
 
-  info "[GPU] gpu_burn on $GPU_USABLE GPU(s), sampling temp/power every 5s, $(fmt_dur "$secs")"
+  gpu_burn_probe_tc
+
+  local mode="默认（FP32/FP64）"
+  (( GPU_BURN_TC == 1 )) && mode="张量核（-tc）"
+  info "[GPU] gpu_burn on $GPU_USABLE GPU(s) [$mode], sampling every 5s, $(fmt_dur "$secs")"
   gpu_monitor_start
 
-  ( cd "$KLB_TOOLS" && ./gpu_burn "$secs" ) \
-    > "$STRESS_LOG_DIR/gpu-burn.log" 2>&1 &
+  # 数组在 `set -u` 下空展开是个老坑，这里干脆写成两条，读起来也更直白。
+  if (( GPU_BURN_TC == 1 )); then
+    ( cd "$KLB_TOOLS" && ./gpu_burn -tc "$secs" ) \
+      > "$STRESS_LOG_DIR/gpu-burn.log" 2>&1 &
+  else
+    ( cd "$KLB_TOOLS" && ./gpu_burn "$secs" ) \
+      > "$STRESS_LOG_DIR/gpu-burn.log" 2>&1 &
+  fi
   local pid=$!
   local rc=0
   wait "$pid" || rc=$?
@@ -508,7 +653,7 @@ gpu_stress() {
   local csv="$RUN_DIR/gpu_metrics.csv"
   local idx tmax pmax
   local overheat=0 hot=0
-  local clk_min clk_avg fan_max tl_min pow_avg
+  local clk_min clk_avg fan_max tl_min pow_avg slow_act slow_n
   # ⚠️ 卡号一定要先过滤成纯数字再排序。卡掉线之后这一列里是
   # "No devices were found" 这样的整句错误文案，而 `sort -un` 会把它当成 0 ——
   # 于是它和真正的 0 号卡撞在一起被去重，留下哪一个纯看运气。
@@ -529,8 +674,17 @@ gpu_stress() {
     #    的那个点是 Max Operating Temp（84°C），降频还要再高 2°C。原来标成
     #    「距降频阈值」，于是一张跑在设计工作点上的卡在报告里写着"距降频 0°C"。
     gpu_stat_ok "$tl_min"  && metric_add "gpu${idx}" "距温度上限最小余量" "$tl_min"
+    # 满载期间有多少个采样点上驱动自己报了"因过热在降频"。
+    # ⚠️ 只在真的采到这一列时才记：采不到（老驱动 / 字段被砍掉那几档）
+    #    和"一次都没降频"是两回事，记成 0 就是替驱动说了一句它没说过的话。
+    read -r slow_act slow_n < <(gpu_slowdown_samples "$csv" "$idx")
+    local slow="-"
+    if (( slow_n > 0 )); then
+      slow="${slow_act}/${slow_n}"
+      metric_add "gpu${idx}" "热降频采样占比" "$slow"
+    fi
     # 逐卡攒起来，压测判定完之后统一出一条"满载运行状态"的结论
-    GPU_LOAD_ROWS+=("${idx}|${clk_min}|${clk_avg}|${fan_max}|${tl_min}|${pow_avg}")
+    GPU_LOAD_ROWS+=("${idx}|${clk_min}|${clk_avg}|${fan_max}|${tl_min}|${pow_avg}|${slow}")
     (( tmax >= GPU_TEMP_FAIL )) && overheat=$(( overheat + 1 ))
     (( tmax >= GPU_TEMP_WARN && tmax < GPU_TEMP_FAIL )) && hot=$(( hot + 1 ))
   done
@@ -541,7 +695,10 @@ gpu_stress() {
   metric_add "gpu" "计算错误总数" "$err_sum"
   metric_add "gpu" "FAULTY卡数" "$faulty"
 
+  # 说清这一轮压的是哪一档：张量核那一档负载更重、温度和功耗都更高，
+  # 两份报告的数字放在一起比时，不写明档位就没法比。
   local detail="${GPU_USABLE} 张显卡满载 $(fmt_dur "$secs")"
+  (( GPU_BURN_TC == 1 )) && detail="${detail}（张量核满载）"
   # 温度那两条结论里要说清楚这个度数是谁定的 —— 报告里出现一个数，
   # 看的人第一个问题就是"这条线哪来的"。
   local tsrc="（该温度取自显卡自身上报的限值）"
@@ -633,10 +790,10 @@ gpu_stress() {
 check_gpu_load_profile() {
   (( ${#GPU_LOAD_ROWS[@]} > 0 )) || return 0
 
-  local row idx clk_min clk_avg fan_max tl_min pow_avg
+  local row idx clk_min clk_avg fan_max tl_min pow_avg slow
   local shown="" nclk=0
   for row in "${GPU_LOAD_ROWS[@]}"; do
-    IFS='|' read -r idx clk_min clk_avg fan_max tl_min pow_avg <<< "$row"
+    IFS='|' read -r idx clk_min clk_avg fan_max tl_min pow_avg slow <<< "$row"
     local one="显卡${idx}："
     if gpu_stat_ok "$clk_avg"; then
       one="${one}平均频率 ${clk_avg}MHz"
@@ -646,6 +803,17 @@ check_gpu_load_profile() {
     gpu_stat_ok "$pow_avg" && one="${one}，平均功耗 ${pow_avg}W"
     gpu_stat_ok "$fan_max" && one="${one}，风扇最高 ${fan_max}%"
     gpu_stat_ok "$tl_min"  && one="${one}，距显卡自报的温度上限最少还有 ${tl_min}°C"
+    # 因过热降频：只在真的采到那一列时才说。**采不到就一个字都不写** ——
+    # 写"未发生降频"就是替驱动说了一句它没说过的话。
+    # 这里只如实报数，不判它多了还是少了：降到多少算不合格是订单的事。
+    if [[ "$slow" == */* ]]; then
+      local sa="${slow%%/*}" sn="${slow##*/}"
+      if [[ "$sa" =~ ^[0-9]+$ && "$sa" != "0" ]]; then
+        one="${one}，${sn} 次采样中有 ${sa} 次显卡自报正因过热降频"
+      else
+        one="${one}，${sn} 次采样中均未自报过热降频"
+      fi
+    fi
     shown="${shown}${one}；"
   done
 

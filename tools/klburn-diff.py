@@ -118,6 +118,28 @@ def profile(run_dir):
     if m:
         p["BMC 固件"] = m.group(1).strip()
 
+    # 显卡：数量 + 每张卡的三处固件版本。
+    #
+    # 验收单上「关键板卡固件版本一致」在 8 卡机器上说的主要就是这个，而它是
+    # **批次之间**才比得出来的（单台机器内部的一致性由 check_gpu_uniform 管）。
+    #
+    # ⚠️ 只取型号和固件，**不取序列号 / UUID / PCI 地址** —— 那几样本来就每台
+    #    每卡都不同，混进来的话每次对比都刷一屏"不一致"，真正的差异就淹没了。
+    #    卡号（GPU 0/1/2…）拿来当键：同一批机器的插法应当一样，
+    #    第 3 张卡固件落后一版这种事，正是这个工具要抓的。
+    smi = read_text(os.path.join(run_dir, "raw", "gpu-smi-full.txt"))
+    if smi.strip():
+        chunks = re.split(r"\nGPU 00000000", smi)[1:]
+        p["显卡数量"] = str(len(chunks))
+        for i, ch in enumerate(chunks):
+            for label, key in (("型号", "Product Name"),
+                               ("显示 BIOS", "VBIOS Version"),
+                               ("GSP 固件", "GSP Firmware Version"),
+                               ("InfoROM", "Image Version")):
+                m = re.search(r"^\s*%s\s*:\s*(.+)$" % re.escape(key), ch, re.M)
+                if m and m.group(1).strip() not in ("N/A", "Unknown Error"):
+                    p["显卡%d %s" % (i, label)] = m.group(1).strip()
+
     d = os.path.join(run_dir, "raw", "smart-pre")
     if os.path.isdir(d):
         for fn in sorted(os.listdir(d)):

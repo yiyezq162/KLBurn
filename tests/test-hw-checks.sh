@@ -4150,6 +4150,116 @@ check "全是 [N/A] -> 有效卡数 0（判 SKIP，不能报成「ECC 正常」�
 printf '0, 3, 0, 3, 0\n1, 0, 2, 0, 2\n' > "$TMP/ecc-bad.csv"
 check "可纠正和不可纠正要分开求和" "2 3 2" "$(gpu_ecc_scan "$TMP/ecc-bad.csv")"
 
+# ---- ECC 分项（SRAM / DRAM）1.10.2 新增 ----
+# 列：index, 本次五列(sram_ce, sram_ue_parity, sram_ue_secded, dram_ce, dram_ue),
+#     累计五列(同样顺序)
+printf '0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0\n1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0\n' \
+  > "$TMP/eccd-ok.csv"
+check "两张卡分项全 0 -> 有效 2、后六个数全 0" "2 0 0 0 0 0 0" \
+      "$(gpu_ecc_detail_scan "$TMP/eccd-ok.csv")"
+# SRAM 的不可纠正是 parity + SEC-DED 两种之和
+printf '0, 5, 1, 2, 7, 3, 40, 4, 6, 0, 0\n' > "$TMP/eccd-mix.csv"
+check "SRAM 不可纠正 = 奇偶 + SEC-DED；累计那两列单独统计" "1 5 3 7 3 40 10" \
+      "$(gpu_ecc_detail_scan "$TMP/eccd-mix.csv")"
+# ⚠️ 和总数那条同一把尺子：[N/A] 不是 0。消费级卡（5090 这类）整片都是 [N/A]，
+#    当成 0 就等于对客户断言"ECC 分项全部正常"，而那张卡根本没有 ECC。
+printf '0, [N/A], [N/A], [N/A], [N/A], [N/A], [N/A], [N/A], [N/A], [N/A], [N/A]\n' \
+  > "$TMP/eccd-na.csv"
+check "全是 [N/A] -> 有效卡数 0（结论里那句补充整句不出现）" "0 0 0 0 0 0 0" \
+      "$(gpu_ecc_detail_scan "$TMP/eccd-na.csv")"
+check "文件不存在 -> 有效卡数 0" "0 0 0 0 0 0 0" \
+      "$(gpu_ecc_detail_scan "$TMP/nope-eccd.csv")"
+# 老驱动只给本次那五列，累计那五列缺失 —— 本次仍要算出来，不能整条作废
+printf '0, 2, 0, 0, 1, 0\n' > "$TMP/eccd-short.csv"
+check "只有本次五列时照样有效（累计计 0）" "1 2 0 1 0 0 0" \
+      "$(gpu_ecc_detail_scan "$TMP/eccd-short.csv")"
+
+check "分项全 0 时不生成补充句（否则每台机器都多一句废话）" "" \
+      "$(gpu_ecc_detail_cn 0 0 0 0)"
+check "不可纠正排在可纠正前面，DRAM 排在 SRAM 前面" \
+      "（其中显存颗粒（DRAM）不可纠正 2 次，芯片内缓存（SRAM）可纠正 1 次）" \
+      "$(gpu_ecc_detail_cn 1 0 0 2)"
+
+# ---- 风扇策略（1.10.2 新增）----
+# ⚠️ 读风扇策略的命令是厂商私有的。这几条钉的是"认不出厂商就什么都不发"。
+printf 'Device ID  : 32\nManufacturer ID  : 10876\nProduct ID  : 2327\n' \
+  > "$TMP/mc-smci.txt"
+check "读得出超微的 IANA 编号" "10876" "$(bmc_vendor_id "$TMP/mc-smci.txt")"
+printf 'Manufacturer ID  : 65519\nManufacturer Name  : Unknown (0xFFEF)\n' \
+  > "$TMP/mc-unknown.txt"
+check "别家 BMC 的编号也照读（分流由调用方做）" "65519" \
+      "$(bmc_vendor_id "$TMP/mc-unknown.txt")"
+check "文件不存在 -> 空（-> 什么命令都不发）" "" "$(bmc_vendor_id "$TMP/nope-mc.txt")"
+
+check "超微 01 = 全速" "全速（Full Speed）" "$(fan_mode_supermicro_cn '01')"
+check "超微 00 = 标准" "标准（Standard）"   "$(fan_mode_supermicro_cn ' 00 ')"
+check "超微 02 = 节能优化" "节能优化（Optimal）" "$(fan_mode_supermicro_cn '02')"
+# ⚠️ 认不出的编码照实说，**不许往最近的一档上凑** —— 凑过去就是我们替 BMC
+#    编了一个它没说过的状态，而这一格会原样进客户报告。
+check "认不出的编码照实说，不许往全速上凑" "未知编码 0x07" "$(fan_mode_supermicro_cn '07')"
+check "BMC 没回话 -> 空（-> 判 SKIP，不是「策略不对」）" "" "$(fan_mode_supermicro_cn '')"
+
+# 风扇转速：没插风扇的槽位在 sensor list 里是 na，当成 0 转就等于
+# 报告上凭空多出一颗停转的风扇。
+cat > "$TMP/fan-sensors.txt" <<'EOF'
+FAN1             | 3300.000   | RPM        | ok    | 300.000   | 500.000   | 700.000   | 25300.000 | 25400.000 | 25500.000
+FAN2             | 8400.000   | RPM        | ok    | 300.000   | 500.000   | 700.000   | 25300.000 | 25400.000 | 25500.000
+FAN3             | na         |            | na    | na        | na        | na        | na        | na        | na
+CPU1 Temp        | 41.000     | degrees C  | ok    | na        | na        | na        | 88.000    | 91.000    | 95.000
+EOF
+check "只数真的有 RPM 读数的风扇，na 的槽位不算" "2 3300 8400" \
+      "$(fan_rpm_stats "$TMP/fan-sensors.txt")"
+check "一颗风扇都读不到 -> 0 0 0" "0 0 0" "$(fan_rpm_stats "$TMP/nope-fan.txt")"
+# 整项永远不判 FAIL：风扇策略是订单要求，不是硬件好坏
+check "风扇策略这一项里不许出现 FAIL" "0" \
+      "$(declare -f check_fan_policy | grep -c 'ST_FAIL' || true)"
+
+# ---- GPU 采样列（1.10.2 新增）----
+# ⚠️ 这几条钉的是"少采到几列时别的列不许左移"。1.10.2 之前是按位置拼的，
+#    而现在阶梯里有"同一列的新旧两种字段名"，按位置拼会把 ECC 的数字
+#    写进风扇转速那一格。
+check "最全那一档的列号映射" "2,3,4,5,6,7,8,11,12,13,14,9,10,20,15,16,17,18,19" \
+      "$(gpu_field_colmap "$GPU_Q_BASE,$GPU_Q_ID,$GPU_Q_FAN,$GPU_Q_TL,$GPU_Q_SLOW,$GPU_Q_ECC")"
+check "退回最少那一档时，前八列的位置一个都不动" "2,3,4,5,6,7,8" \
+      "$(gpu_field_colmap "$GPU_Q_BASE")"
+check "老驱动的 throttle 写法和新的 event 写法占同一列" "20" \
+      "$(gpu_field_col clocks_throttle_reasons.sw_thermal_slowdown)"
+check "没有风扇那一档：ECC 仍然落在 15~19，不许顶到 9" \
+      "2,3,4,5,6,7,8,11,12,13,14,15,16,17,18,19" \
+      "$(gpu_field_colmap "$GPU_Q_BASE,$GPU_Q_ID,$GPU_Q_ECC")"
+check "认不出的字段整条作废（宁可少采一列，也不许填错格子）" "1" \
+      "$(gpu_field_colmap "index,name,made.up.field" >/dev/null 2>&1; echo $?)"
+# 表头列数必须和 GPU_CSV_COLS 对得上，否则采样行和表头永远错一格
+check "表头列数 = GPU_CSV_COLS" "$GPU_CSV_COLS" \
+      "$(printf '%s' "$GPU_CSV_HEADER" | awk -F, '{print NF}')"
+
+# 热降频：读不到那一列（老驱动）和"一次都没降频"是两件事
+cat > "$TMP/slow.csv" <<'EOF'
+time,index,name,temp_c,power_w,clock_sm_mhz,util_pct,mem_used_mb,fan_pct,temp_tlimit_c,pci_bus_id,serial,vbios_version,util_mem_pct,ecc_ce_sram,ecc_ue_sram_parity,ecc_ue_sram_secded,ecc_ce_dram,ecc_ue_dram,sw_thermal_slowdown
+10:00:00,0,NVIDIA GeForce RTX 5090,71,485,2542,100,28935,62,9,00000000:01:00.0,[N/A],95.02.18.00.01,44,[N/A],[N/A],[N/A],[N/A],[N/A],Not Active
+10:00:05,0,NVIDIA GeForce RTX 5090,79,572,2701,100,28935,88,1,00000000:01:00.0,[N/A],95.02.18.00.01,45,[N/A],[N/A],[N/A],[N/A],[N/A],Active
+10:00:10,0,NVIDIA GeForce RTX 5090,80,574,2688,100,28935,92,0,00000000:01:00.0,[N/A],95.02.18.00.01,45,[N/A],[N/A],[N/A],[N/A],[N/A],Active
+EOF
+# ---- gpu_burn 的张量核模式必须先探再用（1.10.2）----
+# ⚠️ 探测这一步是二号红线的闸门：没有张量核的老卡上 -tc 会让程序非零退出，
+#    而"异常退出"是判显卡故障的 —— 那就是拿我们这边的能力缺失判客户的卡坏了。
+check "用 -tc 之前必须先探一次" "yes" \
+      "$(declare -f gpu_stress | grep -q 'gpu_burn_probe_tc' && echo yes || echo no)"
+check "探不通时必须退回默认模式（两条命令行都要在）" "yes" \
+      "$(declare -f gpu_stress | grep -cq -- '-tc' && \
+         declare -f gpu_stress | grep -q 'GPU_BURN_TC == 1' && echo yes || echo no)"
+# 光看退出码不够：有的版本认不出参数会打一段用法然后**正常退出**
+check "探测不能只看退出码，还要求日志里真有逐卡结论行" "yes" \
+      "$(declare -f gpu_burn_probe_tc | grep -q 'OK|FAULTY' && echo yes || echo no)"
+
+check "三个采样点里两次在降频" "2 3" "$(gpu_slowdown_samples "$TMP/slow.csv" 0)"
+cat > "$TMP/slow-none.csv" <<'EOF'
+time,index,name,temp_c,power_w,clock_sm_mhz,util_pct,mem_used_mb,fan_pct,temp_tlimit_c
+10:00:00,0,NVIDIA RTX A6000,71,285,1442,100,4835,62,9
+EOF
+check "老驱动那一档没有第 20 列 -> 0 0（不能报成「没有降频」）" "0 0" \
+      "$(gpu_slowdown_samples "$TMP/slow-none.csv" 0)"
+
 # 行重映射的 CSV **没有卡号列**（1.9.4 起）：`--query-remapped-rows` 不认
 # `index` 这个字段名，带上它整条查询会被驱动否掉。四列依次是
 # correctable / uncorrectable / pending / failure。
