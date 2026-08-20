@@ -322,7 +322,8 @@ SCOPE_KEEP = {
     "cpu":  frozenset(("verify_throttle", "verify_ecc")),
     "mem":  frozenset(("verify_ecc", "check_mem_cap", "check_dimm_uniform")),
     "gpu":  frozenset(("gpu_detect", "check_gpu_uniform", "check_gpu_ecc",
-                       "check_gpu_remap", "check_gpu_load")),
+                       "check_gpu_ecc_aggregate", "check_gpu_remap",
+                       "check_gpu_load")),
     "disk": frozenset(("collect_disk", "collect_raid", "check_disk_uniform",
                        "verify_smart", "verify_disk_temp", "verify_disk_selftest")),
 }
@@ -1896,7 +1897,8 @@ def build_html(data):
     # 和压测同属"扛不扛得住 / 有没有毛病"，落在那一节是对的。
     CONFORM_IDS = (
         "check_dimm_uniform", "check_nic_uniform", "check_disk_uniform",
-        "check_gpu_uniform", "check_gpu_ecc", "check_gpu_remap",
+        "check_gpu_uniform", "check_gpu_ecc", "check_gpu_ecc_aggregate",
+        "check_gpu_remap",
         "check_bios_profile", "check_fan_policy",
         "check_virtual_dev", "check_sn_consistency",
         "check_mem_cap", "check_pcie_link", "check_nic_speed",
@@ -2598,16 +2600,22 @@ def build_html(data):
     # ⚠️ ECC 分项那四格（1.10.2 新增）和上面两格是同一把尺子：结论那句话里
     #    已经写清了"其中显存颗粒（DRAM）不可纠正 N 次"，表里再印一遍裸数字
     #    就是同一个数在一页上出现两遍。
-    # ⚠️⚠️ 「显存ECC累计-*」那两格另有一层理由，别把它们挪出去：**累计 =
-    #    出厂以来**，讲的是这台机器过去经历了什么，不是这一轮测出了什么
-    #    （§11-50，和硬盘通电时间同一类）。它们只进内部报告和 metrics.jsonl。
+    #
+    # ⚠️⚠️ 「缓存历史可纠正 / 不可纠正」（1.10.3）**不在这张表里，是有意的**。
+    #    累计类读数默认归内部（和硬盘通电时间同一把尺子），但 SRAM 这一路
+    #    是例外：**DRAM 坏了有行重映射兜底，芯片内缓存没有任何替换机制** ——
+    #    它坏过就是坏过。所以它回答的是"这张卡本身有没有毛病"，
+    #    不是"这台机器过去经历了什么"。理由写在 conformance.sh 的
+    #    check_gpu_ecc_aggregate 顶上，别照着"累计一律归内部"把它挪回来。
+    #    （即便如此，裸数字仍然只在那条结论的句子里出现一次 ——
+    #      那条结论本身就带着数字和它的含义。）
     INTERNAL_ONLY_METRICS = {
         ("cpu", "失败压测项"), ("mem", "测试工具"),
         ("gpu", "显存ECC可纠正"), ("gpu", "显存ECC不可纠正"),
         ("gpu", "显存重映射不可纠正行"),
         ("gpu", "显存ECC分项-SRAM可纠正"), ("gpu", "显存ECC分项-SRAM不可纠正"),
         ("gpu", "显存ECC分项-DRAM可纠正"), ("gpu", "显存ECC分项-DRAM不可纠正"),
-        ("gpu", "显存ECC累计-SRAM可纠正"), ("gpu", "显存ECC累计-SRAM不可纠正"),
+        ("gpu", "缓存历史可纠正"), ("gpu", "缓存历史不可纠正"),
     }
     # 逐卡的满载运行读数（1.9.0 新增）。这几个**不是**历史类数据，就是这一轮
     # 测出来的 —— 藏它们的理由只有一条：`check_gpu_load` 那条结论已经把同样的

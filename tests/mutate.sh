@@ -114,6 +114,8 @@ MUTATIONS=(
 "conform-bogus-uniq${S}一致性比对不再过滤占位符（BIOS 没填 PN 的机器被判成内存混插）${S}test-hw-checks${S}$RT/lib/conformance.sh${S}mut_conform_bogus_uniq"
 "gpu-ecc-na-as-zero${S}显存 ECC 把 [N/A] 当成 0（没有 ECC 的卡被报成「ECC 全部正常」）${S}test-hw-checks${S}$RT/lib/conformance.sh${S}mut_gpu_ecc_na_as_zero"
 "gpu-eccdetail-na-as-zero${S}ECC 分项把 [N/A] 当成 0（5090 这类没有 ECC 的卡被报成「两路分别核对均为 0」）${S}test-hw-checks${S}$RT/lib/conformance.sh${S}mut_gpu_eccdetail_na_as_zero"
+"gpu-sram-agg-own-threshold${S}缓存历史错误改成我们自己定的次数门槛（凭空替客户定了一个标准）${S}test-hw-checks${S}$RT/lib/conformance.sh${S}mut_gpu_sram_agg_own_threshold"
+"gpu-sram-thr-na-counted${S}厂家那个标志读到 N/A 也算一张卡（没有这机制的卡被报成「已核对、未超上限」）${S}test-hw-checks${S}$RT/lib/conformance.sh${S}mut_gpu_sram_thr_na_counted"
 "gpu-csv-col-by-pos${S}采样列退回按位置拼（少采几列时 ECC 的数字写进风扇转速那一格）${S}test-hw-checks${S}$RT/lib/gpu.sh${S}mut_gpu_csv_col_by_pos"
 "gpu-burn-tc-noprobe${S}不探就直接上 -tc（没有张量核的老卡非零退出 -> 好卡被判成坏卡）${S}test-hw-checks${S}$RT/lib/gpu.sh${S}mut_gpu_burn_tc_noprobe"
 "fan-policy-fail${S}风扇策略不是全速就判 FAIL（那是订单要求，不是硬件好坏）${S}test-hw-checks${S}$RT/lib/conformance.sh${S}mut_fan_policy_fail"
@@ -771,6 +773,22 @@ mut_gpu_eccdetail_na_as_zero() {
   replace_line "$RT/lib/conformance.sh" \
     '      if (vsc < 0 || vsp < 0 || vss < 0 || vdc < 0 || vdu < 0) next' \
     '      if (0) next'
+}
+
+# 缓存历史错误的 FAIL 不再看显卡自报的那个标志，改成我们自己定一个次数。
+# 这正是 1.9.0 删掉的那一整套阈值想长回来的形状（四号红线）。
+mut_gpu_sram_agg_own_threshold() {
+  replace_line "$RT/lib/conformance.sh" \
+    '  if (( ty > 0 )); then' \
+    '  if (( dasue > 100 )); then'
+}
+
+# 厂家那个标志读到 N/A 也算一张卡 —— 一张压根没有这个机制的卡会被报成
+# "已核对、未超上限"（和 [N/A] 当成 0 是同一个病的镜像版本）。
+mut_gpu_sram_thr_na_counted() {
+  replace_line "$RT/lib/conformance.sh" \
+    '      if (v == "" || v == "N/A" || v == "[N/A]") next' \
+    '      if (v == "") next'
 }
 
 # 列号映射退回"查询第几个字段就落第几列"，也就是 1.10.2 之前那种按位置拼。

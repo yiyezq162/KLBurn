@@ -4176,6 +4176,56 @@ check "只有本次五列时照样有效（累计计 0）" "1 2 0 1 0 0 0" \
 
 check "分项全 0 时不生成补充句（否则每台机器都多一句废话）" "" \
       "$(gpu_ecc_detail_cn 0 0 0 0)"
+
+# ---- 缓存历史错误（1.10.3，进交付报告）----
+# ⚠️ 判 FAIL 的依据**只能是显卡自己给的那个标志**，不许我们定"多少次算坏"。
+cat > "$TMP/ecc-thr-ok.txt" <<'EOF'
+GPU 00000000:01:00.0
+    ECC Errors
+        Aggregate
+            SRAM Correctable                           : 12
+            SRAM Threshold Exceeded                    : No
+GPU 00000000:41:00.0
+    ECC Errors
+        Aggregate
+            SRAM Correctable                           : 0
+            SRAM Threshold Exceeded                    : No
+EOF
+check "两张卡都没超厂家上限 -> 2 张有效、0 张 Yes" "2 0" \
+      "$(gpu_sram_threshold_scan "$TMP/ecc-thr-ok.txt")"
+sed 's/: No/: Yes/' "$TMP/ecc-thr-ok.txt" > "$TMP/ecc-thr-bad.txt"
+check "两张卡都超了 -> 2 张 Yes（判 FAIL 的唯一依据）" "2 2" \
+      "$(gpu_sram_threshold_scan "$TMP/ecc-thr-bad.txt")"
+# ⚠️ N/A 不算一张卡：算进去的话，一张压根没有这个机制的卡会被报成
+#    "已核对、未超阈值" —— 和 [N/A] 当成 0 是同一个病。
+sed 's/: No/: N\/A/' "$TMP/ecc-thr-ok.txt" > "$TMP/ecc-thr-na.txt"
+check "N/A 不算一张卡（不能报成「已核对、未超上限」）" "0 0" \
+      "$(gpu_sram_threshold_scan "$TMP/ecc-thr-na.txt")"
+check "文件里根本没有这一行 -> 0 0" "0 0" \
+      "$(gpu_sram_threshold_scan "$TMP/ecc-ok.csv")"
+check "文件不存在 -> 0 0" "0 0" "$(gpu_sram_threshold_scan "$TMP/nope-thr.txt")"
+
+# 这一项的口径：厂家标志 -> FAIL，累计不可纠正 -> WARN，可纠正只报数
+check "FAIL 的条件必须是显卡自报的那个标志（ty），不是任何计数" "yes" \
+      "$(declare -f check_gpu_ecc_aggregate \
+         | grep -B1 'ST_FAIL' | grep -q 'if (( ty > 0 )); then' && echo yes || echo no)"
+# ⚠️ 四号红线在这一项上的具体形状：**不许出现"多少次算坏"**。
+#    `> 0`（出过就是出过）是事实判断，`> 100` 就是我们替客户定了一个标准。
+check "这一项里不许出现任何我们自己定的次数门槛" "0" \
+      "$(declare -f check_gpu_ecc_aggregate \
+         | grep -cE '\((ty|dasue|dasce) > [1-9]' || true)"
+check "累计可纠正不许判 WARN/FAIL（那一路随使用时长本来就涨）" "yes" \
+      "$(declare -f check_gpu_ecc_aggregate \
+         | grep -q '(( dasce > 0 )); then' && \
+         declare -f check_gpu_ecc_aggregate \
+         | grep -A3 '(( dasce > 0 )); then' | grep -q 'ST_PASS' && echo yes || echo no)"
+# 必须排在 check_gpu_ecc 后面 —— 它读的那份 CSV 是那一条落的
+check "conformance_all 里 aggregate 必须排在 check_gpu_ecc 后面" "yes" \
+      "$(declare -f conformance_all \
+         | awk '{ t = $0; gsub(/[^a-z_]/, "", t) }
+                t == "check_gpu_ecc"           { a = NR }
+                t == "check_gpu_ecc_aggregate" { b = NR }
+                END { print (a && b && a < b) ? "yes" : "no" }')"
 check "不可纠正排在可纠正前面，DRAM 排在 SRAM 前面" \
       "（其中显存颗粒（DRAM）不可纠正 2 次，芯片内缓存（SRAM）可纠正 1 次）" \
       "$(gpu_ecc_detail_cn 1 0 0 2)"

@@ -490,19 +490,17 @@ check_gpu_ecc() {
   metric_add "gpu" "显存ECC不可纠正" "$ue"
 
   # 分项：读到了就补一句"是哪一路"，读不到就当没有这句 —— 判定不受影响。
-  local dn dsce dsue ddce ddue dasce dasue split=""
-  read -r dn dsce dsue ddce ddue dasce dasue < <(gpu_ecc_detail_scan "$fd")
+  # 累计（出厂以来）那两路不在这一条里说，它们自成一条判定，见下面
+  # check_gpu_ecc_aggregate —— **本次**和**出厂以来**是两个问题，混在一句话里
+  # 会让人分不清刚测出来的和这张卡以前就有的。
+  local dn dsce dsue ddce ddue split=""
+  read -r dn dsce dsue ddce ddue _ _ < <(gpu_ecc_detail_scan "$fd")
   if (( dn > 0 )); then
     split="$(gpu_ecc_detail_cn "$dsce" "$dsue" "$ddce" "$ddue")"
     metric_add "gpu" "显存ECC分项-SRAM可纠正"   "$dsce"
     metric_add "gpu" "显存ECC分项-SRAM不可纠正" "$dsue"
     metric_add "gpu" "显存ECC分项-DRAM可纠正"   "$ddce"
     metric_add "gpu" "显存ECC分项-DRAM不可纠正" "$ddue"
-    # 出厂以来累计的那两个只进内部报告（§11-50：那讲的是这台机器过去
-    # 经历了什么，不是这一轮测出了什么）。放进 metrics 是为了内部报告有得看，
-    # 交付报告侧由 generate_report.py 的 INTERNAL_ONLY_METRICS 挡着。
-    metric_add "gpu" "显存ECC累计-SRAM可纠正"   "$dasce"
-    metric_add "gpu" "显存ECC累计-SRAM不可纠正" "$dasue"
   fi
 
   if (( ue > 0 )); then
@@ -520,6 +518,92 @@ check_gpu_ecc() {
     (( dn > 0 )) && zero="（芯片内缓存与显存颗粒两路分别核对，均为 0）"
     result_add "check_gpu_ecc" "显卡显存 ECC" "$ST_PASS" \
       "${n} 张显卡本次上电以来的显存 ECC 错误计数均为 0${zero}" "raw/deep/nvidia-ecc.txt"
+  fi
+}
+
+# ---------------------------------------------------------------- 显存 ECC 历史累计
+# 常见验收要求点名要 `aggregate.sram` 为 0。
+#
+# **为什么它值得单独一条，而不是塞进上面那条：**
+# 上面那条回答的是"这一轮（本次上电以来）测出了什么"，这一条回答的是
+# "这张卡出厂以来经历过什么"。两个问题混进同一句话，看报告的人分不清
+# 刚测出来的和这张卡以前就有的 —— 而处理方式完全不同。
+#
+# **为什么它进交付报告**（用户 2026-08-20 拍板）：
+# 累计类读数默认归内部（和硬盘通电时间同一把尺子，见 report-policy 二-2），
+# 但 SRAM 这一路是例外，理由很具体 —— **DRAM 那一路有行重映射兜底**
+# （坏了就换一行，`check_gpu_remap` 已经在看），而**芯片内缓存没有任何
+# 重映射机制**：它坏过就是坏过，没有备用的可换。所以它不是"这台机器过去
+# 经历了什么"，而是"这张卡本身现在有没有毛病"。
+#
+# ⚠️⚠️ **判 FAIL 的依据只能是显卡自己给的那个标志，不许我们定阈值。**
+# `SRAM Threshold Exceeded : Yes` 是显卡自己说"我的缓存错误已经超过厂家
+# 设的上限了"（按 NVIDIA 的口径这张卡要返修）—— 那是**厂家的结论**，
+# 和我们凭空写一个"多少次算坏"完全是两回事（四号红线）。
+# 累计不可纠正 > 0 判 WARN，形状和 check_gpu_remap 的 `unc > 0` 一模一样：
+# "这张卡历史上确实出过硬故障，出货前确认要不要接受"，不替客户做决定。
+# 累计**可纠正**只报数不影响结论 —— 那一路本来就随使用时长慢慢涨。
+
+# gpu_sram_threshold_scan <nvidia-smi -q -d ECC 的输出> -> "<报了这一行的卡数> <Yes 的卡数>"
+#
+# 这一行只有数据中心卡会给，而且和 ECC 计数一样可能是 `N/A`。
+# ⚠️ `N/A` 不算一张卡（和 [N/A] 不是 0 同一条道理）：算进去的话，
+#    一张压根没有这个机制的卡会被报成"已核对、未超阈值"。
+gpu_sram_threshold_scan() {
+  local f="${1:-}"
+  [[ -s "$f" ]] || { printf '0 0'; return; }
+  awk '
+    /^[[:space:]]*SRAM Threshold Exceeded[[:space:]]*:/ {
+      v = $0
+      sub(/^[^:]*:[[:space:]]*/, "", v)
+      gsub(/[[:space:]]/, "", v)
+      if (v == "" || v == "N/A" || v == "[N/A]") next
+      n++
+      if (tolower(v) == "yes") y++
+    }
+    END { printf "%d %d", n+0, y+0 }' "$f" 2>/dev/null
+}
+
+check_gpu_ecc_aggregate() {
+  (( ${GPU_USABLE:-0} > 0 )) || return 0
+  # 这份 CSV 由 check_gpu_ecc 落下，所以本函数必须排在它后面调用。
+  local fd="$RAW_DIR/gpu-ecc-detail.csv"
+  local dn dasce dasue
+  read -r dn _ _ _ _ dasce dasue < <(gpu_ecc_detail_scan "$fd")
+
+  local tn ty
+  read -r tn ty < <(gpu_sram_threshold_scan "$RAW_DIR/deep/nvidia-ecc.txt")
+
+  if (( dn == 0 && tn == 0 )); then
+    result_add "check_gpu_ecc_aggregate" "显卡缓存历史错误" "$ST_SKIP" \
+      "本机显卡不提供芯片内缓存的历史错误计数（该型号不支持或未开启 ECC），\
+本项未做核对。此项不影响整机结论。" ""
+    return 0
+  fi
+
+  if (( dn > 0 )); then
+    metric_add "gpu" "缓存历史可纠正"   "$dasce"
+    metric_add "gpu" "缓存历史不可纠正" "$dasue"
+  fi
+
+  if (( ty > 0 )); then
+    result_add "check_gpu_ecc_aggregate" "显卡缓存历史错误" "$ST_FAIL" \
+      "有 ${ty} 张显卡自身报告：芯片内缓存的累计错误已超过厂家设定的上限。\
+按显卡厂家的口径，这类卡需要更换或返修，不应出厂。" \
+      "raw/deep/nvidia-ecc.txt"
+  elif (( dasue > 0 )); then
+    result_add "check_gpu_ecc_aggregate" "显卡缓存历史错误" "$ST_WARN" \
+      "${dn} 张显卡出厂以来累计出现 ${dasue} 次不可纠正的芯片内缓存错误\
+（当前功能不受影响，尚未达到厂家设定的上限）。芯片内缓存没有像显存颗粒那样的\
+坏块替换机制，出过就是出过，建议出货前确认是否接受。" \
+      "raw/deep/nvidia-ecc.txt"
+  elif (( dasce > 0 )); then
+    result_add "check_gpu_ecc_aggregate" "显卡缓存历史错误" "$ST_PASS" \
+      "${dn} 张显卡出厂以来无不可纠正的芯片内缓存错误；可纠正错误累计 ${dasce} 次\
+（已被硬件自动纠正，随使用时长缓慢累积属正常）" "raw/deep/nvidia-ecc.txt"
+  else
+    result_add "check_gpu_ecc_aggregate" "显卡缓存历史错误" "$ST_PASS" \
+      "${dn} 张显卡出厂以来的芯片内缓存错误计数均为 0" "raw/deep/nvidia-ecc.txt"
   fi
 }
 
@@ -1125,6 +1209,8 @@ conformance_all() {
   # 那是任何一份报告的底座，也正是「仅导出报告」那一档要的东西。
   if scope_runs gpu_health; then
     check_gpu_ecc
+    # ⚠️ 必须排在 check_gpu_ecc 后面：分项那份 CSV 是它落的。
+    check_gpu_ecc_aggregate
     check_gpu_remap
   fi
   check_bios_profile
