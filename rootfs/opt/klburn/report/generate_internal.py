@@ -626,17 +626,20 @@ class Internal(Data):
 
     # ---------- 逐颗 CPU 封装温度（0.9.0 起才有这一列）----------
     def cpu_pkg_series(self):
-        """-> {0: [温度...], 1: [...]}；老 run-dir 没这列就返回 {}"""
-        return self._csv_multi("sys_metrics.csv", "cpu_pkg_temps")
+        """-> {0: [温度...], 1: [...]}；只取 CPU / 内存并发阶段。"""
+        return self._csv_multi("sys_metrics.csv", "cpu_pkg_temps", "cpu")
 
-    def _csv_multi(self, fname, col):
-        """读一列"分号分隔的多个数值"，拆成 {序号: [值...]}。"""
+    def _csv_multi(self, fname, col, phase=None):
+        """读一列"分号分隔的多个数值"，可按 phase 过滤。"""
         path = os.path.join(self.run_dir, fname)
         out = {}
         if not os.path.exists(path):
             return out
         with open(path, newline="", encoding="utf-8", errors="replace") as f:
             for row in csv.DictReader(f):
+                row_phase = (row.get("phase") or "").strip()
+                if phase and row_phase and row_phase != phase:
+                    continue
                 raw = (row.get(col) or "").strip()
                 if not raw:
                     continue
@@ -648,18 +651,16 @@ class Internal(Data):
         return out
 
     def sys_extra_series(self):
-        """负载和内存占用两条曲线，外加内存总量（客户报告不画，内部看压测强度用）。
-
-        总量要一起给：光画"已用 12000 MB"看不出压测吃得狠不狠 ——
-        16GB 机器上那是快满了，512GB 机器上那是几乎没动。
-        -> (负载[], 已用MB[], 总量MB 或 None)
-        """
+        """CPU / 内存并发阶段的负载和内存占用曲线。"""
         path = os.path.join(self.run_dir, "sys_metrics.csv")
         load, memused, total = [], [], None
         if not os.path.exists(path):
             return load, memused, total
         with open(path, newline="", encoding="utf-8", errors="replace") as f:
             for row in csv.DictReader(f):
+                phase = (row.get("phase") or "cpu").strip() or "cpu"
+                if phase != "cpu":
+                    continue
                 for key, bucket in (("load1", load), ("mem_used_mb", memused)):
                     v = num(row.get(key))
                     if v is not None:
@@ -670,23 +671,16 @@ class Internal(Data):
         return load, memused, total
 
     def ecc_series(self):
-        """压测期间的 ECC 计数曲线 -> (可纠正[], 不可纠正[])。
-
-        为什么值得单独画一条：只有压测前后两个快照的话，只知道"涨了多少"，
-        不知道**什么时候开始涨**。而这两件事的含义完全不同 ——
-        一上来就涨，多半是这条内存本身；烤热十分钟之后才开始涨，
-        更像是散热或供电压不住。判定只看差值，这条曲线是给人看的。
-
-        老 run-dir（1.7.0 之前）没有这两列，返回两个空列表，报告里整块不画。
-        读不到 EDAC 的机器上写进 CSV 的是 "--"，num() 解析不了，同样不计点 ——
-        绝不会被当成 0。
-        """
+        """CPU / 内存并发阶段的 ECC 计数曲线 -> (可纠正[], 不可纠正[])。"""
         path = os.path.join(self.run_dir, "sys_metrics.csv")
         ce, ue = [], []
         if not os.path.exists(path):
             return ce, ue
         with open(path, newline="", encoding="utf-8", errors="replace") as f:
             for row in csv.DictReader(f):
+                phase = (row.get("phase") or "cpu").strip() or "cpu"
+                if phase != "cpu":
+                    continue
                 for key, bucket in (("ecc_ce", ce), ("ecc_ue", ue)):
                     v = num(row.get(key))
                     if v is not None:
@@ -1577,9 +1571,9 @@ def build_internal_html(d):
         ("整机序列号", serial),
         ("测试范围", "%s（scope=%s）" % (scope_cn(meta), scope_of(meta))),
         # 这一轮的算力是拿哪套程序量的。**只在内部报告里出现** ——
-        # 客户报告不许出现工具名。留着它是为了日后有人拿新旧报告对比、
-        # 发现算力数字对不上时能解释：1.9.5 起统一换成了自研的 OpenBLAS 版本，
-        # 在 Intel 机器上比原来的 MKL 版本低一到两成，不是机器变慢了。
+        # 客户报告不许出现工具名。Intel 平台优先使用验收资料指定的
+        # Intel LINPACK，非 Intel 平台优先使用全平台 OpenBLAS；方法差异
+        # 必须留档，不能拿不同尺子的数字做跨版本直比。
         ("算力测量方法", (meta.get("bench_params") or {}).get("flops_method") or "—"),
         ("测试档位", profile_text(meta.get("profile"))),
         ("计划时长", fmt_dur(meta.get("planned_secs"))),

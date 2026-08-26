@@ -437,6 +437,45 @@ check "MB/s 表头要换算成 GB/s（否则同一台机器两个数量级）" "
 check "日志不存在时给 0，不能报错" "0.00 0.00 0.00" \
       "$(bw_parse_bandwidthtest "$TMP/nope-bw.log")"
 
+
+echo
+echo "=== 性能基准：逐卡汇总口径 ==="
+# 三张卡故意给出不同结果：H2D 取最低，D2H / D2D 取最高。
+# 这组直接跑 bench_gpu_bandwidth 的汇总循环，防止只改了文案、实际仍取最低。
+GPU_USABLE=3
+BENCH_LOG_DIR="$TMP/fake-bench"; mkdir -p "$BENCH_LOG_DIR"
+GPU_BW_RESULTS=""
+bench_tool() { printf '%s' "/tmp/fake-bandwidthTest"; }
+gpu_vram_mib() { printf '%s' 24564; }
+gpu_numa_node() { :; }
+pcie_mark_gpus_loaded() { :; }
+metric_add() { :; }
+result_add() {
+  GPU_BW_RESULTS="${GPU_BW_RESULTS}${1}|${4}"$'\n'
+}
+bench_run() {
+  local log="$1"; shift 2
+  case "$log" in
+    *-d2d.log)
+      case "$log" in
+        *-0-d2d.log) printf 'Device to Device Bandwidth, 1 Device(s)\nBandwidth(GB/s)\n536870912 900\n1073741824 1000\n' > "$log" ;;
+        *-1-d2d.log) printf 'Device to Device Bandwidth, 1 Device(s)\nBandwidth(GB/s)\n536870912 1100\n1073741824 1150\n' > "$log" ;;
+        *)            printf 'Device to Device Bandwidth, 1 Device(s)\nBandwidth(GB/s)\n536870912 1150\n1073741824 1200\n' > "$log" ;;
+      esac
+      ;;
+    *gpu-bandwidth-0.log) printf 'Host to Device Bandwidth, 1 Device(s)\nBandwidth(GB/s)\n268435456 50\nDevice to Host Bandwidth, 1 Device(s)\nBandwidth(GB/s)\n268435456 22.6\n' > "$log" ;;
+    *gpu-bandwidth-1.log) printf 'Host to Device Bandwidth, 1 Device(s)\nBandwidth(GB/s)\n268435456 55\nDevice to Host Bandwidth, 1 Device(s)\nBandwidth(GB/s)\n268435456 42.9\n' > "$log" ;;
+    *)                     printf 'Host to Device Bandwidth, 1 Device(s)\nBandwidth(GB/s)\n268435456 52\nDevice to Host Bandwidth, 1 Device(s)\nBandwidth(GB/s)\n268435456 38\n' > "$log" ;;
+  esac
+}
+bench_gpu_bandwidth >/dev/null
+check "H2D 汇总仍取逐卡最低值" "yes" \
+      "$(grep -qF '实测 50.0 GB/s' <<<"$GPU_BW_RESULTS" && echo yes || echo no)"
+check "D2H 汇总改为逐卡最高值" "yes" \
+      "$(grep -qF '实测 42.9 GB/s' <<<"$GPU_BW_RESULTS" && echo yes || echo no)"
+check "D2D 汇总改为逐卡最高值" "yes" \
+      "$(grep -qF '实测 1200.0 GB/s' <<<"$GPU_BW_RESULTS" && echo yes || echo no)"
+unset -f bench_tool gpu_vram_mib gpu_numa_node pcie_mark_gpus_loaded metric_add result_add bench_run
 # ---------------------------------------------------------------- 显存带宽的块大小
 #
 # 1.9.3 真机翻车：一台 RTX 4090 的显存带宽报出 3622.7 GB/s，而标称值是 1008。
@@ -574,15 +613,15 @@ P2P=Enabled Latency Matrix (us)
    GPU     0      1
      0   2.10   1.90
 EOF
-# 对角线（1330 / 1329）是显存内部带宽，必须排掉；取的是 51.42 而不是 51.86
-check "取双向矩阵里的最小值，且排掉对角线" "51.42" "$(p2p_parse_min_bw "$TMP/p2p.log")"
+# 对角线（1330 / 1329）是显存内部带宽，必须排掉；取的是 51.86 而不是 51.42
+check "取双向矩阵里的最高值，且排掉对角线" "51.86" "$(p2p_parse_max_bw "$TMP/p2p.log")"
 
 cat > "$TMP/p2p-1.log" <<'EOF'
 Bidirectional P2P=Enabled Bandwidth Matrix (GB/s)
    D\D     0
      0 1330.20
 EOF
-check "只有一张卡时没有卡间带宽可言，输出空" "" "$(p2p_parse_min_bw "$TMP/p2p-1.log")"
+check "只有一张卡时没有卡间带宽可言，输出空" "" "$(p2p_parse_max_bw "$TMP/p2p-1.log")"
 
 echo
 echo "=== 性能基准：CPU 浮点算力（LINPACK）==="

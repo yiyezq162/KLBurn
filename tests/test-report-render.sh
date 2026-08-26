@@ -896,6 +896,31 @@ else
 fi
 
 echo
+echo "=== CPU / 硬盘采样阶段必须分开绘图 ==="
+RD_PHASE="$TMP/run-phase"
+cp -r "$RD" "$RD_PHASE"
+cat > "$RD_PHASE/sys_metrics.csv" <<'EOF'
+time,phase,cpu_temp_c,cpu_freq_mhz,load1,mem_used_mb,mem_total_mb,cpu_power_w
+02:17:05,cpu,45,1156,8.28,2305,31763,95
+02:17:10,cpu,73,2699,99.10,2801,31763,352
+02:17:15,cpu,71,2675,99.10,2801,31763,348
+02:27:20,disk,48,1900,2.00,1200,31763,310
+02:27:25,disk,58,1500,1.00,1200,31763,320
+02:27:30,disk,54,1600,1.00,1200,31763,315
+EOF
+OUT_PHASE="$TMP/report-phase.html"
+if python3 "$GEN" --run-dir "$RD_PHASE" --out "$OUT_PHASE" >/dev/null 2>&1; then
+  has "$OUT_PHASE" "CPU 温度 / 频率 / 功耗曲线" "CPU / 内存阶段曲线"
+  has "$OUT_PHASE" "硬盘压测期间 CPU 温度 / 频率 / 功耗曲线" "硬盘阶段单独曲线"
+  check "CPU 阶段峰值只取 CPU 阶段" "1" \
+    "$(grep -cF '温度峰值 73°C' "$OUT_PHASE" || true)"
+  check "硬盘阶段峰值只取硬盘阶段" "1" \
+    "$(grep -cF '温度峰值 58°C' "$OUT_PHASE" || true)"
+else
+  bad "带 CPU / 硬盘两个采样阶段的报告没能生成"
+fi
+
+echo
 echo "=== 交付给客户的 HTML 里不许出现任何内部/开发信息 ==="
 # 这份 HTML 是给客户的；ISO、工程目录、meta.json 只留在我们内部。
 # 下面这些词一旦出现在报告里，客户要么看不懂，要么以为机器缺东西/有毛病。

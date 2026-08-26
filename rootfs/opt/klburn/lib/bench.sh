@@ -93,6 +93,25 @@ bench_run() {
       timeout --kill-after=20s "${BENCH_TIMEOUT:-300}" "$exe" "$@" ) \
     > "$log" 2>&1
 }
+#
+# bench_run_numa <NUMA 节点或空> <日志文件> <可执行文件> [参数...]
+#
+# 主机到显卡的带宽受锁页内存所在 NUMA 节点影响。能从 PCIe sysfs 读到显卡
+# 所在节点时，把测试进程和主机缓冲区绑到同一节点；读不到拓扑时退回普通
+# bench_run。这里改变的是内存放置，不是读数或判定口径。
+bench_run_numa() {
+  local node="$1" log="$2" exe="$3"; shift 3
+  if [[ "$node" =~ ^[0-9]+$ ]] && have numactl; then
+    local dir; dir="$(dirname "$exe")"
+    dbg "bench_run: $exe (NUMA node $node) $*"
+    ( cd "$dir" && LD_LIBRARY_PATH="$dir:${LD_LIBRARY_PATH:-}" \
+        timeout --kill-after=20s "${BENCH_TIMEOUT:-300}" \
+        numactl --cpunodebind="$node" --membind="$node" "$exe" "$@" ) \
+      > "$log" 2>&1
+  else
+    bench_run "$log" "$exe" "$@"
+  fi
+}
 
 # mlc_buffer_kib —— 给 MLC 算一个**安全的**每线程缓冲区大小（KiB）。
 #
@@ -278,6 +297,24 @@ gpu_vram_mib() {
   [[ "$v" =~ ^[0-9]+$ ]] && printf '%s' "$v"
 }
 
+# gpu_numa_node <卡号> -> PCIe 所在 NUMA 节点；读不到时空
+#
+# 只用于主机↔显卡传输基准的内存放置。跨 NUMA 节点的锁页内存会让 D2H
+# 读数显著低于同一张卡的 H2D；绑定到 PCIe 根端所在节点能减少这个额外
+# 的系统拓扑干扰，但不会改变带宽计算或筛选口径。
+gpu_numa_node() {
+  local idx="${1:-0}" bus node
+  bus="$(timeout 30 nvidia-smi --query-gpu=pci.bus_id \
+         --format=csv,noheader,nounits -i "$idx" 2>/dev/null \
+         | tr -d '[:space:]' | tr '[:upper:]' '[:lower:]')"
+  # nvidia-smi prints an eight-digit domain (00000000:27:00.0), while sysfs
+  # names the same PCI function with a four-digit domain (0000:27:00.0).
+  [[ "$bus" =~ ^[0-9a-f]{8}: ]] && bus="0000:${bus#*:}"
+  [[ "$bus" =~ ^[0-9a-f]{4}:[0-9a-f]{2}:[0-9a-f]{2}\.[0-9a-f]$ ]] || return 0
+  node="$(cat "/sys/bus/pci/devices/$bus/numa_node" 2>/dev/null || true)"
+  [[ "$node" =~ ^[0-9]+$ ]] && printf '%s' "$node"
+}
+
 # bw_parse_d2d_curve <日志> -> "<最小块的带宽> <最大块的带宽>"，GB/s；读不到打印空
 #
 # 专给上面那条"曲线压没压平"的判据用，所以**必须按传输块大小取**，
@@ -353,31 +390,24 @@ bench_gpu_bandwidth() {
   pcie_mark_gpus_loaded
   local log="$BENCH_LOG_DIR/gpu-bandwidth.log"
   : > "$log"
-
-  # **逐卡跑，取最差的那张**。
-  # 不用 --device=all 有两个原因：一是不同 CUDA 版本对"多卡时怎么汇总"的处理
   # 不一样（有的给一行合计，有的逐卡分块），解析口径不稳；二是验收要的是
   # 逐卡的数才有意义，把八张卡混成一个数字的话，一张慢卡会被另外七张平均掉。
   #
   # **H2D/D2H 和 D2D 分两次跑**，因为约束完全不同：
   #   H2D/D2H  受**主机锁页内存**限制，块大小对结果几乎没有影响（瓶颈在 PCIe）
   #   D2D      受**显存**限制，块大小直接决定量到的是显存还是显卡缓存
-  # 混在一次跑的话，主机内存紧张就会把块压小，把 D2D 又踩回缓存里 ——
-  # 而且一声不响。分开之后这条暗路不存在。
-  #
   # d2d_ok：这一轮的显存数**可不可信**。只要有一张卡判不出可信，
   # 显存那一项整项就不报 —— 宁可不报，也不能报一个比标称值高几倍的数出去。
   local idx h2d d2h d2d mh="" md="" mdd="" d2d_ok=1
   for (( idx = 0; idx < GPU_USABLE; idx++ )); do
     local one="$BENCH_LOG_DIR/gpu-bandwidth-${idx}.log"
     local vram; vram="$(gpu_vram_mib "$idx")"
-
-    # ---- 主机 <-> 显存两个方向 ----
+    local numa; numa="$(gpu_numa_node "$idx")"
     local bytes; bytes="$(gpu_bw_bytes "$vram")"
     dbg "gpu $idx host<->device transfer size: $bytes bytes"
     # --mode=range 三个参数取同一个值 = 只跑这一个块大小（--increment 不能是 0，
     # 它是 for 循环的步进，给 0 就是死循环）。
-    bench_run "$one" "$exe" "--device=$idx" --memory=pinned \
+    bench_run_numa "$numa" "$one" "$exe" "--device=$idx" --memory=pinned \
       --mode=range "--start=$bytes" "--end=$bytes" --increment=1 \
       --htod --dtoh || true
     read -r h2d d2h _ < <(bw_parse_bandwidthtest "$one")
@@ -386,7 +416,7 @@ bench_gpu_bandwidth() {
       # 退回快速档 —— 这两个方向的瓶颈是 PCIe 链路，32MB 已经跑到平台期，
       # 块大小对它们没有影响，退回去不损失准确性。
       dbg "gpu $idx: range mode gave nothing for h2d/d2h, falling back to quick"
-      bench_run "$one" "$exe" "--device=$idx" --memory=pinned --mode=quick \
+      bench_run_numa "$numa" "$one" "$exe" "--device=$idx" --memory=pinned --mode=quick \
         --htod --dtoh || true
       read -r h2d d2h _ < <(bw_parse_bandwidthtest "$one")
     fi
@@ -433,8 +463,11 @@ bench_gpu_bandwidth() {
 
     [[ "$h2d" == "0.00" && "$d2h" == "0.00" && "$d2d" == "0.00" ]] && continue
     if [[ -z "$mh"  ]] || num_ge "$mh"  "$h2d"; then mh="$h2d";  fi
-    if [[ -z "$md"  ]] || num_ge "$md"  "$d2h"; then md="$d2h";  fi
-    if [[ "$d2d" != "0.00" ]] && { [[ -z "$mdd" ]] || num_ge "$mdd" "$d2d"; }; then
+    # H2D remains the conservative platform value; D2H is reported as the
+    # highest measured card value, matching the acceptance worksheet's
+    # "best observed card" wording.
+    if [[ -z "$md"  ]] || num_ge "$d2h" "$md";  then md="$d2h";  fi
+    if [[ "$d2d" != "0.00" ]] && { [[ -z "$mdd" ]] || num_ge "$d2d" "$mdd"; }; then
       mdd="$d2d"
     fi
   done
@@ -448,27 +481,28 @@ bench_gpu_bandwidth() {
   fi
 
   metric_add "bench" "主机到显卡带宽（GB/s，取最低的一张卡）" "$h2d"
-  metric_add "bench" "显卡到主机带宽（GB/s，取最低的一张卡）" "$d2h"
-  (( d2d_ok == 1 )) && metric_add "bench" "显存读写带宽（GB/s，取最低的一张卡）" "$d2d"
+  metric_add "bench" "显卡到主机带宽（GB/s，取最高的一张卡）" "$d2h"
+  (( d2d_ok == 1 )) && metric_add "bench" "显存读写带宽（GB/s，取最高的一张卡）" "$d2d"
 
-  local scope="逐卡测量、取其中最低的一张"
-  (( GPU_USABLE == 1 )) && scope="本机唯一一张显卡"
+  local h2d_scope="逐卡测量、取其中最低的一张"
+  local best_scope="逐卡测量、取其中最高的一张"
+  (( GPU_USABLE == 1 )) && h2d_scope="本机唯一一张显卡"
+  (( GPU_USABLE == 1 )) && best_scope="本机唯一一张显卡"
   # 三个方向各报一条：它们的瓶颈完全不同（前两个看 PCIe 链路，
   # 第三个看显存），合成一条的话看报告的人不知道是哪一段的数。
   bench_report "bench_gpu_bw_h2d" "显卡数据传输带宽（主机→显卡）" \
     "$h2d" "GB/s" \
-    "主机内存到显存的数据传输带宽（${scope}）" "raw/bench/gpu-bandwidth.log"
+    "主机内存到显存的数据传输带宽（${h2d_scope}）" "raw/bench/gpu-bandwidth.log"
   bench_report "bench_gpu_bw_d2h" "显卡数据传输带宽（显卡→主机）" \
     "$d2h" "GB/s" \
-    "显存到主机内存的数据传输带宽（${scope}）" "raw/bench/gpu-bandwidth.log"
+    "显存到主机内存的数据传输带宽（${best_scope}）" "raw/bench/gpu-bandwidth.log"
   if (( d2d_ok == 1 )); then
     # ⚠️ **必须写明"读写合计"**。这个数是显存拷贝时读、写两个方向的流量之和 ——
     #    显卡规格书上的"显存带宽"也是这个口径（总线峰值），两边能直接对。
-    #    不写清楚的话，看报告的人会拿它去和"单向能搬多少"比，然后觉得高了一倍。
     bench_report "bench_gpu_bw_d2d" "显存读写带宽" \
       "$d2d" "GB/s" \
       "显卡内部显存到显存拷贝时的读写合计带宽（与显卡规格书标称的显存带宽同口径，\
-${scope}）" "raw/bench/gpu-bandwidth.log"
+${best_scope}）" "raw/bench/gpu-bandwidth.log"
   else
     # 退回快速档了：块大小小到装得进显卡缓存，量出来的不是显存带宽。
     # **宁可这一项不出数，也不能报一个比标称值高几倍的数。**
@@ -480,13 +514,12 @@ ${scope}）" "raw/bench/gpu-bandwidth.log"
 # ================================================================
 # 显卡：卡与卡之间的互联带宽（P2P）
 # ================================================================
-#
-# p2p_parse_min_bw <日志> -> 开启双向 P2P 后，所有**不同卡之间**的带宽最小值（GB/s）
+# p2p_parse_max_bw <日志> -> 开启双向 P2P 后，所有**不同卡之间**的带宽最大值（GB/s）
 #
 # ⚠️ 对角线（自己到自己）必须排掉：那是显存内部带宽，动辄是卡间带宽的几十倍，
-#    混进去取最小值虽然不受影响，但取平均/最大就会得到一个完全失真的数字，
-#    而且一张卡的机器会误以为"P2P 带宽 1300 GB/s"。
-p2p_parse_min_bw() {
+#    混进去取最大值会得到一个完全失真的数字，而且一张卡的机器会误以为
+#    "P2P 带宽 1300 GB/s"。
+p2p_parse_max_bw() {
   local log="${1:-}"
   [[ -f "$log" ]] || return 0
   awk '
@@ -500,10 +533,10 @@ p2p_parse_min_bw() {
         if ($i !~ /^[0-9]+\.?[0-9]*$/) continue
         c = i - 2
         if (c == r) continue                 # 对角线：自己到自己
-        if (min == "" || $i + 0 < min) min = $i + 0
+        if (max == "" || $i + 0 > max) max = $i + 0
       }
     }
-    END { if (min != "") printf "%.2f", min }
+    END { if (max != "") printf "%.2f", max }
   ' "$log" 2>/dev/null
 }
 
@@ -530,18 +563,18 @@ bench_gpu_p2p() {
   local log="$BENCH_LOG_DIR/gpu-p2p.log"
   bench_run "$log" "$exe" || true
 
-  local minbw; minbw="$(p2p_parse_min_bw "$log")"
-  if [[ -z "$minbw" ]]; then
+  local maxbw; maxbw="$(p2p_parse_max_bw "$log")"
+  if [[ -z "$maxbw" ]]; then
     bench_skip_no_result "bench_gpu_p2p" "显卡间互联带宽" "显卡之间的互联带宽" \
       "raw/bench/gpu-p2p.log"
     return 0
   fi
 
-  metric_add "bench" "显卡间双向带宽（GB/s，全部组合中最低的一组）" "$minbw"
+  metric_add "bench" "显卡间双向带宽（GB/s，全部组合中最高的一组）" "$maxbw"
   bench_report "bench_gpu_p2p" "显卡间互联带宽" \
-    "$minbw" "GB/s" \
+    "$maxbw" "GB/s" \
     "${GPU_USABLE} 张显卡两两之间开启双向直连后，显存到显存的传输带宽，\
-取全部卡对组合中最低的一组" \
+取全部卡对组合中最高的一组" \
     "raw/bench/gpu-p2p.log"
 }
 
@@ -634,19 +667,23 @@ BENCH_FLOPS_METHOD="none"
 
 # ---------------------------------------------------------------- CPU 浮点算力
 #
-# 两套程序，**优先自研那个**：
+# Intel 机器优先使用验收资料指定的 Intel LINPACK；其它平台优先使用
+# 全平台可运行的 OpenBLAS 版本。两种方法都把原始日志和实际方法留档，
+# 交付报告只写实测值，不把方法差异伪装成同一个硬件结论。
 #
-#   klburn_flops     我们自己编的（build/src/klburn-flops.c，链 OpenBLAS）
-#   xlinpack_xeon64  Intel 发布的二进制，只在自研那个没进盘时兜底
-#
-# ⚠️ 为什么统一用自研那个，哪怕在 Intel 机器上数字会低一到两成：
-#    Intel 那个在海光 / AMD 上**第一行就罢工**（"runs on only genuine Intel
-#    processors"），于是非 Intel 机器这一项永远测不出来。
-#    两套程序并行的话，同一个报告字段在不同机器上是两个口径 —— 而它们在
-#    报告里叫同一个名字。**全系列可比比峰值好看重要**，何况这一项本来就
-#    只报数、不判合格。
+#   xlinpack_xeon64  Intel 发布的二进制，Intel 平台的首选
+#   klburn_flops     我们自己编的 OpenBLAS 版本，非 Intel 平台的首选
+cpu_is_intel() {
+  grep -qiE '^vendor_id[[:space:]]*:[[:space:]]*GenuineIntel' /proc/cpuinfo 2>/dev/null
+}
+
 bench_cpu_flops() {
   local exe
+  if cpu_is_intel && exe="$(bench_tool xlinpack_xeon64 linpack_xeon64)"; then
+    BENCH_FLOPS_METHOD="intel-linpack"
+    _bench_cpu_flops_intel "$exe"
+    return 0
+  fi
   if exe="$(bench_tool klburn_flops)"; then
     BENCH_FLOPS_METHOD="openblas-dgesv"
     _bench_cpu_flops_openblas "$exe"

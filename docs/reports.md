@@ -20,7 +20,7 @@ out\20260810_202916_2x-INTEL-XEON-GOLD-6530_512GB_Full\
 ├── results.jsonl                      每条判定一行 —— **整机结论就是从这里算的**
 ├── metrics.jsonl                      零散实测数值
 ├── klburn.log                         全程运行日志
-├── sys_metrics.csv                    压测期间每 5 秒一采：CPU 温度/频率/功耗/ECC 计数
+├── sys_metrics.csv                    CPU/内存并发阶段与硬盘阶段的系统采样（phase 分列；每 5 秒一采）
 ├── gpu_metrics.csv                    同上，逐卡（有显卡且跑了显卡压测才有）；20 列，见下
 ├── SHA256SUMS                         整个目录的校验清单
 │
@@ -39,6 +39,12 @@ out\20260810_202916_2x-INTEL-XEON-GOLD-6530_512GB_Full\
 ```
 
 实测一份完整档：**128 个文件、1.5MB**。
+
+### `sys_metrics.csv` 的阶段口径（1.10.4 起）
+
+`phase=cpu` 是 CPU / 内存并发压测窗口，`phase=disk` 是之后单独进行的硬盘压测窗口。
+两段使用同一个采样文件，但报告生成器分别绘图、分别取峰值；硬盘阶段较低的 CPU
+频率/功耗不会再接到 CPU 满载曲线末尾，造成“后半程降频”的错觉。
 
 ### `gpu_metrics.csv` 的 20 列（1.10.2 起）
 

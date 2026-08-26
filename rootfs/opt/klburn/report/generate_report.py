@@ -1294,27 +1294,32 @@ class Data(object):
         return out
 
     # ---------- 采样曲线 ----------
-    def sys_series(self):
-        """CPU 温度 / 频率 / 封装功耗三条曲线。
+    def sys_series_by_phase(self):
+        """CPU 温度 / 频率 / 封装功耗，按采样器 phase 分开返回。
 
-        cpu_power_w 是 0.6.0 才加的列（读 RAPL 算的），老的 run-dir 里没有这一列，
-        DictReader 取不到就当没有——报告里那张图直接不画，不能因此崩掉。
-        RAPL 读不到的机器（部分 AMD、虚拟机）也是同样处理。
+        CPU / 内存并发阶段使用 phase=cpu，硬盘阶段使用 phase=disk。
+        两段时间不能拼成一条曲线，否则硬盘阶段的低负载读数会被误看成
+        CPU 满载后半程降频。没有 phase 列的旧 run-dir 按 cpu 兼容。
         """
         path = os.path.join(self.run_dir, "sys_metrics.csv")
-        temps, freqs, powers = [], [], []
+        out = defaultdict(lambda: [[], [], []])
         if not os.path.exists(path):
-            return temps, freqs, powers
+            return {}
         with open(path, newline="", encoding="utf-8", errors="replace") as f:
             for row in csv.DictReader(f):
-                for key, bucket in (("cpu_temp_c", temps),
-                                    ("cpu_freq_mhz", freqs),
-                                    ("cpu_power_w", powers)):
+                phase = (row.get("phase") or "cpu").strip() or "cpu"
+                for key, bucket in (("cpu_temp_c", out[phase][0]),
+                                    ("cpu_freq_mhz", out[phase][1]),
+                                    ("cpu_power_w", out[phase][2])):
                     try:
                         bucket.append(float(row[key]))
                     except (ValueError, KeyError, TypeError):
                         pass
-        return temps, freqs, powers
+        return {phase: tuple(series) for phase, series in out.items()}
+
+    def sys_series(self):
+        """返回 CPU / 内存并发阶段的三条曲线，兼容旧的内部调用方。"""
+        return self.sys_series_by_phase().get("cpu", ([], [], []))
 
     # ---------- 单项专测的加细数据 ----------
     #
@@ -1329,10 +1334,7 @@ class Data(object):
     def pkg_temp_series(self):
         """逐颗物理 CPU 的封装温度曲线 -> {"0": [...], "1": [...]}。
 
-        取 sys_metrics.csv 的 cpu_pkg_temps 列（分号分隔，"52;78"）。
-        这一列 1.7.0 就在采，但一直只有内部报告读它 —— 而"双路机器一颗 52°C、
-        另一颗 78°C"正是散热器没装好 / 风道偏的典型信号，做 CPU 专项测试的人
-        最该看到的就是这个。老 run-dir 没有这一列，取不到就当没有。
+        只读 CPU / 内存并发阶段；硬盘阶段的采样不能混进 CPU 专项曲线。
         """
         path = os.path.join(self.run_dir, "sys_metrics.csv")
         out = defaultdict(list)
@@ -1340,6 +1342,9 @@ class Data(object):
             return {}
         with open(path, newline="", encoding="utf-8", errors="replace") as f:
             for row in csv.DictReader(f):
+                phase = (row.get("phase") or "cpu").strip() or "cpu"
+                if phase != "cpu":
+                    continue
                 raw = (row.get("cpu_pkg_temps") or "").strip()
                 if not raw:
                     continue
@@ -2520,9 +2525,14 @@ def build_html(data):
             gpu_thr_src = "，两条线均取自显卡自身上报的限值"
     except (TypeError, ValueError):
         gpu_thr_src = ""
-    temps, freqs, powers = data.sys_series()
-    if temps or freqs or powers:
-        A(SUB("CPU 温度 / 频率 / 功耗曲线"))
+    phase_series = data.sys_series_by_phase()
+
+    def render_sys_phase(title, note, series):
+        temps, freqs, powers = series
+        if not (temps or freqs or powers):
+            return
+        A(SUB(title))
+        A('<p class="sub">%s</p>' % note)
         if temps:
             A('<p class="sub">温度峰值 %d°C（告警线 %s°C，判故障线 %s°C）</p>'
               % (max(temps), CPU_TEMP_WARN, CPU_TEMP_FAIL))
@@ -2533,18 +2543,19 @@ def build_html(data):
             A('<p class="sub">封装功耗峰值 %d W（读自 RAPL 能量计数器，多路 CPU 已求和）</p>'
               % max(powers))
             A(svg_line_chart([("CPU 封装功耗", powers)], y_label="W", y_suffix="W"))
-        # 1.7.6 把「/ 硬盘」做成可选之后，这句拼出来是「覆盖CPU / 内存全部压测阶段」——
-        # 中文和 ASCII 之间少了空格。文案是给客户看的，别留这种毛刺。
-        # 采样器只在 CPU / 内存 / 硬盘这几个阶段里跑（GPU 有自己的采样器），
-        # 所以这句要按**本轮真的跑了哪几段**拼 —— 只测硬盘的那一轮写着
-        # "覆盖 CPU / 内存 全部压测阶段"就是句假话。
-        phases = [n for n, k in (("CPU", "cpu_secs"), ("内存", "mem_secs"))
-                  if bsec(k) > 0]
-        if disk_ran:
-            phases.append("硬盘")
-        A('<p class="sub">采样间隔 5 秒，覆盖 %s 全部压测阶段。'
-          "读不到的项目（部分平台不提供 RAPL 或 CPU 温度驱动）不画图，不影响判定。</p>"
-          % (" / ".join(phases) if phases else "本轮"))
+
+    render_sys_phase(
+        "CPU 温度 / 频率 / 功耗曲线",
+        "采样间隔 5 秒，以下曲线仅覆盖 CPU / 内存并发压测阶段。"
+        "硬盘压测单独计时，不混入本图；读不到的项目不画图，不影响判定。",
+        phase_series.get("cpu", ([], [], [])),
+    )
+    render_sys_phase(
+        "硬盘压测期间 CPU 温度 / 频率 / 功耗曲线",
+        "采样间隔 5 秒。硬盘压测与 CPU / 内存 / GPU 分开计时，"
+        "以下读数只记录硬盘阶段，不代表 CPU / 内存满载表现。",
+        phase_series.get("disk", ([], [], [])),
+    )
 
     # ---------------- GPU 曲线 ----------------
     gs = data.gpu_series()

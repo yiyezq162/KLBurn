@@ -4282,6 +4282,29 @@ check "认不出的字段整条作废（宁可少采一列，也不许填错格�
 # 表头列数必须和 GPU_CSV_COLS 对得上，否则采样行和表头永远错一格
 check "表头列数 = GPU_CSV_COLS" "$GPU_CSV_COLS" \
       "$(printf '%s' "$GPU_CSV_HEADER" | awk -F, '{print NF}')"
+#
+# 真机回归：长字段整组查询在 RTX 5090 满载时曾只返回 GPU0。
+# 采样器必须对每张卡显式指定 -i，并且仍按卡号顺序落行，现场仪表盘
+# 才能真正显示 8 张卡，而不是只显示“已识别 8 张、正在监控 1 张”。
+mkdir -p "$TMP/gpu-query-bin"
+cat > "$TMP/gpu-query-bin/nvidia-smi" <<'EOF'
+#!/bin/sh
+idx=0
+while [ "$#" -gt 0 ]; do
+  if [ "$1" = "-i" ]; then idx="$2"; shift 2; else shift; fi
+done
+printf '%s,Fake GPU,40,500,2700,100,1\n' "$idx"
+EOF
+chmod +x "$TMP/gpu-query-bin/nvidia-smi"
+_PATH_GPU_QUERY="$PATH"; PATH="$TMP/gpu-query-bin:$PATH"
+GPU_USABLE=8
+GPU_QUERY_ROWS="$(gpu_query_each_card "$GPU_Q_BASE")"
+check "逐卡 GPU 采样查询应返回 8 行" "8" \
+      "$(printf '%s\n' "$GPU_QUERY_ROWS" | grep -c . || true)"
+check "逐卡 GPU 采样查询应按 0..7 顺序返回" "0 1 2 3 4 5 6 7" \
+      "$(printf '%s\n' "$GPU_QUERY_ROWS" | awk -F, '{printf "%s%s", (NR>1?" ":""), $1}')"
+PATH="$_PATH_GPU_QUERY"
+unset _PATH_GPU_QUERY GPU_QUERY_ROWS
 
 # 热降频：读不到那一列（老驱动）和"一次都没降频"是两件事
 cat > "$TMP/slow.csv" <<'EOF'

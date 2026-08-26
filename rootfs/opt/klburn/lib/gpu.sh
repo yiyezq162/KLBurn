@@ -517,6 +517,40 @@ gpu_query_fields() {
 }
 
 GPU_MONITOR_PID=""
+# gpu_query_each_card <字段列表> -> 原始 csv 行 / 掉线错误行
+#
+# 在 595.84 + RTX 5090 的真机上，压测期间一次查询整组 GPU 的长字段列表
+# 只返回 GPU0；空闲时的 nvidia-smi 清单仍然显示 8 张卡，所以探测阶段看不出
+# 问题。每张卡单独指定 -i，并行发起查询，既保证每张卡都有机会落一行，
+# 又不把 8 次查询串起来拖长 5 秒采样周期。
+#
+# 掉线卡的错误原文保留为短行，不补成完整 CSV；ui.sh / gpu_sample_stats
+# 依靠列数不足识别掉线，不能把旧读数继续画在屏幕上。
+gpu_query_each_card() {
+  local q="${1:-}" tmp idx pid
+  [[ "${GPU_USABLE:-0}" =~ ^[1-9][0-9]*$ ]] || return 0
+  tmp="$(mktemp -d "${RUN_DIR:-/tmp}/.gpu-query.XXXXXX" 2>/dev/null)" || return 1
+  local pids=()
+  for (( idx = 0; idx < GPU_USABLE; idx++ )); do
+    (
+      timeout 4 nvidia-smi -i "$idx" --query-gpu="$q" \
+        --format=csv,noheader,nounits > "$tmp/$idx" 2>&1 || true
+    ) &
+    pids+=("$!")
+  done
+  for pid in "${pids[@]}"; do
+    wait "$pid" 2>/dev/null || true
+  done
+  for (( idx = 0; idx < GPU_USABLE; idx++ )); do
+    if [[ -s "$tmp/$idx" ]]; then
+      cat "$tmp/$idx"
+    else
+      printf 'No devices were found\n'
+    fi
+  done
+  rm -rf "$tmp"
+}
+
 gpu_monitor_start() {
   local csv="$RUN_DIR/gpu_metrics.csv"
   local q map
@@ -528,7 +562,7 @@ gpu_monitor_start() {
   (
     while :; do
       local now; now="$(date '+%H:%M:%S')"
-      nvidia-smi --query-gpu="$q" --format=csv,noheader,nounits 2>/dev/null \
+      gpu_query_each_card "$q" \
         | while IFS= read -r line; do
             # 只压掉逗号周围的空格，不能用 tr -d ' '——那会把显卡型号里的
             # 空格也吃掉，报告图例会变成 NVIDIAGeForceRTX4090

@@ -21,9 +21,9 @@ vendor/
 │   ├── gpu_burn                       # 编译好的 gpu_burn（./build/build-gpu-burn.sh 产出）
 │   └── compare.fatbin
 ├── bench/                             # 可选：性能基准 / 专项诊断，整个子目录原样铺进盘里
-│   ├── cpuflops/                      #   klburn_flops（CPU 算力，1.9.5 起首选）
+│   ├── cpuflops/                      #   klburn_flops（非 Intel 平台 CPU 算力首选）
 │   ├── cuda-samples/                  #   bandwidthTest / p2pBandwidthLatencyTest
-│   ├── linpack/                       #   xlinpack_xeon64 + libiomp5.so（Intel 专用，兜底）
+│   ├── linpack/                       #   xlinpack_xeon64（Intel 平台 CPU 算力首选）
 │   ├── mlc/                           #   mlc 或 mlc_avx512
 │   └── opendcdiag/                    #   处理器计算正确性诊断（+ libzstd/libz）
 └── logo.png                           # 可选：报告抬头 logo（PNG，建议高度 100px 内）
@@ -37,8 +37,8 @@ vendor/
 | `gpu_burn/` | 显卡型号/显存/驱动版本照常进报告，但不做满载压测，也就没有温度功耗曲线 |
 | `storcli/storcli64` | 阵列卡只能报 PCI 反查到的型号，读不到固件版本和逻辑盘状态（见下方说明：**卡后面物理盘的 SMART 不依赖它**） |
 | `perccli/` `ssacli/` `sas3ircu/` | 同上，只是对应的是 Dell PERC / HPE Smart Array / IT 模式 HBA。一个都不放也正常，那一项判 SKIP 不判 FAIL |
-| `bench/` | 性能基准那几项（显卡传输带宽、显卡间互联、CPU 算力、内存带宽）判 SKIP。硬盘带宽不受影响（`fio` 在盘里） |
-| `bench/cpuflops/` | CPU 算力退回 `linpack/` 那个 Intel 专用二进制 —— **非 Intel 机器这一项就永远测不出来**。两个都不放才判 SKIP |
+| `bench/` | 性能基准那几项（显卡传输带宽、显卡间互联、CPU 算力、内存带宽）按硬件与工具可用性执行。硬盘带宽不受影响（`fio` 在盘里） |
+| `bench/cpuflops/` | 非 Intel 平台优先使用 `klburn_flops`；Intel 平台优先使用 `linpack/`，缺失时才退回这里。两个都不放才判 SKIP |
 | `bench/opendcdiag/` | 「CPU 计算正确性」判 SKIP（`origin=self`，不进交付报告）。压测照跑，只是抓不到"算完了但算错了"那一类 |
 | `logo.png` | 报告抬头不显示 logo |
 
