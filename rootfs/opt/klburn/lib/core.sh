@@ -91,6 +91,50 @@ capture() {
   return $rc
 }
 
+# capture_json [-t 秒] <输出文件名(相对 raw/，以 .json 结尾)> <命令...>
+#
+# JSON 不能沿用 capture() 的 stdout+stderr 合流：不少工具会在 stderr 打告警，
+# stdout 仍然是合法 JSON；两路一合，文件扩展名虽然叫 .json，内容却无法解析。
+# 正常 stdout 留在 .json，stderr 单独留在 .stderr.txt。stdout 不是合法 JSON
+# 时改存 .invalid.txt，绝不留下一个看起来可供程序读取的假 JSON。
+capture_json() {
+  local t=120
+  if [[ "${1:-}" == "-t" ]]; then t="$2"; shift 2; fi
+  local rel="$1"; shift
+  local out="$RAW_DIR/$rel"
+  local stem="${out%.json}"
+  local err="${stem}.stderr.txt"
+  local invalid="${stem}.invalid.txt"
+  local tmp="${out}.tmp.$$"
+  mkdir -p "$(dirname "$out")"
+  rm -f "$out" "$invalid" "$tmp"
+  : > "$err"
+  dbg "capture_json($t s) $* -> $out"
+
+  if ! command -v "$1" >/dev/null 2>&1; then
+    printf '(command not found: %s)\n' "$1" > "$err"
+    return 127
+  fi
+
+  { timeout --kill-after=10s "$t" "$@" > "$tmp" 2> "$err" ; } 2>/dev/null
+  local rc=$?
+  if (( rc == 124 || rc == 137 )); then
+    printf '\n(TIMEOUT after %ss: %s)\n' "$t" "$*" >> "$err"
+    warn "capture timed out after ${t}s: $1 (non-fatal, continuing)"
+  fi
+
+  if [[ -s "$tmp" ]] && python3 -c \
+       'import json,sys; json.load(open(sys.argv[1], encoding="utf-8"))' \
+       "$tmp" >/dev/null 2>&1; then
+    mv "$tmp" "$out"
+  else
+    [[ -e "$tmp" ]] && mv "$tmp" "$invalid"
+    printf '(stdout was not valid JSON; saved as %s)\n' \
+      "$(basename "$invalid")" >> "$err"
+  fi
+  return $rc
+}
+
 # have <cmd> —— 命令是否存在
 have() { command -v "$1" >/dev/null 2>&1; }
 

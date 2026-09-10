@@ -477,6 +477,8 @@ fi
 # 「仅导出报告」那一档整段跳过：没有任何东西要压，也就没有仪表盘、没有
 # turbostat 采样、没有测后复查。
 if scope_has_stress && (( SCOPE_ABORT == 0 )); then
+  # BMC 事件差分的基准贴着正式压测开始刷新，避免把前面的性能基准事件算进来。
+  refresh_sel_baseline || true
   stress_init
 
   # 仪表盘是"每 2 秒清屏 + 整屏重画"，前提是只有它一个人在往控制台上写。

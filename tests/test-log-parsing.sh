@@ -440,7 +440,7 @@ check "日志不存在时给 0，不能报错" "0.00 0.00 0.00" \
 
 echo
 echo "=== 性能基准：逐卡汇总口径 ==="
-# 三张卡故意给出不同结果：H2D 取最低，D2H / D2D 取最高。
+# 三张卡故意给出不同结果：三个方向都应取逐卡最高值。
 # 这组直接跑 bench_gpu_bandwidth 的汇总循环，防止只改了文案、实际仍取最低。
 GPU_USABLE=3
 BENCH_LOG_DIR="$TMP/fake-bench"; mkdir -p "$BENCH_LOG_DIR"
@@ -469,13 +469,29 @@ bench_run() {
   esac
 }
 bench_gpu_bandwidth >/dev/null
-check "H2D 汇总仍取逐卡最低值" "yes" \
-      "$(grep -qF '实测 50.0 GB/s' <<<"$GPU_BW_RESULTS" && echo yes || echo no)"
+check "H2D 汇总取逐卡最高值" "yes" \
+      "$(grep -qF '实测 55.0 GB/s' <<<"$GPU_BW_RESULTS" && echo yes || echo no)"
+check "H2D 文案也必须明确取最高，不能只改数值" "yes" \
+      "$(grep -qF '主机内存到显存的数据传输带宽（逐卡测量、取其中最高的一张）' \
+          <<<"$GPU_BW_RESULTS" && echo yes || echo no)"
 check "D2H 汇总改为逐卡最高值" "yes" \
       "$(grep -qF '实测 42.9 GB/s' <<<"$GPU_BW_RESULTS" && echo yes || echo no)"
 check "D2D 汇总改为逐卡最高值" "yes" \
       "$(grep -qF '实测 1200.0 GB/s' <<<"$GPU_BW_RESULTS" && echo yes || echo no)"
 unset -f bench_tool gpu_vram_mib gpu_numa_node pcie_mark_gpus_loaded metric_add result_add bench_run
+
+echo
+echo "=== fio 带宽：十进制 MB/s ==="
+cat > "$TMP/fio-bw.json" <<'EOF'
+{"jobs":[
+  {"jobname":"with-bytes","read":{"bw":7039097,"bw_bytes":7208036080}},
+  {"jobname":"legacy","read":{"bw":532480}}
+]}
+EOF
+check "fio 有 bw_bytes 时优先按 byte/s 换算" "7208" \
+      "$(fio_job_bw_mbs "$TMP/fio-bw.json" with-bytes read)"
+check "老 fio 只有 KiB/s 时乘 1024 后按十进制 MB/s 换算" "545.3" \
+      "$(fio_job_bw_mbs "$TMP/fio-bw.json" legacy read)"
 # ---------------------------------------------------------------- 显存带宽的块大小
 #
 # 1.9.3 真机翻车：一台 RTX 4090 的显存带宽报出 3622.7 GB/s，而标称值是 1008。

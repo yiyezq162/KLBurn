@@ -173,6 +173,39 @@ gpu_sample_stats() {
            END { printf "%d %d", t+0, v+0 }' "$csv" 2>/dev/null
 }
 
+# gpu_temp_summary <gpu_metrics.csv>
+#   -> "<有温度数据的卡数> <逐卡全程均温的平均值> <最高温卡号> <最高温>"
+#
+# 先算每张卡自己的全程均温，再让每张卡等权求平均。这样某张卡偶尔少一个采样点
+# 不会因为行数较少而被悄悄降低权重。最高温则取全部有效采样中的峰值。
+gpu_temp_summary() {
+  local csv="${1:-}"
+  [[ -f "$csv" ]] || { printf '0 - - -'; return; }
+  awk -F, '
+    NR > 1 && $2 ~ /^[0-9]+$/ && $4 ~ /^-?[0-9]+([.][0-9]+)?$/ {
+      idx = $2 + 0
+      sum[idx] += $4 + 0
+      n[idx]++
+      if (!have_peak || $4 + 0 > peak || ($4 + 0 == peak && idx < peak_idx)) {
+        have_peak = 1
+        peak = $4 + 0
+        peak_idx = idx
+      }
+    }
+    END {
+      cards = 0
+      means = 0
+      for (idx in n) {
+        cards++
+        means += sum[idx] / n[idx]
+      }
+      if (cards > 0)
+        printf "%d %.1f %d %.0f", cards, means / cards, peak_idx, peak
+      else
+        printf "0 - - -"
+    }' "$csv" 2>/dev/null
+}
+
 # gpu_burn_progress_steps <日志> -> 进度计数出现过多少个不同取值
 #
 # "proc'd: N" 是累计完成的计算批次，正常跑一小时会从两位数涨到几万；
@@ -551,6 +584,12 @@ gpu_query_each_card() {
   rm -rf "$tmp"
 }
 
+# 清洗一张卡的原始查询行，并保留记录边界。多卡管线靠这里的换行让 awk
+# 一次只处理一张卡；漏掉换行会把 GPU1..N 粘在 GPU0 后面并被截掉。
+gpu_clean_sample_line() {
+  printf '%s\n' "${1:-}" | sed 's/[[:space:]]*,[[:space:]]*/,/g'
+}
+
 gpu_monitor_start() {
   local csv="$RUN_DIR/gpu_metrics.csv"
   local q map
@@ -566,7 +605,7 @@ gpu_monitor_start() {
         | while IFS= read -r line; do
             # 只压掉逗号周围的空格，不能用 tr -d ' '——那会把显卡型号里的
             # 空格也吃掉，报告图例会变成 NVIDIAGeForceRTX4090
-            printf '%s' "$line" | sed 's/[[:space:]]*,[[:space:]]*/,/g'
+            gpu_clean_sample_line "$line"
           done \
         | awk -F, -v OFS=, -v n="$GPU_CSV_COLS" -v t="$now" -v map="$map" '
             BEGIN { m = split(map, mc, ",") }
@@ -731,7 +770,16 @@ gpu_stress() {
 
   # 说清这一轮压的是哪一档：张量核那一档负载更重、温度和功耗都更高，
   # 两份报告的数字放在一起比时，不写明档位就没法比。
-  local detail="${GPU_USABLE} 张显卡满载 $(fmt_dur "$secs")"
+  local temp_cards temp_avg temp_peak_idx temp_peak temp_detail=""
+  read -r temp_cards temp_avg temp_peak_idx temp_peak < <(gpu_temp_summary "$csv")
+  if (( temp_cards > 0 )); then
+    if (( temp_cards == GPU_USABLE )); then
+      temp_detail="；${temp_cards} 张卡全程平均温度 ${temp_avg}°C，最高温为显卡${temp_peak_idx} ${temp_peak}°C"
+    else
+      temp_detail="；已采到温度的 ${temp_cards} 张卡全程平均温度 ${temp_avg}°C，最高温为显卡${temp_peak_idx} ${temp_peak}°C"
+    fi
+  fi
+  local detail="${GPU_USABLE} 张显卡满载 $(fmt_dur "$secs")${temp_detail}"
   (( GPU_BURN_TC == 1 )) && detail="${detail}（张量核满载）"
   # 温度那两条结论里要说清楚这个度数是谁定的 —— 报告里出现一个数，
   # 看的人第一个问题就是"这条线哪来的"。
@@ -800,7 +848,7 @@ gpu_stress() {
       "有 ${overheat} 张卡温度达到 ${GPU_TEMP_FAIL}°C${tsrc}（散热异常）；$detail" "raw/stress/gpu-burn.log"
   elif (( hot > 0 )); then
     result_add "stress_gpu" "GPU 压力测试" "$ST_WARN" \
-      "有 ${hot} 张卡温度达到 ${GPU_TEMP_WARN}°C${tsrc}，已进入降频保护区间；$detail" \
+      "有 ${hot} 张卡温度达到 ${GPU_TEMP_WARN}°C${tsrc}，已进入温度保护区间；$detail" \
       "raw/stress/gpu-burn.log"
   else
     result_add "stress_gpu" "GPU 压力测试" "$ST_PASS" "无计算错误，温度正常；$detail" "raw/stress/gpu-burn.log"
@@ -816,16 +864,14 @@ gpu_stress() {
 # 只看温度什么都发现不了。验收单点名要看的四个读数（频率 / 功耗 / 风扇 /
 # 距温度上限的余量）正是为了堵这个口子，所以单独出一条结论。
 #
-# ⚠️ **这一项只报读数，不判达标与否。**不同型号的卡满载频率从 1400MHz 到
-# 2700MHz 都有，凭空写死一个数就是替客户定了一个他没定过的标准；而且这张盘
-# 是无人值守跑的，现场也没有地方去填这种数。
-# 真正的显卡故障由 stress_gpu 去抓（计算错误 / 掉卡 / 超温），那几条才有资格
-# 影响整机结论。
+# ⚠️ 频率、功耗、风扇数字只报不判：不同型号没有共同门槛。唯一会升为 WARN 的是
+# 驱动明确上报 sw_thermal_slowdown=Active；这是保护状态事实，不是自定性能阈值。
+# 真正的显卡故障仍由 stress_gpu 去抓（计算错误 / 掉卡 / 超温），只有那些判 FAIL。
 check_gpu_load_profile() {
   (( ${#GPU_LOAD_ROWS[@]} > 0 )) || return 0
 
   local row idx clk_min clk_avg fan_max tl_min pow_avg slow
-  local shown="" nclk=0
+  local shown="" nclk=0 thermal_active=0
   for row in "${GPU_LOAD_ROWS[@]}"; do
     IFS='|' read -r idx clk_min clk_avg fan_max tl_min pow_avg slow <<< "$row"
     local one="显卡${idx}："
@@ -839,11 +885,12 @@ check_gpu_load_profile() {
     gpu_stat_ok "$tl_min"  && one="${one}，距显卡自报的温度上限最少还有 ${tl_min}°C"
     # 因过热降频：只在真的采到那一列时才说。**采不到就一个字都不写** ——
     # 写"未发生降频"就是替驱动说了一句它没说过的话。
-    # 这里只如实报数，不判它多了还是少了：降到多少算不合格是订单的事。
+    # 不按次数设门槛；只要驱动明确上报过保护状态，就如实给 WARN。
     if [[ "$slow" == */* ]]; then
       local sa="${slow%%/*}" sn="${slow##*/}"
       if [[ "$sa" =~ ^[0-9]+$ && "$sa" != "0" ]]; then
         one="${one}，${sn} 次采样中有 ${sa} 次显卡自报正因过热降频"
+        thermal_active=$(( thermal_active + 1 ))
       else
         one="${one}，${sn} 次采样中均未自报过热降频"
       fi
@@ -858,6 +905,12 @@ check_gpu_load_profile() {
     return 0
   fi
 
-  result_add "check_gpu_load" "显卡满载运行状态" "$ST_PASS" \
-    "满载期间各卡的实测运行读数：${shown%；}。" "raw/stress/gpu-burn.log"
+  if (( thermal_active > 0 )); then
+    result_add "check_gpu_load" "显卡满载运行状态" "$ST_WARN" \
+      "有 ${thermal_active} 张显卡在满载期间由驱动明确报告过热降频；各卡实测运行读数：${shown%；}。\
+建议复查散热、风道与环境温度后复测。" "raw/stress/gpu-burn.log"
+  else
+    result_add "check_gpu_load" "显卡满载运行状态" "$ST_PASS" \
+      "满载期间各卡的实测运行读数：${shown%；}。" "raw/stress/gpu-burn.log"
+  fi
 }

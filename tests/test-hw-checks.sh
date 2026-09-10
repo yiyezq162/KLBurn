@@ -4129,6 +4129,37 @@ check "全是占位符时输出空（不能把 'To be filled by O.E.M.' 当序�
 check "没有 BMC 时输出空" "" "$(fru_serial "$TMP/nope-fru.txt")"
 
 echo
+echo "=== BMC SEL：按记录 ID 差分，事件方向不当严重级 ==="
+cat > "$TMP/sel-pre.txt" <<'EOF'
+0001 | 09/09/2026 | 14:07:32 | System Boot Initiated | Initiated by power up | Asserted
+0002 | 09/09/2026 | 14:08:00 | Temperature | Upper Critical going high | Deasserted
+EOF
+cat > "$TMP/sel-post.txt" <<'EOF'
+ipmitool: transient warning
+0001 | 09/09/2026 | 14:07:32 | System Boot Initiated | Initiated by power up | Asserted
+0002 | 09/09/2026 | 14:08:00 | Temperature | Upper Critical going high | Deasserted
+0003 | 09/09/2026 | 15:04:54 | Microcontroller #0x3a |  | Asserted
+0004 | 09/09/2026 | 15:04:54 | Temperature | Upper Critical going high | Asserted
+EOF
+sel_new_records "$TMP/sel-pre.txt" "$TMP/sel-post.txt" > "$TMP/sel-new.txt"
+check "SEL 差分只保留新 record ID，stderr 行不能被多算" "2" \
+      "$(grep -c . "$TMP/sel-new.txt")"
+: > "$TMP/sel-empty-pre.txt"
+sel_new_records "$TMP/sel-empty-pre.txt" "$TMP/sel-post.txt" > "$TMP/sel-all-new.txt"
+check "SEL 基线为空时测后记录仍全部算新增" "4" \
+      "$(grep -cE '^[[:xdigit:]]+[[:space:]]*\\|' "$TMP/sel-all-new.txt")"
+check "无描述的 Microcontroller Asserted 不是严重级" "0" \
+      "$(printf '0003 | x | Microcontroller #0x3a |  | Asserted\n' > "$TMP/sel-vendor.txt"; \
+         sel_critical_count "$TMP/sel-vendor.txt")"
+check "Deasserted 不能因包含 Asserted 子串而算严重" "0" \
+      "$(printf '0002 | x | Temperature | normal | Deasserted\n' > "$TMP/sel-deassert.txt"; \
+         sel_critical_count "$TMP/sel-deassert.txt")"
+check "Non-critical 描述不能因包含 Critical 子串而算严重" "0" \
+      "$(printf '0005 | x | Event Logging Disabled | Log area reset/cleared | Non-critical\n' > "$TMP/sel-noncritical.txt"; \
+         sel_critical_count "$TMP/sel-noncritical.txt")"
+check "明确 Critical 描述仍应判严重" "1" "$(sel_critical_count "$TMP/sel-new.txt")"
+
+echo
 echo "=== 显卡一致性 / ECC / 行重映射 ==="
 printf 'NVIDIA H100 80GB HBM3,96.00.89.00.01\nNVIDIA H100 80GB HBM3,96.00.89.00.01\n' \
   > "$TMP/gpu-uni-ok.txt"
@@ -4138,6 +4169,21 @@ printf 'NVIDIA H100 80GB HBM3,96.00.89.00.01\nNVIDIA H100 80GB HBM3,96.00.74.00.
 check "VBIOS 两种要认出来" "1 2" "$(gpu_uniform_scan "$TMP/gpu-uni-bad.txt")"
 check "文件不存在时给 0 0（-> SKIP，不是「不一致」）" "0 0" \
       "$(gpu_uniform_scan "$TMP/nope-gpu.txt")"
+
+mkdir -p "$TMP/gpu-uniform-bin"
+cat > "$TMP/gpu-uniform-bin/nvidia-smi" <<'EOF'
+#!/bin/sh
+printf 'NVIDIA GeForce RTX 4090, 95.02.3C.00.AB\n'
+EOF
+chmod +x "$TMP/gpu-uniform-bin/nvidia-smi"
+_PATH_GPU_UNIFORM="$PATH"; PATH="$TMP/gpu-uniform-bin:$PATH"
+GPU_PRESENT=2; GPU_USABLE=1; LAST_STATUS=""; LAST_DETAIL=""
+check_gpu_uniform
+check "PCI 可见 2 张、驱动只读到 1 张时一致性不能判 PASS" "SKIP" "$LAST_STATUS"
+check "部分识别的文案要明确无法核对全部显卡" "1" \
+      "$(printf '%s' "$LAST_DETAIL" | grep -c '无法核对全部显卡')"
+PATH="$_PATH_GPU_UNIFORM"
+unset _PATH_GPU_UNIFORM
 
 # ECC：不支持 ECC 的卡给的是 [N/A]，**那不是 0**。
 # 当成 0 加起来的话，报告会写"ECC 全部正常"——一张压根没有 ECC 的卡被说成没问题。
@@ -4303,8 +4349,13 @@ check "逐卡 GPU 采样查询应返回 8 行" "8" \
       "$(printf '%s\n' "$GPU_QUERY_ROWS" | grep -c . || true)"
 check "逐卡 GPU 采样查询应按 0..7 顺序返回" "0 1 2 3 4 5 6 7" \
       "$(printf '%s\n' "$GPU_QUERY_ROWS" | awk -F, '{printf "%s%s", (NR>1?" ":""), $1}')"
+GPU_CLEAN_ROWS="$(printf '%s\n' "$GPU_QUERY_ROWS" | while IFS= read -r line; do
+  gpu_clean_sample_line "$line"
+done)"
+check "逐卡查询经过清洗后仍应保留 8 条记录" "8" \
+      "$(printf '%s\n' "$GPU_CLEAN_ROWS" | grep -c . || true)"
 PATH="$_PATH_GPU_QUERY"
-unset _PATH_GPU_QUERY GPU_QUERY_ROWS
+unset _PATH_GPU_QUERY GPU_QUERY_ROWS GPU_CLEAN_ROWS
 
 # 热降频：读不到那一列（老驱动）和"一次都没降频"是两件事
 cat > "$TMP/slow.csv" <<'EOF'
@@ -4326,6 +4377,17 @@ check "探测不能只看退出码，还要求日志里真有逐卡结论行" "y
       "$(declare -f gpu_burn_probe_tc | grep -q 'OK|FAULTY' && echo yes || echo no)"
 
 check "三个采样点里两次在降频" "2 3" "$(gpu_slowdown_samples "$TMP/slow.csv" 0)"
+cat > "$TMP/temp-summary.csv" <<'EOF'
+time,index,name,temp_c
+02:17:05,0,Fake GPU,42
+02:17:05,1,Fake GPU,40
+02:17:10,0,Fake GPU,71
+02:17:10,1,Fake GPU,68
+02:17:15,0,Fake GPU,79
+02:17:15,1,Fake GPU,75
+EOF
+check "多卡温度摘要 = 逐卡均温再等权平均 + 全卡最高温" "2 62.5 0 79" \
+      "$(gpu_temp_summary "$TMP/temp-summary.csv")"
 cat > "$TMP/slow-none.csv" <<'EOF'
 time,index,name,temp_c,power_w,clock_sm_mhz,util_pct,mem_used_mb,fan_pct,temp_tlimit_c
 10:00:00,0,NVIDIA RTX A6000,71,285,1442,100,4835,62,9

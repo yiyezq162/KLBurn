@@ -364,6 +364,16 @@ check_gpu_uniform() {
   metric_add "conform" "显卡型号" "$names"
   [[ -n "$vbios" ]] && metric_add "conform" "显卡显示BIOS版本" "$vbios"
 
+  # PCI 上可见的卡比驱动能读取的多时，只核对到已识别子集，不能把“子集一致”
+  # 写成整机所有显卡一致。驱动不匹配仍由 gpu_detect 按能力缺失处理，这里只说明
+  # 本项没有足够数据完成全卡核对。
+  if (( ${GPU_PRESENT:-0} > ${GPU_USABLE:-0} )); then
+    result_add "check_gpu_uniform" "显卡一致性" "$ST_SKIP" \
+      "PCI 总线上检测到 ${GPU_PRESENT} 张显卡，但驱动只能读取 ${GPU_USABLE} 张，\
+无法核对全部显卡的型号与显示 BIOS 版本。此项不影响整机结论。" "raw/gpu-lspci.txt"
+    return 0
+  fi
+
   local bad=""
   (( nn > 1 )) && bad="${bad}型号 ${nn} 种（${names}）；"
   (( vv > 1 )) && bad="${bad}显示 BIOS 版本 ${vv} 种（${vbios}）；"

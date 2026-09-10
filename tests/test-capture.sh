@@ -60,6 +60,37 @@ check "命令不存在时文件里要写明原因" \
 
 # ================================================================
 echo
+echo "=== 结构化 JSON 采集：stdout / stderr 必须分流 ==="
+
+capture_json "structured.json" bash -c \
+  'printf "{\"value\":42}\n"; printf "sensor warning\n" >&2'
+check "stderr 告警不能污染 JSON" "42" \
+      "$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["value"])' \
+          "$RAW_DIR/structured.json")"
+check "stderr 要单独留档" "sensor warning" \
+      "$(cat "$RAW_DIR/structured.stderr.txt")"
+check "合法 JSON 里不能混入 stderr" "0" \
+      "$(grep -c 'sensor warning' "$RAW_DIR/structured.json" || true)"
+
+capture_json "broken.json" bash -c \
+  'printf "not-json\n"; printf "parser warning\n" >&2'
+check "stdout 非 JSON 时不能留下假 .json" "no" \
+      "$([[ -e "$RAW_DIR/broken.json" ]] && echo yes || echo no)"
+check "非 JSON stdout 要改存诊断文件" "not-json" \
+      "$(cat "$RAW_DIR/broken.invalid.txt")"
+check "无效原因与原 stderr 要放在独立 stderr 文件" "2" \
+      "$(grep -Ec 'parser warning|stdout was not valid JSON' "$RAW_DIR/broken.stderr.txt")"
+
+capture_json "missing.json" this-json-command-does-not-exist-xyz >/dev/null 2>&1
+json_rc=$?
+check "JSON 命令不存在应返回 127" "127" "$json_rc"
+check "命令不存在不能伪造 JSON 文件" "no" \
+      "$([[ -e "$RAW_DIR/missing.json" ]] && echo yes || echo no)"
+check "JSON 命令不存在的原因写进 stderr 文件" "1" \
+      "$(grep -c 'command not found' "$RAW_DIR/missing.stderr.txt")"
+
+# ================================================================
+echo
 echo "=== 超时（这是真机上冒出 Killed 那行的场景）==="
 
 # -t 1 + sleep 30：1 秒后 SIGTERM 就能收掉，走 124 分支（快，不用等 11 秒）。

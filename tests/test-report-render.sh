@@ -750,8 +750,8 @@ has    "$OUT" "装机容量MB"  "正经指标照常在"
 has_no "$OUT" "失败压测项"  "内部计数不进客户报告"
 # 内存压测程序叫什么是内部实现（§2-1「盘里带了什么工具」）。这一格失败与否
 # 也不由它决定 —— metrics.jsonl 和内部报告里一个字段都没少。
-# 查的是**那一行指标**，不是「测试工具」四个字 —— 抬头里
-# 「测试工具 KLBurn v1.8.4」说的是我们这个产品自己，那句该留。
+# 查的是**那一行指标**，不是「测试工具」四个字。客户抬头从 1.10.5 起只留
+# “报告版本”，产品内部名与构建环境仍保存在 meta.json 和内部工程报告。
 has_no "$OUT" "<td>测试工具</td>" "压测程序的名字不进客户报告"
 has_no "$OUT" "stressapptest"     "连值也不许漏出去"
 
@@ -783,6 +783,10 @@ echo "=== 抬头提示 ==="
 has "$OUT" "项为告警"      "WARN 项要在抬头点出来"
 has "$OUT" "未能自动校时" "时钟不准的提示（run-dir 里没有 clock_source 字段，按未校时处理）"
 has "$OUT" "广州市鲲林科技有限公司" "公司名"
+has "$OUT" "报告版本 <b>0.1.0</b>" "客户抬头保留可追溯的报告版本"
+has_no "$OUT" "Ubuntu Server 24.04.4" "客户抬头不披露基础系统"
+has_no "$OUT" "构建于 2026-07-30" "客户抬头不披露内部构建时间"
+has_no "$OUT" "raw/ 子目录" "客户正文不显示内部目录路径"
 
 # 时间是从哪儿来的，看报告的人有权知道（1.9.8）。
 # 1.9.7 现场那台 7542 的网是通的，但那个内网出不了公网，公网 NTP 全部拨不通，
@@ -863,6 +867,10 @@ GPU 00000000:C8:00.0
     PCIe Generation
         Max                               : 4
 EOF
+cat > "$RD3/raw/gpu-lspci.txt" <<'EOF'
+0000:C8:00.0 VGA compatible controller [0300]: NVIDIA Corporation AD102 [GeForce RTX 4090] [10de:2684] (rev a1)
+0000:D8:00.0 VGA compatible controller [0300]: NVIDIA Corporation AD102 [GeForce RTX 4090] [10de:2684] (rev a1)
+EOF
 OUT3="$TMP/report-gpu.html"
 if python3 "$GEN" --run-dir "$RD3" --out "$OUT3" >/dev/null 2>"$TMP/err3"; then
   has "$OUT3" "NVIDIA GeForce RTX 4090" "显卡型号照常要有"
@@ -880,8 +888,8 @@ PY
   has "$OUT3" "CPU 封装功耗"        "有 cpu_power_w 列时要画 CPU 功耗图"
   has "$OUT3" "封装功耗峰值 352 W"  "CPU 功耗峰值"
   has "$OUT3" "GPU 温度 / 功耗曲线" "GPU 曲线小节"
-  has "$OUT3" "GPU0 79°C"           "逐卡温度峰值 - 第 0 张"
-  has "$OUT3" "GPU1 75°C"           "逐卡温度峰值 - 第 1 张"
+  has "$OUT3" "全部 2 张卡全程平均温度 62.5°C" "逐卡均温等权汇总"
+  has "$OUT3" "最高温为 GPU0 79°C"   "最高温卡号和峰值"
   has "$OUT3" "GPU0 449W"           "逐卡功耗峰值"
   has "$OUT3" "告警线 95°C，判故障线 100°C" "CPU 阈值要取 meta.json 里实际生效的值"
   has "$OUT3" "告警线 86°C，判故障线 91°C"  "GPU 阈值同理"
@@ -891,6 +899,11 @@ PY
   # 两张卡的图例都要在，否则多卡机器看不出是哪张卡
   has "$OUT3" "GPU0 NVIDIA GeForce RTX 4090" "图例要带卡号和型号"
   has "$OUT3" "GPU1 NVIDIA GeForce RTX 4090" "第二张卡的图例"
+  has "$OUT3" "PCI 可见，驱动未识别" "PCI 可见但驱动未附着的卡也要列进硬件清单"
+  has "$OUT3" "NVIDIA Corporation AD102 [GeForce RTX 4090]" \
+              "完整域 BDF 后的未识别显卡型号不能被截断"
+  has "$OUT3" "图中只显示成功取得的采样点" "曲线不能声称完整覆盖未采到的时段"
+  has_no "$OUT3" "覆盖 GPU 满载压测全程" "缺采样时不作全程覆盖承诺"
 else
   bad "GPU 场景的报告没能生成：$(cat "$TMP/err3")"
 fi
@@ -1171,6 +1184,7 @@ has "$OUTA" "<h3>3.1 各项结论</h3>"        "性能基准的第一小节"
 has "$OUTA" "<h3>4.1 各项结论</h3>"        "压测那一节的编号要跟着一级编号走"
 has "$OUTA" "内存条一致性"                  "一致性判定要出现在配置核对那一节"
 has "$OUTA" "libaio_read_128k_32_1"        "硬盘带宽表要原样标出本次实际用的测试参数"
+has "$OUTA" "545.3 MB/s"                   "fio KiB/s 要按十进制 MB/s 换算"
 has "$OUTA" "固件版本清单"                  "固件版本汇总表（同批次比对用）"
 # ⚠️ **同一个数字不许在一页上印两遍。**
 # 1.9.0 一度在结论列表之外又加了一张"实测数值汇总"表，六个数各印两次 ——

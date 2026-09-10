@@ -298,7 +298,7 @@ reset_results
 gpu_stress 3600 >/dev/null
 check "读不出进度格式 + 30% 采样丢失 -> WARN，不许判 FAIL" "WARN" "$(st_of stress_gpu)"
 
-# ---- 满载读数**只报不判**：任何数字都不许把它变成 WARN/FAIL ----
+# ---- 满载性能数字只报不判；驱动明确报告热保护则 WARN ----
 #
 # 这一条守的是这个项目的一条硬规矩：**性能数字不参与合格判定。**
 # 不同型号的卡满载频率从 1400MHz 到 2700MHz 都有，而这张盘是无人值守跑的，
@@ -312,9 +312,20 @@ reset_results
 gpu_stress 3600 >/dev/null
 check "满载读数偏低也只报不判（性能数字不参与合格判定）" "PASS" "$(st_of check_gpu_load)"
 check "压测本身没出错，stress_gpu 也是 PASS" "PASS" "$(st_of stress_gpu)"
-# 反面：这一项**不许**产生 WARN 或 FAIL，任何状态都只能是 PASS 或 SKIP
-check "满载状态那一项只可能是 PASS 或 SKIP" "yes" \
-      "$(case "$(st_of check_gpu_load)" in PASS|SKIP) echo yes ;; *) echo no ;; esac)"
+
+{
+  echo "time,index,name,temp_c,power_w,clock_sm_mhz,util_pct,mem_used_mb,fan_pct,temp_tlimit_c,pci_bus_id,serial,vbios_version,util_mem_pct,ecc_ce_sram,ecc_ue_sram_parity,ecc_ue_sram_secded,ecc_ce_dram,ecc_ue_dram,sw_thermal_slowdown"
+  for ((i=0; i<12; i++)); do
+    echo "02:18:0$((i%10)),0,NVIDIA GeForce RTX 5090,71,412.15,2542,99,28935,80,10,00000000:01:00.0,N/A,VBIOS,40,N/A,N/A,N/A,N/A,N/A,Active"
+  done
+} > "$RUN_DIR/gpu_metrics.csv"
+reset_results
+gpu_stress 3600 >/dev/null
+check "驱动明确上报过热降频 -> 满载状态 WARN" "WARN" "$(st_of check_gpu_load)"
+check "热降频保护不等于计算故障，stress_gpu 仍按自身证据判定" "PASS" "$(st_of stress_gpu)"
+# 频率/功耗等性能数字不许产生 WARN；WARN 只能来自驱动明确上报的保护状态。
+check "满载状态只可能是 PASS / WARN / SKIP，不判 FAIL" "yes" \
+      "$(case "$(st_of check_gpu_load)" in PASS|WARN|SKIP) echo yes ;; *) echo no ;; esac)"
 
 # ================================================================
 echo

@@ -12,7 +12,7 @@ collect_system() {
   capture "dmidecode-memory.txt" dmidecode -t memory
   capture "dmidecode-system.txt" dmidecode -t system -t baseboard -t bios
   capture "dmidecode-psu.txt"    dmidecode -t 39
-  capture "lscpu.json"           lscpu -J
+  capture_json "lscpu.json"      lscpu -J
   capture "lscpu.txt"            lscpu
   capture "meminfo.txt"          cat /proc/meminfo
   capture "cpuinfo.txt"          cat /proc/cpuinfo
@@ -29,7 +29,7 @@ collect_system() {
   #   超时从 90s 收到 45s：留档数据不值得让现场干等。
   # 45s -> 20s。0.6.0 现场那台机器（阵列卡故障）两次都跑满 45 秒被强杀，白等 90 秒。
   # 这份数据纯粹是留档，报告生成器和判定逻辑一行都不读，不值得让现场干等。
-  capture -t 20 "lshw.json" lshw -json -quiet -disable network
+  capture_json -t 20 "lshw.json" lshw -json -quiet -disable network
   capture -t 20 "lshw.txt"  lshw -short -quiet -disable network
 
   # lspci 也得上超时。默认 120 秒是按"正常机器毫秒级返回"想当然定的，
@@ -340,9 +340,9 @@ collect_smart() {
     done
 
     if [[ -n "$t" ]]; then
-      capture "$dir/${key}.json" smartctl -a -j -d "$t" "$dev" || true
+      capture_json "$dir/${key}.json" smartctl -a -j -d "$t" "$dev" || true
     else
-      capture "$dir/${key}.json" smartctl -a -j "$dev" || true
+      capture_json "$dir/${key}.json" smartctl -a -j "$dev" || true
     fi
 
     # 把"这块盘是靠哪种设备类型读通的"记下来。硬盘自检要用同一个 -d，
@@ -358,7 +358,7 @@ collect_smart() {
   done
 
   if [[ "$phase" == "pre" ]]; then
-    capture "nvme-list.json" nvme list -o json
+    capture_json "nvme-list.json" nvme list -o json
     capture "nvme-list.txt"  nvme list
     capture "lsblk.txt"      lsblk -o NAME,PATH,SIZE,TYPE,TRAN,ROTA,MODEL,SERIAL,FSTYPE,MOUNTPOINT
 
@@ -1878,7 +1878,7 @@ collect_deep() {
   # 离线可用（不联网只是查不到"有没有新版"，本机现有版本照样读得到）。
   # 内部报告里做成一张表，核对"这批机器的固件版本齐不齐"非常实用。
   capture -t 60 "deep/fwupd-devices.txt" fwupdmgr get-devices --no-unreported-check
-  capture -t 30 "deep/fwupd-devices.json" fwupdmgr get-devices --json --no-unreported-check
+  capture_json -t 30 "deep/fwupd-devices.json" fwupdmgr get-devices --json --no-unreported-check
 
   # ---- CPU 特性位 / MSR ----
   capture -t 30 "deep/cpuid.txt" cpuid -1
@@ -1936,7 +1936,7 @@ collect_deep() {
   # lldpd 是在 net_link_up_all 之后以**接收模式**拉起来的（见 lib/network.sh），
   # 到这里已经过了整个采集阶段，足够收到一轮通告（交换机一般 30 秒发一次）。
   capture -t 30 "deep/lldp-neighbors.txt" lldpctl
-  capture -t 30 "deep/lldp-neighbors.json" lldpctl -f json
+  capture_json -t 30 "deep/lldp-neighbors.json" lldpctl -f json
 
   # ---- 完整的本次开机日志 ----
   capture -t 60 "deep/journal-boot.txt" journalctl -b --no-pager
@@ -2009,7 +2009,7 @@ collect_sensors() {
   modprobe nct6775  >/dev/null 2>&1 || true
   sleep 1
   capture "sensors.txt"  sensors
-  capture "sensors.json" sensors -j
+  capture_json "sensors.json" sensors -j
 }
 
 # ---------------------------------------------------------------- 汇总入口

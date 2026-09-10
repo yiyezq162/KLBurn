@@ -462,10 +462,7 @@ bench_gpu_bandwidth() {
     fi
 
     [[ "$h2d" == "0.00" && "$d2h" == "0.00" && "$d2d" == "0.00" ]] && continue
-    if [[ -z "$mh"  ]] || num_ge "$mh"  "$h2d"; then mh="$h2d";  fi
-    # H2D remains the conservative platform value; D2H is reported as the
-    # highest measured card value, matching the acceptance worksheet's
-    # "best observed card" wording.
+    if [[ -z "$mh"  ]] || num_ge "$h2d" "$mh";  then mh="$h2d";  fi
     if [[ -z "$md"  ]] || num_ge "$d2h" "$md";  then md="$d2h";  fi
     if [[ "$d2d" != "0.00" ]] && { [[ -z "$mdd" ]] || num_ge "$d2d" "$mdd"; }; then
       mdd="$d2d"
@@ -480,19 +477,17 @@ bench_gpu_bandwidth() {
     return 0
   fi
 
-  metric_add "bench" "主机到显卡带宽（GB/s，取最低的一张卡）" "$h2d"
+  metric_add "bench" "主机到显卡带宽（GB/s，取最高的一张卡）" "$h2d"
   metric_add "bench" "显卡到主机带宽（GB/s，取最高的一张卡）" "$d2h"
   (( d2d_ok == 1 )) && metric_add "bench" "显存读写带宽（GB/s，取最高的一张卡）" "$d2d"
 
-  local h2d_scope="逐卡测量、取其中最低的一张"
   local best_scope="逐卡测量、取其中最高的一张"
-  (( GPU_USABLE == 1 )) && h2d_scope="本机唯一一张显卡"
   (( GPU_USABLE == 1 )) && best_scope="本机唯一一张显卡"
   # 三个方向各报一条：它们的瓶颈完全不同（前两个看 PCIe 链路，
   # 第三个看显存），合成一条的话看报告的人不知道是哪一段的数。
   bench_report "bench_gpu_bw_h2d" "显卡数据传输带宽（主机→显卡）" \
     "$h2d" "GB/s" \
-    "主机内存到显存的数据传输带宽（${h2d_scope}）" "raw/bench/gpu-bandwidth.log"
+    "主机内存到显存的数据传输带宽（${best_scope}）" "raw/bench/gpu-bandwidth.log"
   bench_report "bench_gpu_bw_d2h" "显卡数据传输带宽（显卡→主机）" \
     "$d2h" "GB/s" \
     "显存到主机内存的数据传输带宽（${best_scope}）" "raw/bench/gpu-bandwidth.log"
@@ -994,15 +989,18 @@ disk_queue_depth() {
 
 # fio_job_bw_mbs <fio 的 json> <jobname> <read|write> -> 带宽 MB/s
 #
-# fio 的 bw 字段单位是 KiB/s。除以 1024 得到 MiB/s —— 验收单写的是 MB/s，
-# 两者差 4.8%，**故意不做十进制换算**：换算过去反而会让实测数字虚高，
-# 报出去的数字宁可保守一点，也不要虚高。
+# 优先使用 fio 直接给出的 bw_bytes（byte/s），按十进制 1 MB = 1,000,000 bytes
+# 换算。老 fio 没有 bw_bytes 时，再把 bw 的 KiB/s 乘 1024 后换算。
 fio_job_bw_mbs() {
   local f="${1:-}" job="${2:-}" rw="${3:-read}"
   [[ -s "$f" ]] || return 0
   jq -r --arg j "$job" --arg rw "$rw" \
-     '[.jobs[]? | select(.jobname == $j) | (.[$rw].bw // 0)] | add // empty
-      | select(. > 0) | . / 1024 | (. * 10 | round) / 10' "$f" 2>/dev/null
+     '[.jobs[]? | select(.jobname == $j)
+       | if ((.[$rw].bw_bytes // 0) > 0)
+         then .[$rw].bw_bytes
+         else ((.[$rw].bw // 0) * 1024)
+         end] | add // empty
+      | select(. > 0) | . / 1000000 | (. * 10 | round) / 10' "$f" 2>/dev/null
 }
 
 # bench_disk_one <设备> <read|write> <秒数> -> 打印 MB/s（跑不出来打印空）

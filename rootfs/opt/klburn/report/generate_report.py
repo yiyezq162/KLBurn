@@ -109,6 +109,19 @@ def clean(v):
     return s
 
 
+def fio_bw_mbs(stat):
+    """将带宽读数换算为十进制 MB/s。"""
+    if not isinstance(stat, dict):
+        return 0.0
+    try:
+        bw_bytes = float(stat.get("bw_bytes") or 0)
+        if bw_bytes > 0:
+            return bw_bytes / 1000000.0
+        return float(stat.get("bw") or 0) * 1024.0 / 1000000.0
+    except (TypeError, ValueError):
+        return 0.0
+
+
 # DMI 的状态字段是英文的（`Present, OK` / `Populated, Enabled`），照抄进一份
 # 中文报告里，客户还得自己猜。逗号分隔逐段翻，翻不出来的段原样留着 ——
 # 见过一个词就整格退回英文，比夹着一个英文词更难读。
@@ -1237,6 +1250,23 @@ class Data(object):
     # ---------- GPU ----------
     def gpus(self):
         out = []
+        managed_bdfs = []
+
+        def norm_bdf(value):
+            m = re.search(r"(?:[0-9A-Fa-f]{8}:)?([0-9A-Fa-f]{2}:[0-9A-Fa-f]{2}\.[0-7])",
+                          value or "")
+            return m.group(1).lower() if m else None
+
+        pci_rows = []
+        for line in read_text(self.rawpath("gpu-lspci.txt")).splitlines():
+            if not line.strip():
+                continue
+            parts = line.split(None, 1)
+            bdf = norm_bdf(parts[0])
+            description = parts[1] if len(parts) > 1 else ""
+            description = description.partition(":")[2].strip() or description.strip()
+            pci_rows.append((bdf, description))
+
         smi = read_text(self.rawpath("gpu-smi-full.txt"))
         if smi.strip():
             # nvidia-smi -q 的分卡段落
@@ -1244,6 +1274,8 @@ class Data(object):
             drv = re.search(r"Driver Version\s*:\s*(.+)", smi)
             drv = drv.group(1).strip() if drv else None
             for ch in chunks[1:]:
+                bdf = norm_bdf(ch.splitlines()[0] if ch.splitlines() else "")
+
                 def grab(key, b=ch):
                     m = re.search(r"^\s*%s\s*:\s*(.+)$" % re.escape(key), b, re.M)
                     v = m.group(1).strip() if m else None
@@ -1283,14 +1315,28 @@ class Data(object):
                     ("GSP固件", grab("GSP Firmware Version")),
                     ("InfoROM映像", grab_under("Inforom Version", "Image Version")),
                 ]))
+                managed_bdfs.append(bdf)
+
         if not out:
-            for line in read_text(self.rawpath("gpu-lspci.txt")).splitlines():
-                if line.strip():
-                    out.append(OrderedDict([
-                        ("型号", line.split(":", 2)[-1].strip()),
-                        ("显存", None), ("序列号", None),
-                        ("BIOS版本", None), ("驱动版本", None), ("PCIe链路", None),
-                    ]))
+            for _bdf, model in pci_rows:
+                out.append(OrderedDict([
+                    ("型号", model), ("显存", None), ("序列号", None),
+                    ("BIOS版本", None), ("驱动版本", None), ("PCIe链路", None),
+                ]))
+            return out
+
+        missing = [(bdf, model) for bdf, model in pci_rows if bdf not in managed_bdfs]
+        if missing:
+            for row, bdf in zip(out, managed_bdfs):
+                row["PCI地址"] = bdf
+                row["驱动状态"] = "已由驱动识别"
+            for bdf, model in missing:
+                out.append(OrderedDict([
+                    ("型号", model), ("显存", None), ("序列号", None),
+                    ("BIOS版本", None), ("驱动版本", None), ("PCIe最大代数", None),
+                    ("GSP固件", None), ("InfoROM映像", None),
+                    ("PCI地址", bdf), ("驱动状态", "PCI 可见，驱动未识别"),
+                ]))
         return out
 
     # ---------- 采样曲线 ----------
@@ -1467,9 +1513,9 @@ class Data(object):
                 out.append(OrderedDict([
                     ("测试项", tag),
                     ("目标", job.get("jobname")),
-                    ("读带宽", "%.1f MB/s" % (rd.get("bw", 0) / 1024.0)),
+                    ("读带宽", "%.1f MB/s" % fio_bw_mbs(rd)),
                     ("读IOPS", "%.0f" % rd.get("iops", 0)),
-                    ("写带宽", "%.1f MB/s" % (wr.get("bw", 0) / 1024.0)),
+                    ("写带宽", "%.1f MB/s" % fio_bw_mbs(wr)),
                     ("写IOPS", "%.0f" % wr.get("iops", 0)),
                     ("错误数", job.get("error", 0)),
                 ]))
@@ -1494,7 +1540,7 @@ class Data(object):
                 continue
             dev, rw = m.group(1), m.group(2)
             for job in (read_json(os.path.join(d, fn), {}).get("jobs") or []):
-                bw = (job.get(rw) or {}).get("bw")
+                bw = fio_bw_mbs(job.get(rw) or {})
                 if not bw:
                     continue
                 row = rows.setdefault(dev, OrderedDict([
@@ -1512,7 +1558,7 @@ class Data(object):
                     jobs_of[dev].append(jn)
                 row["测试口径"] = " / ".join(jobs_of[dev])
                 row["顺序读带宽" if rw == "read" else "顺序写带宽"] = \
-                    "%.1f MB/s" % (bw / 1024.0)
+                    "%.1f MB/s" % bw
         out = list(rows.values())
         # 现场没确认破坏性写入时根本没跑写带宽，整列都是空的。
         # 留一列破折号等于在报告上写"我们没测"，而那是客户自己选的
@@ -1964,9 +2010,9 @@ def build_html(data):
         head_bits.append("测试模式 %s" % E(profile_text(meta.get("profile"))))
     head_bits.append("实际耗时 %s" % E(fmt_dur(meta.get("elapsed_secs"))))
     A('<div class="sub">%s</div>' % " ｜ ".join(head_bits))
-    A('<div class="sub">测试工具 %s v%s（%s，构建于 %s）</div>'
-      % (E(meta.get("product_name") or "KLBurn"), E(meta.get("klburn_version")),
-         E(meta.get("base_os")), E(meta.get("build_date"))))
+    # 客户报告只保留可追溯的发布版本；产品内部名、基础系统和构建时间留在
+    # meta.json 与内部工程报告，不进入交付正文。
+    A('<div class="sub">报告版本 <b>%s</b></div>' % E(meta.get("klburn_version")))
     A("</header>")
 
     # ---------------- 总结论 ----------------
@@ -2562,24 +2608,31 @@ def build_html(data):
     if gs:
         A(SUB("GPU 温度 / 功耗曲线"))
         temp_series, power_series = [], []
-        peak_t, peak_p = [], []
+        card_means, peak_candidates, peak_p = [], [], []
         for idx in sorted(gs.keys(), key=lambda x: int(x) if str(x).isdigit() else 0):
             label = "GPU%s %s" % (idx, gs[idx]["name"])
             temp_series.append((label, gs[idx]["temp"]))
             power_series.append((label, gs[idx]["power"]))
             if gs[idx]["temp"]:
-                peak_t.append("GPU%s %d°C" % (idx, max(gs[idx]["temp"])))
+                card_means.append(sum(gs[idx]["temp"]) / len(gs[idx]["temp"]))
+                peak_candidates.append((max(gs[idx]["temp"]), idx))
             if gs[idx]["power"]:
                 peak_p.append("GPU%s %dW" % (idx, max(gs[idx]["power"])))
-        if peak_t:
-            A('<p class="sub">逐卡温度峰值：%s（告警线 %s°C，判故障线 %s°C%s）</p>'
-              % (E("、".join(peak_t)), GPU_TEMP_WARN, GPU_TEMP_FAIL, gpu_thr_src))
+        if card_means and peak_candidates:
+            top_temp, top_idx = max(peak_candidates,
+                                    key=lambda x: (x[0], -int(x[1])
+                                                   if str(x[1]).isdigit() else 0))
+            all_card_avg = sum(card_means) / len(card_means)
+            A('<p class="sub">全部 %d 张卡全程平均温度 %.1f°C；最高温为 GPU%s %d°C'
+              '（告警线 %s°C，判故障线 %s°C%s）</p>'
+              % (len(card_means), all_card_avg, E(top_idx), top_temp,
+                 GPU_TEMP_WARN, GPU_TEMP_FAIL, gpu_thr_src))
         A(svg_line_chart(temp_series, y_label="°C", y_suffix="°C"))
         if peak_p:
             A('<p class="sub">逐卡功耗峰值：%s</p>' % E("、".join(peak_p)))
         A(svg_line_chart(power_series, y_label="W", y_suffix="W"))
-        A('<p class="sub">采样间隔 5 秒，数据取自显卡驱动的实时读数，'
-          "覆盖 GPU 满载压测全程。</p>")
+        A('<p class="sub">采样间隔 5 秒，数据取自显卡驱动的实时读数。'
+          "图中只显示成功取得的采样点；采样失败处不沿用旧值补齐。</p>")
 
     # ---------------- fio ----------------
     fio = data.fio_results()
@@ -2684,7 +2737,7 @@ def build_html(data):
 
     # ================================================================
     A(SEC("原始日志"))
-    A('<p class="sub">以下为采集到的原始输出，完整文件保存在报告目录的 raw/ 子目录下。</p>')
+    A('<p class="sub">以下为支撑本报告结论的原始采集输出。</p>')
 
     # 这里不嵌 smartctl 的原始输出（raw/smart-pre|post/ 里完整保留）：
     # 一块盘几百行属性，绝大部分和判定无关，嵌进来只会把报告撑成一堆看不懂的数字。

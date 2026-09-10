@@ -574,6 +574,47 @@ verify_aer() {
 }
 
 # ---------------------------------------------------------------- IPMI SEL
+# 只输出测后新增的 record ID。非记录行不会参与差分。
+sel_new_records() {
+  local pre="${1:-}" post="${2:-}"
+  [[ -f "$post" ]] || return 0
+  awk -F'|' '
+    function trim(s) { gsub(/^[[:space:]]+|[[:space:]]+$/, "", s); return s }
+    FILENAME == ARGV[1] {
+      id = trim($1)
+      if (id ~ /^[[:xdigit:]]+$/) seen[tolower(id)] = 1
+      next
+    }
+    {
+      id = trim($1)
+      if (id ~ /^[[:xdigit:]]+$/ && !seen[tolower(id)]) print
+    }' "$pre" "$post" 2>/dev/null
+}
+
+# Asserted/Deasserted 是事件方向，不是严重级；只数明确的严重故障描述。
+sel_critical_count() {
+  local f="${1:-}"
+  [[ -f "$f" ]] || { printf '0'; return; }
+  awk '
+    {
+      line = tolower($0)
+      gsub(/non[- ]critical/, "", line)
+      if (line ~ /critical|non-recoverable|failure|uncorrectable|predictive/) n++
+    }
+    END { print n + 0 }
+  ' "$f" 2>/dev/null
+}
+
+# collect_ipmi 的快照早于性能基准；正式压测开始前重取，避免扩大差分窗口。
+refresh_sel_baseline() {
+  [[ "${IPMI_OK:-0}" == "1" ]] || return 0
+  info "Refreshing BMC event-log baseline before burn-in ..."
+  if ! capture -t 60 "ipmi-sel-pre.txt" ipmitool sel list; then
+    rm -f "$RAW_DIR/ipmi-sel-pre.txt"
+    return 1
+  fi
+}
+
 verify_sel() {
   if [[ "${IPMI_OK:-0}" != "1" ]]; then
     result_add "verify_sel" "BMC 事件日志复查" "$ST_SKIP" "无 BMC，跳过" ""
@@ -581,30 +622,34 @@ verify_sel() {
   fi
 
   info "Checking BMC system event log ..."
-  capture -t 60 "ipmi-sel-post.txt" ipmitool sel list
+  if ! capture -t 60 "ipmi-sel-post.txt" ipmitool sel list; then
+    result_add "verify_sel" "BMC 事件日志复查" "$ST_SKIP" \
+      "未能读取测后的 BMC 事件日志，本项无法复查。此项不影响整机结论。" ""
+    return
+  fi
+  if [[ ! -f "$RAW_DIR/ipmi-sel-pre.txt" ]]; then
+    result_add "verify_sel" "BMC 事件日志复查" "$ST_SKIP" \
+      "缺少压测开始前的 BMC 事件日志基线，本项无法复查。此项不影响整机结论。" ""
+    return
+  fi
 
-  local pre_n post_n new_n
-  pre_n="$(count_lines "$RAW_DIR/ipmi-sel-pre.txt")"
-  post_n="$(count_lines "$RAW_DIR/ipmi-sel-post.txt")"
-  new_n=$(( post_n - pre_n ))
-  (( new_n < 0 )) && new_n=0
+  sel_new_records "$RAW_DIR/ipmi-sel-pre.txt" "$RAW_DIR/ipmi-sel-post.txt" \
+    > "$RAW_DIR/ipmi-sel-new.txt"
+  local new_n
+  new_n="$(count_lines "$RAW_DIR/ipmi-sel-new.txt")"
 
   if (( new_n > 0 )); then
-    tail -n "$new_n" "$RAW_DIR/ipmi-sel-post.txt" > "$RAW_DIR/ipmi-sel-new.txt" 2>/dev/null || true
     # 只有真正的告警才判 FAIL，普通的开关机/日志清空事件不算
     local crit
-    # 这里带 -E 的模式匹配，用不上 count_lines，但道理完全一样：
-    # grep -c 在匹配数为 0 时自己已经打印了 "0"，只是返回码是 1。
-    # 绝不能再 `|| echo 0` 补一个，那会得到两行的 "0\n0"，算术直接报错。
-    crit="$(grep -icE 'Critical|Non-recoverable|Failure|Uncorrectable|Predictive|Asserted' \
-            "$RAW_DIR/ipmi-sel-new.txt" 2>/dev/null)"
-    [[ "$crit" =~ ^[0-9]+$ ]] || crit=0
+    crit="$(sel_critical_count "$RAW_DIR/ipmi-sel-new.txt")"
     if (( crit > 0 )); then
       result_add "verify_sel" "BMC 事件日志复查" "$ST_FAIL" \
-        "压测期间 BMC 新增 ${new_n} 条事件，其中 ${crit} 条为告警级" "raw/ipmi-sel-new.txt"
+        "压测期间 BMC 新增 ${new_n} 条事件，其中 ${crit} 条包含明确严重故障描述" \
+        "raw/ipmi-sel-new.txt"
     else
       result_add "verify_sel" "BMC 事件日志复查" "$ST_WARN" \
-        "压测期间 BMC 新增 ${new_n} 条事件（非告警级）" "raw/ipmi-sel-new.txt"
+        "压测期间 BMC 新增 ${new_n} 条事件，记录中未包含明确严重故障描述；\
+建议结合 BMC 厂商事件码复核" "raw/ipmi-sel-new.txt"
     fi
   else
     result_add "verify_sel" "BMC 事件日志复查" "$ST_PASS" "压测期间无新增 BMC 事件" "raw/ipmi-sel-post.txt"
