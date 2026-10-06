@@ -10,7 +10,33 @@
 
 ## 一、环境
 
-源码在 Windows 上编辑，**在 WSL（Ubuntu-24.04）里构建**，产物是一个能自启动的 ISO。
+源码可在 **macOS、Windows 或 Linux** 编辑，**构建与完整测试在 x86_64 Ubuntu 24.04
+上执行**，产物是自启动的 amd64 ISO。Linux 可以是物理机、局域网虚拟机或 WSL；
+WSL 是 Windows 的一种选择，不是构建脚本的强制前提。
+
+### Mac mini M4 开发
+
+Mac mini M4（arm64）可直接 clone 仓库、编辑和提交代码、查看生成的报告与截图。
+现有构建会在 amd64 rootfs 内执行 chroot 命令，不能直接拿 ARM Ubuntu 替代构建机。
+Mac 通过已配置的 SSH 连接到 **x86_64 Ubuntu** 后，在 Linux 源码目录执行本文命令。
+macOS 自带 Bash/BSD 工具不作为全套回归环境。仓库未配置 CI，也不预设远端主机地址。
+
+迁移或首次 clone 时注意：
+
+- 保留完整 Git 历史和 tags，用于按报告版本回查；从 GitHub 下载 ZIP 不含这些。
+- 文本使用 UTF-8 无 BOM、LF（由 `.gitattributes` 固定），入口脚本的执行权限由 Git 保存。
+- `vendor/` 不进版本库，驱动、基准程序和品牌 logo 要单独迁移到 Linux checkout。
+  只 clone 源码可能仍能构建，但可选工具缺失会减少盘内功能。清单见
+  [vendor/README.md](../vendor/README.md)。
+- `test_out/` 是不入库的客户真机样本；依赖它的回归需在测试机另行恢复。
+  样本缺失导致跳过时，不能当成已覆盖该组用例。不要把客户原始报告推到 GitHub。
+- `out/` 的旧 ISO、日志和截图另行保存，clone 不会下载它们。
+- 虚拟机跑 QEMU 要开放嵌套虚拟化，让 `/dev/kvm` 可用；脚本支持纯模拟，但会慢很多。
+  构建与磁盘测试需要 root、loop 设备及挂载权限。
+- 同一个 `KLBURN_WORK` 的任务串行运行，缓存保留在 Linux 本地文件系统。
+  full / mem 可以依次共用；长任务使用持久会话或后台任务并保存日志。
+
+以下安装与测试命令均在 Linux 上执行。
 
 ```bash
 # 构建依赖（只需一次）
@@ -30,15 +56,17 @@ sudo apt-get install -y git meson ninja-build g++ libboost-dev libeigen3-dev \
                         libzstd-dev zlib1g-dev
 ```
 
-### ⚠️ 构建目录绝不能放在 `/mnt/c` 下
+### 构建工作区放 Linux 本地文件系统
 
-工作区默认 **`~/klburn-build`**，也就是 WSL 的原生文件系统。
+工作区默认 **`~/klburn-build`**，使用构建机本地 Linux 文件系统（例如 ext4），
+不要放 Mac/NAS 网络共享或宿主机共享目录。
 
-`/mnt/c` 走 9p 协议，解 squashfs 要写几十万个小文件，性能会差到不可用
+Windows 的 WSL 中，`/mnt/c` 走 9p 协议，解 squashfs 要写几十万个小文件，性能会差到不可用
 （几分钟的活干几小时）。**构建脚本里有硬性检查**，检测到 `/mnt/*` 直接拒绝执行。
 换位置用 `export KLBURN_WORK=$HOME/somewhere-else`。
 
-源码本身放 `/mnt/c` 下没问题（只读几十个小文件），产物 ISO 最后会自动拷回 `out/`。
+源码推荐 clone 到构建机本地目录；WSL 下源码放 `/mnt/c` 也可以。
+产物最终复制到**执行构建的那份 checkout** 的 `out/`，不会自动传回 Mac 或上传发布页。
 
 需要约 **12 GB** 磁盘（源 ISO 缓存 3.2G + 解包 3.2G + 根文件系统 2.5G +
 临时 1.5G + 输出 ~1.5G）。
@@ -48,8 +76,11 @@ sudo apt-get install -y git meson ninja-build g++ libboost-dev libeigen3-dev \
 ## 二、构建
 
 ```bash
-sudo ./build/build-iso.sh
+sudo KLBURN_WORK="$HOME/klburn-build" ./build/build-iso.sh
 ```
+
+建议每次显式指定 `KLBURN_WORK`，避免 sudo/root 的家目录变化导致换工作区。
+上面的 `$HOME` 由普通用户 shell 在调用 sudo 前展开；root 登录时填写实际绝对路径。
 
 第一次会自动从清华镜像下载 `ubuntu-24.04.4-live-server-amd64.iso`（约 3.2GB，
 支持断点续传）。**每次构建都会强制校验源 ISO 的 sha256**（官方值钉在 `config.sh` 里，
@@ -214,6 +245,6 @@ python3 rootfs/opt/klburn/report/generate_internal.py --run-dir /path/to/2026073
 | `WORK_DIR=... 位于 Windows 挂载盘上` | 构建目录被设到 `/mnt/c` 了。`export KLBURN_WORK=$HOME/klburn-build` 后重跑 |
 | `合并后的根文件系统里没有 /lib/modules` | 层裁剪配错了，把 `installer.generic` 层也排除掉了。检查 `config.sh` 的 `LAYER_EXCLUDE_PATTERNS` |
 | 源 ISO 校验失败 | 换了 `UBUNTU_POINT` 却没同时换 `SRC_ISO_SHA256`；或者下载真坏了 |
-| apt 装包失败 | WSL 没网，或镜像挂了。换 `config.sh` 里的 `APT_MIRROR` |
+| apt 装包失败 | Linux 构建机没网，或镜像挂了。换 `config.sh` 里的 `APT_MIRROR` |
 | 构建中断后残留挂载点 | 脚本有 EXIT trap 会自动清理。真残留了：`sudo umount -l ~/klburn-build/rootfs/{dev/pts,dev,proc,sys,run}` |
 | `WARN: ... 缺少依赖库` | `vendor/bench/` 里某个程序在盘里缺 `.so`。见 [`toolbox.md` §六](toolbox.md#六怎么确认一张盘里到底带了什么) |

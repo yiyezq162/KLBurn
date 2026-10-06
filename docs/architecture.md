@@ -1887,7 +1887,7 @@ check_fans() {
 
 ## 十二、测试地图
 
-全部不需要真实服务器硬件，在 WSL 里随时可跑：
+全部不需要真实服务器硬件，在 x86_64 Ubuntu 的 Bash 里运行（Windows 可用 WSL）：
 
 ```bash
 ./tests/run-all.sh

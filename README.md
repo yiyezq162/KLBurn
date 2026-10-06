@@ -175,17 +175,25 @@ fio 的目标盘要过五道排除。Ventoy 场景下 udev 被禁、`lsblk` 完�
 
 ---
 
-## 三分钟出一张盘
+## 开发与构建
+
+源码可在 macOS、Windows 或 Linux 编辑；现有 amd64 ISO 的构建与完整测试在
+**x86_64 Ubuntu 24.04** 执行。Mac mini M4 可通过 SSH 使用局域网 Linux 构建机，
+Windows 可使用 WSL。迁移、依赖与发布顺序见 [构建文档](docs/building.md)。
+仓库尚未配置 CI。
+
+### 构建 ISO（以下在 Linux 执行）
 
 ```bash
 sudo apt-get install -y xorriso squashfs-tools rsync curl ca-certificates \
                         gdisk fdisk file zstd python3 jq dosfstools mtools
-sudo ./build/build-iso.sh          # 首次会自动下载约 3.2GB 的 Ubuntu 源 ISO
+sudo KLBURN_WORK="$HOME/klburn-build" ./build/build-iso.sh  # 首次下载约 3.2GB 源 ISO
 # 产物在 out/，用 Rufus 写盘（DD 模式），再建一个卷标 KLBURN 的 exFAT 分区
 ```
 
-⚠️ 构建目录默认 `~/klburn-build`，**绝不能放在 `/mnt/c` 下**（9p 上解 squashfs
-慢到不可用，脚本里有硬性检查）。完整说明见 [`docs/building.md`](docs/building.md)。
+构建目录默认 `~/klburn-build`，应在 Linux 本地文件系统，避免网络或宿主机共享目录。
+WSL 下 `/mnt/c` 等路径会被脚本拒绝。产物在构建机 checkout 的 `out/`。
+完整说明见 [`docs/building.md`](docs/building.md)。
 
 ---
 
@@ -220,7 +228,7 @@ KLBurn/
 │       └── report/
 │           ├── generate_report.py    ★ 交付报告
 │           └── generate_internal.py  ★ 内部工程报告
-├── tools/                       仓库侧工具，**不进盘**（在 WSL 里跑）
+├── tools/                       仓库侧 Python 工具，**不进盘**
 │   ├── klburn-summary.py        一批机器一张 CSV（非全量的写成 PASS(CPU) 这种形状）
 │   └── klburn-diff.py           两份 run-dir 逐项对比（只报差异不判合格）
 ├── tests/                       9 个回归测试 + shellcheck，都不需要真实硬件

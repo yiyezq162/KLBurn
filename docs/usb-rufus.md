@@ -127,7 +127,7 @@ exit
 所以顺序是：
 
 1. 先把 exFAT 分区里的 `out\` 文件夹整个拷到电脑上留档
-2. 在 WSL 里重新构建：
+2. 在 x86_64 Ubuntu 构建环境里重新构建（Windows 可用 WSL）：
    ```bash
    sudo ./build/build-iso.sh
    ```

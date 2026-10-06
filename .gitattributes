@@ -1,4 +1,4 @@
-# 这个项目的源码在 Windows 上编辑、在 WSL 里构建、最终跑在 Linux 服务器上。
+# 源码可在 macOS、Windows 或 Linux 编辑，在 x86_64 Ubuntu 构建，最终跑在 Linux 服务器上。
 #
 # 本机的全局配置是 core.autocrlf=true，也就是说 git 检出时会把文本文件转成 CRLF。
 # 而带 \r 的 shell 脚本在 Linux 上是直接起不来的：
