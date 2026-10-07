@@ -1,5 +1,14 @@
 # KLBurn dedicated NAS Runner and build VM
 
+Verified source `95533ae`, [run37565544801](https://github.com/yiyezq162/KLBurn/actions/runs/37565544801):
+actual `nas-ci-klburn`, **2029 passed / 0 failed**, finalized source log present.
+Hardware replay893passed and report checks363passed; both Mac originals and
+all223NAS private input files remained hash-identical and job copies were cleaned.
+This includes45sensor samples, not45distinct physical machines or fresh hardware
+acceptance. ISO/root/firmware/QEMU/Release gates below remain NOT_RUN.
+
+## Retained migration failures
+
 Source SHA `a2381c6`, [run37565057243](https://github.com/yiyezq162/KLBurn/actions/runs/37565057243):
 actual `nas-ci-klburn`, **1937 passed / 2 failed**, finalized log artifact present.
 Both failures are mandatory real-hardware coverage checks requiring private,
