@@ -247,6 +247,14 @@ sudo KLBURN_WORK=/srv/klburn/work ./build/release.sh --mutate
 安装包，缺失或字节变化会停止，不能把工具缺失后的 SKIP 当作完整交付。
 两版包版本清单保存为 `packages.tsv`，离线组件哈希也写进发布收据。
 
+当前 NAS 尚未升级内存。1.10.6 在 6GiB 构建 VM 崩溃后，从已经通过的源码/变异
+阶段恢复；每个构建、固件与 QEMU 阶段仍逐项通过才打 tag。该次构建 VM 临时
+使用 3GiB live balloon + 3GiB guest swap，构建 cgroup 上限 1.8GiB、QEMU 宿主
+cgroup 上限 2.4GiB，QEMU 内仍是 4GiB。这是本次受限环境的验收条件，不能作为
+性能基准。`out/release-1.10.6/manifest.json` 保留实际资源，失败日志另外留存。
+`build/release.sh` 自身不设置 VM balloon/swap/cgroup；后台启动者须按实际主机
+资源提供限制，不能仅凭 VM 配置的 6GiB 推断有足够物理内存。
+
 > **为什么"先 bump 再构建"要单独强调**：0.3.0 栽过一次——ISO 构建完之后又改了
 > 代码却没动版本号，于是现场那根盘自称 0.3.0、跑的却是修复前的代码，
 > 对着仓库怎么看都对不上。

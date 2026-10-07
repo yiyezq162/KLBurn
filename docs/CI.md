@@ -1,11 +1,30 @@
 # KLBurn dedicated NAS Runner and build VM
 
+## Current ISO delivery evidence (2026-10-07)
+
+Version1.10.6, clean source/tag `a8ffc13`: full and mem artifacts copied to
+`/Users/li/Projects/KLBurn/out/` and both SHA256 values verified after transfer.
+Source2043/root-disk11/mutation135 passed; full firmware51/smoke10/disk-stress32,
+mem firmware54/smoke22 passed. Exact artifact names, hashes and resource limits
+are in `out/release-1.10.6/manifest.json`; CHANGELOG records the same source.
+This is software/ISO acceptance, not fresh physical hardware acceptance.
+
+The6GiB VM crashed while starting a build after mutation passed; cause UNKNOWN.
+Recovery used a temporary3GiB live balloon,3GiB guest swap and sequential stage
+cgroups (build1.8GiB maximum; QEMU2.4GiB maximum plus swap), preserving4GiB of
+memory visible inside QEMU. Logs retain earlier OOM/time-window failures.
+Persistent6vCPU/6GiB configuration and other VMs were unchanged.
+No installed RAM upgrade is assumed. The VM is shut down after delivery.
+
+## Earlier source Runner onboarding evidence
+
 Verified source `95533ae`, [run37565544801](https://github.com/yiyezq162/KLBurn/actions/runs/37565544801):
 actual `nas-ci-klburn`, **2029 passed / 0 failed**, finalized source log present.
 Hardware replay893passed and report checks363passed; both Mac originals and
 all223NAS private input files remained hash-identical and job copies were cleaned.
 This includes45sensor samples, not45distinct physical machines or fresh hardware
-acceptance. ISO/root/firmware/QEMU/Release gates below remain NOT_RUN.
+acceptance. ISO/root/firmware/QEMU gates were NOT_RUN during this onboarding;
+current ISO evidence is recorded above.
 
 ## Retained migration failures
 
