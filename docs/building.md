@@ -19,7 +19,7 @@ WSL 是 Windows 的一种选择，不是构建脚本的强制前提。
 Mac mini M4（arm64）可直接 clone 仓库、编辑和提交代码、查看生成的报告与截图。
 现有构建会在 amd64 rootfs 内执行 chroot 命令，不能直接拿 ARM Ubuntu 替代构建机。
 Mac 通过已配置的 SSH 连接到 **x86_64 Ubuntu** 后，在 Linux 源码目录执行本文命令。
-macOS 自带 Bash/BSD 工具不作为全套回归环境。仓库未配置 CI，也不预设远端主机地址。
+macOS 自带 Bash/BSD 工具不作为全套回归环境。已配置专用 NAS 源码检查 Runner 与 Linux 构建 VM，真实入口和尚未接通的 ISO/Release 部分见 [CI 说明](CI.md)，不能把源码检查当成整套发布验收。
 
 迁移或首次 clone 时注意：
 

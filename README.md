@@ -24,6 +24,7 @@
 | **看懂跑出来的报告** | [`docs/reports.md`](docs/reports.md) —— 产出哪些文件、哪份交付、六个范围各长什么样 |
 | **做一根 U 盘** | [`docs/usb-rufus.md`](docs/usb-rufus.md) —— Rufus 写盘 + 建 exFAT 分区 |
 | **出盘 / 发版** | [`docs/building.md`](docs/building.md) —— 构建、换抬头、发布顺序 |
+| **用 NAS Runner / 构建 VM** | [`docs/CI.md`](docs/CI.md) —— KLBurn 专用 Runner、源码检查与 ISO 发布边界；不共用其他项目 Runner |
 | **想知道盘里有什么工具** | [`docs/toolbox.md`](docs/toolbox.md) —— 每个工具管什么、缺了会怎样 |
 | **改代码** | [`docs/architecture.md`](docs/architecture.md) —— 模块地图、判定总表、**改代码前必读的不变量清单** |
 | **写报告文案** | [`docs/report-policy.md`](docs/report-policy.md) —— 哪些东西绝不能给客户看 |

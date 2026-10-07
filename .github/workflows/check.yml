@@ -1,0 +1,41 @@
+name: Source checks
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+permissions:
+  contents: read
+concurrency:
+  group: klburn-source-${{ github.ref }}
+  cancel-in-progress: false
+jobs:
+  source:
+    runs-on: ${{ (github.event_name == 'pull_request' || vars.CI_RUNNER == 'github') && 'ubuntu-24.04' || fromJSON('["self-hosted", "Linux", "X64", "nas-klburn"]') }}
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          persist-credentials: false
+          fetch-depth: 0
+      - name: Require real lint tooling
+        run: |
+          command -v shellcheck || { sudo apt-get update -qq && sudo apt-get install -y shellcheck; }
+          shellcheck --version
+          test "$(uname -m)" = x86_64
+          test "$(id -u)" != 0
+      - name: Run non-root source regression
+        run: |
+          mkdir -p ci-reports
+          set -o pipefail
+          ./tests/run-all.sh 2>&1 | tee ci-reports/source-checks.log
+      - name: Record explicit release gaps
+        if: always()
+        run: |
+          printf '%s\n' '### KLBurn source checks — NOT a release gate' 'Runner: repository-specific nas-ci-klburn. Privileged work belongs in KLBurn-BuildVM, not this Docker container.' 'Root disk-exclusion, full/mem ISO build, firmware audit, real ISO QEMU/disk-stress, offline vendor parity and physical hardware acceptance: NOT_RUN.' 'Do not publish an ISO/tag based only on this workflow.' >> "$GITHUB_STEP_SUMMARY"
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
+        if: always()
+        with:
+          name: klburn-source-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ci-reports/
+          if-no-files-found: error
