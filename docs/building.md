@@ -255,6 +255,20 @@ cgroup 上限 2.4GiB，QEMU 内仍是 4GiB。这是本次受限环境的验收�
 `build/release.sh` 自身不设置 VM balloon/swap/cgroup；后台启动者须按实际主机
 资源提供限制，不能仅凭 VM 配置的 6GiB 推断有足够物理内存。
 
+### NAS 空间与冷数据
+
+`/volume1` 空间紧张时，优先清理本项目以后不再使用的一次性构建/测试组件和重复副本。
+仍需保留但不常用的数据允许迁到 `/volume2`，当前冷归档入口为
+`/volume2/services/klburn-buildvm/archive/2026-10-07/`；迁移前后核对 SHA256。
+当前源码、vendor、源 ISO 缓存和正式发布产物保留在活跃工作区；客户原始报告不能
+按临时测试输出删除。模拟 U 盘的报告先只读提取并逐文件校验，日志/截图留存后
+才删除一次性 `usb.img`/`spare*.img`。
+
+本次删除 32 个生成文件/重复副本，约 25.4GiB 已分配空间；保留 714 个报告/证据文件。
+专用 VM 的 vda 启用 `discard=unmap` 后对 guest 根文件系统运行 fstrim，NAS 才实际
+回收 qcow2 空洞：`/volume1` 可用空间约 18GiB → 56GiB。除该磁盘属性外，VM XML
+读回与原件字节一致。XML 回退材料在 `/volume2/services/klburn-buildvm/recovery/discard-20261007/`。
+
 > **为什么"先 bump 再构建"要单独强调**：0.3.0 栽过一次——ISO 构建完之后又改了
 > 代码却没动版本号，于是现场那根盘自称 0.3.0、跑的却是修复前的代码，
 > 对着仓库怎么看都对不上。

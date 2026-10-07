@@ -9,6 +9,15 @@ mem firmware54/smoke22 passed. Exact artifact names, hashes and resource limits
 are in `out/release-1.10.6/manifest.json`; CHANGELOG records the same source.
 This is software/ISO acceptance, not fresh physical hardware acceptance.
 
+Manual prerelease publication completed:
+[v1.10.6](https://github.com/yiyezq162/KLBurn/releases/tag/v1.10.6), both ISO
+assets and their SHA256 files plus the manifest uploaded. Server asset digests
+match the locally verified images. Main-source CI at `0523969`,
+[run37658758865](https://github.com/yiyezq162/KLBurn/actions/runs/37658758865),
+completed on `nas-ci-klburn`:2035passed/0failed, finalized evidence uploaded.
+The VM's private sample set yields2043source assertions; retain each actual
+denominator. CI still does not automatically build or publish ISO artifacts.
+
 The6GiB VM crashed while starting a build after mutation passed; cause UNKNOWN.
 Recovery used a temporary3GiB live balloon,3GiB guest swap and sequential stage
 cgroups (build1.8GiB maximum; QEMU2.4GiB maximum plus swap), preserving4GiB of
