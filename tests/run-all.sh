@@ -32,7 +32,12 @@ for s in "${SUITES[@]}"; do
   printf '\n\033[1;36m===== %s =====\033[0m\n' "$s"
   out="$(./tests/"$s".sh 2>&1)"
   rc=$?
-  printf '%s\n' "$out" | tail -3
+  if (( rc != 0 )); then
+    # 失败时保留具体断言，不能只留下套件总数而丢失故障依据。
+    printf '%s\n' "$out"
+  else
+    printf '%s\n' "$out" | tail -3
+  fi
   # 每个脚本最后一行都是"通过 N 项，失败 M 项"
   line="$(printf '%s\n' "$out" | grep -E '^通过 [0-9]+ 项' | tail -1)"
   p="$(printf '%s' "$line" | grep -oE '通过 [0-9]+' | grep -oE '[0-9]+' || true)"

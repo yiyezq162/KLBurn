@@ -70,6 +70,7 @@ Windows 的 WSL 中，`/mnt/c` 走 9p 协议，解 squashfs 要写几十万个�
 
 源码推荐 clone 到构建机本地目录；WSL 下源码放 `/mnt/c` 也可以。
 产物最终复制到**执行构建的那份 checkout** 的 `out/`，不会自动传回 Mac 或上传发布页。
+交付到 Mac 的统一位置为 `/Users/li/Projects/KLBurn/out/`；下载/复制后须复核 `.sha256`。
 
 需要约 **12 GB** 磁盘（源 ISO 缓存 3.2G + 解包 3.2G + 根文件系统 2.5G +
 临时 1.5G + 输出 ~1.5G）。
@@ -108,6 +109,12 @@ sudo ./build/build-iso.sh --skip-download    # 源 ISO 不在就报错，不去�
 ### 两种盘（`--edition`）
 
 同一份源码出两种盘，**构建时钉死**，现场不会再问任何人：
+
+每次发布成对交付 full 和 mem，两张盘的版本号、源码 commit、tag 必须一致。
+full 菜单中的「内存专项」继续保留，它不等于内存专用 ISO，也不需要第三张盘。
+1.10.6 起 mem 使用独立包清单，不装 NVIDIA/CUDA、性能基准或存储/BMC 检测工具，
+只迁移品牌 logo。显示/有线网卡/USB 启动驱动、固件与 CPU 微码继续保留。
+同工作区切换 edition 会重新解包 rootfs；缓存中的源 ISO 不重下载。
 
 | | `full`（默认） | `mem` |
 |---|---|---|
@@ -218,6 +225,26 @@ bump 版本 → 跑测试 → 提交 → 构建 → 验证 → 打 tag
 | 8 | 在 QEMU 里真开机跑一遍 | `sudo ./tests/e2e-qemu.sh --stage smoke` |
 | 9 | 发货前那一遍 | `--stage full`、`--stage full --disk-stress` |
 | 10 | 打 tag | `git tag -a v1.9.5 -m "..."` |
+
+### 成对构建与验收入口
+
+完成源码测试并提交后，在 Ubuntu 的干净 checkout 执行：
+
+```bash
+sudo KLBURN_WORK=/srv/klburn/work ./build/release.sh --mutate
+```
+
+入口再次运行源码检查（必须有 shellcheck），判定/守卫改动使用 `--mutate`。
+它拒绝已有版本 tag、脏源码或构建中源码变动，依次构建 full/mem、核对盘内
+版本/commit/edition、固件/动态依赖、两版 QEMU 冒烟及 full 完整真写盘；
+两版通过且 mem 小于 full 后才生成 annotated tag。它不推送 GitHub 或上传 ISO。
+`out/release-<版本>/` 保存各阶段日志、盘内配置和 `manifest.json`（含精确文件名、
+大小、SHA256、commit、QEMU 内存及真机验收 NOT_RUN）。
+资源有限时可传 `--memory-mb 2048`；默认仍为 4096，收据区分这两种 QEMU 环境。
+构建并行度可用 `KLBURN_BUILD_JOBS=2` 限制；压缩缓存上限为 256MiB。
+正式发布要求 `vendor/full-vendor.sha256` 覆盖并校验整机版既有工具与唯一 NVIDIA
+安装包，缺失或字节变化会停止，不能把工具缺失后的 SKIP 当作完整交付。
+两版包版本清单保存为 `packages.tsv`，离线组件哈希也写进发布收据。
 
 > **为什么"先 bump 再构建"要单独强调**：0.3.0 栽过一次——ISO 构建完之后又改了
 > 代码却没动版本号，于是现场那根盘自称 0.3.0、跑的却是修复前的代码，

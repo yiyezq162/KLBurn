@@ -100,6 +100,7 @@ usage() {
   --workdir DIR        指定工作目录（默认 mktemp）。排查时务必用它 ——
                        /tmp 在 WSL 里跨会话不保留，--keep 也留不住
   --spare-disks N      挂几块空白盘当"本机硬盘"（默认 2）
+  --memory-mb N        QEMU 内存（默认 4096；最小 2048）
 EOF
 }
 
@@ -116,10 +117,14 @@ while (( $# )); do
     --edition)     EDITION="$2"; shift 2 ;;
     --workdir)     WORKDIR="$2"; shift 2 ;;
     --spare-disks) SPARE_N="$2"; shift 2 ;;
+    --memory-mb)   MEM_MB="$2"; shift 2 ;;
     -h|--help)     usage; exit 0 ;;
     *) printf '未知参数: %s\n' "$1"; usage; exit 2 ;;
   esac
 done
+
+[[ "$MEM_MB" =~ ^[0-9]+$ ]] && (( MEM_MB >= 2048 )) \
+  || { printf 'QEMU 内存必须为不小于 2048 的整数 MB\n' >&2; exit 2; }
 
 PASS=0; FAIL=0
 ok()   { printf '  \033[32mOK\033[0m   %s\n' "$1"; PASS=$((PASS+1)); }

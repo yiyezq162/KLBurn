@@ -244,15 +244,22 @@ KLBURN_MEM_BURN_SECONDS=600 sudo -E ./build/build-iso.sh --edition mem
 
 ---
 
-## 两种盘的差别只在三处
+## 两种盘的构建差别
 
-同一份源码、同一套 lib、同一套判定语义。构建时钉死的差别只有：
+同一份源码、共用 lib 和判定语义，每次成对发布相同版本与 commit：
 
 | | 整机盘 | 内存盘 |
 |---|---|---|
 | 开机拉起 | `factory-test.sh` | `memtest.sh` |
 | 报告标题 | 服务器出厂老化测试报告 | 内存专用测试报告 |
 | ISO 文件名 | `KLBurn-*.iso` | `KLBurn-MEM-*.iso` |
+| 工具包 | 整机采集、诊断、压测和性能基准 | 内存/SPD、压测/ECC、报告/落盘和网络校时 |
+| NVIDIA/CUDA、GPU/阵列卡/基准程序 | 按 vendor 包装入 | 不安装，也不复制进暂存层 |
+
+1.10.6 起内存盘使用独立精简包清单；相近大小并不是内存检测的需要，
+旧版只是复用了整机 rootfs。两种 edition 切换时重新解包 rootfs，保留源 ISO 缓存，
+避免跨版残留。CPU 微码、显示/有线网卡/USB/启动存储的内核模块与固件仍保留，
+不能为了体积让屏幕、校时或报告 U 盘失效。无网络时保留 RTC，内存盘不访问 BMC 校时。
 
 第一处由 `chroot-setup.sh` 改 `klburn.service` 的 `ExecStart` 实现，
 **改完当场核对** —— `sed` 没匹配上是静默的，做出来会是一张"文件名写着 MEM、

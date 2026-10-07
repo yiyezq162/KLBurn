@@ -883,7 +883,7 @@ dmi_psu_list() {
     function junk(s) {
       s = tolower(s); gsub(/^[ \t]+|[ \t]+$/, "", s)
       # 结尾的点、大小写、后缀各家都不一样，前缀再兜一道
-      if (s == "" || s ~ /^to be filled/) return 1
+      if (s == "" || s ~ /^to be filled/ || s ~ /^[._[:space:]-]+$/) return 1
       return (s in BOGUS)
     }
     /System Power Supply/ {

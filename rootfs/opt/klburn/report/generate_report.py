@@ -104,7 +104,8 @@ def clean(v):
     if v is None:
         return None
     s = str(v).strip()
-    if not s or s.lower() in BOGUS or s.lower().startswith(_BOGUS_PREFIX):
+    if (not s or s.lower() in BOGUS or s.lower().startswith(_BOGUS_PREFIX)
+            or re.fullmatch(r"[._\s-]+", s)):
         return None
     return s
 
@@ -1722,6 +1723,8 @@ color:var(--muted);font-size:12px}
         跑到页面外面去，右边一大截被切掉，看着像叠在一起。 */
   pre{white-space:pre-wrap;word-break:break-all;overflow:visible;max-height:none}
   .tablewrap{overflow:visible}
+  table{table-layout:fixed;font-size:8pt}
+  th,td{padding:4px;white-space:normal;overflow-wrap:break-word;word-break:break-all}
 }
 """
 
@@ -2780,8 +2783,7 @@ def build_html(data):
             A(raw_file_block(data, title, rel))
 
     A("<footer>")
-    A("本报告由 %s v%s 自动生成，所有数据来自被测机器实测采集，未经人工修改。<br>"
-      % (E(meta.get("product_name") or "KLBurn"), E(meta.get("klburn_version"))))
+    A("本报告自动生成，所有数据来自被测机器实测采集，未经人工修改。<br>")
     # ⚠️ 这份 HTML 是**交付给客户**的，页脚绝不能出现 git commit hash、
     # 源码版本、构建目录这类只有我们内部才用得上的东西。
     # 版本可追溯性靠 meta.json 里的 git_commit —— 那个文件留在内部的工程目录里，

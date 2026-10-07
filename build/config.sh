@@ -11,7 +11,7 @@
 # ⚠️ 改完脚本要「先 bump 再构建」。0.3.0 就栽过一次：ISO 构建完之后又改了
 # core.sh/collect.sh 却没动版本号，于是现场那根盘自称 0.3.0、跑的却是修复前的
 # 代码（lshw 卡满 90s、屏幕上冒 Killed），对着仓库怎么看都对不上。
-KLBURN_VERSION="1.10.5"
+KLBURN_VERSION="1.10.6"
 
 # ================================================================
 # 版本（edition）：这张盘是整机全测盘，还是内存专用盘
@@ -136,7 +136,9 @@ TIMEZONE="Asia/Shanghai"
 # 所以 build-iso.sh 会在传进 chroot 的那份 config.sh 末尾追加一行确定的
 # INCLUDE_NVIDIA=...，覆盖这里的自动检测结果。别把这里写成会在 chroot 里
 # 算出不同答案的形式。
-if [[ -z "${INCLUDE_NVIDIA:-}" ]]; then
+if [[ "$KLBURN_EDITION" == "mem" ]]; then
+  INCLUDE_NVIDIA=0
+elif [[ -z "${INCLUDE_NVIDIA:-}" ]]; then
   if compgen -G "$(dirname "${BASH_SOURCE[0]}")/../vendor/nvidia/NVIDIA-Linux-x86_64-*.run" >/dev/null 2>&1; then
     INCLUDE_NVIDIA=1
   else
@@ -396,6 +398,15 @@ PKGS_PLATFORM=(
 # 编译 NVIDIA 内核模块需要的包（INCLUDE_NVIDIA=1 时才装，装完就删）
 PKGS_NVIDIA_BUILD=(
   build-essential dkms libglvnd-dev pkg-config
+)
+
+# 内存盘只安装采集/SPD、内存压测/ECC、报告落盘需要的工具。
+# 校时、中文 PDF、CPU 微码和显示/网卡/USB 内核驱动仍然保留。
+# 不包含 NVIDIA/CUDA、性能基准、硬盘/阵列卡/BMC 检测工具。
+PKGS_MEM=(
+  dmidecode python3 jq i2c-tools kmod util-linux bc gawk ethtool
+  stress-ng stressapptest rasdaemon edac-utils
+  exfatprogs dosfstools ntfs-3g xz-utils zstd memtest86+
 )
 
 # ---------- 内存专用盘的压测时长（秒）----------

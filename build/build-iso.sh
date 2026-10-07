@@ -8,7 +8,7 @@
 #   sudo ./build/build-iso.sh --clean          # 清空工作区从头来
 #   sudo ./build/build-iso.sh --rebuild-fs     # 强制重新解 squashfs（换源 ISO 后用）
 #
-# 必须在 WSL 里执行，工作区在 WSL 原生文件系统（默认 ~/klburn-build）。
+# 在 x86_64 Ubuntu 执行，工作区放 Linux 本地文件系统。
 #
 set -Eeuo pipefail
 
@@ -20,6 +20,7 @@ OPT_CLEAN=0
 OPT_REBUILD_FS=0
 OPT_SKIP_DOWNLOAD=0
 OPT_NVIDIA_FORCED=0
+OPT_NVIDIA_ENABLE=0
 SRC_ISO_OVERRIDE=""
 
 while [[ $# -gt 0 ]]; do
@@ -27,8 +28,8 @@ while [[ $# -gt 0 ]]; do
     --clean)        OPT_CLEAN=1 ;;
     --rebuild-fs)   OPT_REBUILD_FS=1 ;;
     --skip-download) OPT_SKIP_DOWNLOAD=1 ;;
-    --with-nvidia)    export INCLUDE_NVIDIA=1; OPT_NVIDIA_FORCED=1 ;;
-    --without-nvidia) export INCLUDE_NVIDIA=0; OPT_NVIDIA_FORCED=1 ;;
+    --with-nvidia)    export INCLUDE_NVIDIA=1; OPT_NVIDIA_FORCED=1; OPT_NVIDIA_ENABLE=1 ;;
+    --without-nvidia) export INCLUDE_NVIDIA=0; OPT_NVIDIA_FORCED=1; OPT_NVIDIA_ENABLE=0 ;;
     # 出哪一种盘。必须 export：config.sh 在下面才被 source，它按这个值
     # 决定报告标题、产品名和 ISO 文件名。
     --edition)      export KLBURN_EDITION="$2"; shift ;;
@@ -40,10 +41,7 @@ while [[ $# -gt 0 ]]; do
 done
 
 # ---------------------------------------------------------------- 载入配置
-# 源码可能在 /mnt/c 上被 Windows 编辑器加了 CRLF，先就地清一遍
-for f in "$SCRIPT_DIR/config.sh" "$SCRIPT_DIR/lib/common.sh" "$SCRIPT_DIR/chroot-setup.sh"; do
-  [[ -f "$f" ]] && sed -i 's/\r$//' "$f" 2>/dev/null || true
-done
+# 构建不能偷偷改源码；换行问题交给 lint 和 .gitattributes。
 
 # shellcheck source=lib/common.sh
 source "$SCRIPT_DIR/lib/common.sh"
@@ -52,6 +50,12 @@ source "$SCRIPT_DIR/config.sh"
 
 require_root "$@"
 require_cmds xorriso mksquashfs unsquashfs rsync curl chroot md5sum numfmt find sed awk
+BUILD_JOBS="${KLBURN_BUILD_JOBS:-$(nproc)}"
+[[ "$BUILD_JOBS" =~ ^[0-9]+$ ]] && (( BUILD_JOBS > 0 )) || die "KLBURN_BUILD_JOBS 必须为正整数"
+
+if [[ "$KLBURN_EDITION" == "mem" && "$OPT_NVIDIA_ENABLE" == 1 ]]; then
+  die "内存专用盘不包含 NVIDIA/CUDA，不能使用 --with-nvidia"
+fi
 
 # ---------------------------------------------------------------- GPU 组件
 # config.sh 已经按 vendor/nvidia/ 里有没有驱动自动决定了 INCLUDE_NVIDIA。
@@ -59,7 +63,7 @@ require_cmds xorriso mksquashfs unsquashfs rsync curl chroot md5sum numfmt find 
 # 文件时直接停下**，绝不静默出一张"自称带驱动、其实没有"的盘。
 NVIDIA_RUNFILE="$(ls -1 "$PROJ_DIR"/vendor/nvidia/NVIDIA-Linux-x86_64-*.run 2>/dev/null | head -1 || true)"
 NVIDIA_VERSION=""
-if [[ -n "$NVIDIA_RUNFILE" ]]; then
+if [[ "$KLBURN_EDITION" == "full" && -n "$NVIDIA_RUNFILE" ]]; then
   NVIDIA_VERSION="$(basename "$NVIDIA_RUNFILE")"
   NVIDIA_VERSION="${NVIDIA_VERSION#NVIDIA-Linux-x86_64-}"
   NVIDIA_VERSION="${NVIDIA_VERSION%.run}"
@@ -104,6 +108,15 @@ if (( OPT_CLEAN )); then
 fi
 
 mkdir -p "$CACHE_DIR" "$OUT_DIR" "$STAMP_DIR"
+
+# edition 改变必须回到源 ISO，避免 full 的驱动/工具残留在 mem 中，
+# 也避免 mem 精简后再构建 full 时复用不完整的根文件系统。
+PREV_EDITION="$(sed -n 's/^KLBURN_EDITION="\([^"]*\)"$/\1/p' \
+  "$ROOTFS_DIR/opt/klburn/klburn.conf" 2>/dev/null || true)"
+if [[ -d "$ROOTFS_DIR" && "$PREV_EDITION" != "$KLBURN_EDITION" ]]; then
+  log "edition 从 ${PREV_EDITION:-unknown} 换成 $KLBURN_EDITION，重新解包 rootfs"
+  OPT_REBUILD_FS=1
+fi
 
 # ---------------------------------------------------------------- 换内核要强制重解
 # 增量构建复用上一轮的 ISO 目录树和 rootfs。而 KLBURN_KERNEL 一换，这两样
@@ -274,7 +287,7 @@ if (( OPT_REBUILD_FS )) || [[ ! -f "$STAMP_DIR/rootfs-extracted" ]]; then
     if (( first )); then
       # 第一层直接解到目标位置，省一次全量拷贝
       log "  解包 $l ..."
-      unsquashfs -d "$ROOTFS_DIR" -f "$ISO_DIR/casper/$l" >/dev/null
+      unsquashfs -processors "$BUILD_JOBS" -d "$ROOTFS_DIR" -f "$ISO_DIR/casper/$l" >/dev/null
       apply_whiteouts "$ROOTFS_DIR" "$ROOTFS_DIR"
       first=0
     else
@@ -283,7 +296,7 @@ if (( OPT_REBUILD_FS )) || [[ ! -f "$STAMP_DIR/rootfs-extracted" ]]; then
       # 所以先解到独立目录，处理完删除标记，再用 rsync 覆盖合并。
       log "  解包 $l ..."
       rm -rf "$LAYER_TMP"
-      unsquashfs -d "$LAYER_TMP" "$ISO_DIR/casper/$l" >/dev/null
+      unsquashfs -processors "$BUILD_JOBS" -d "$LAYER_TMP" "$ISO_DIR/casper/$l" >/dev/null
       apply_whiteouts "$LAYER_TMP" "$ROOTFS_DIR"
       log "  合并 $l -> rootfs"
       rsync -aHAX --numeric-ids "$LAYER_TMP/" "$ROOTFS_DIR/"
@@ -372,6 +385,7 @@ MEM_BURN_SECONDS="${MEM_BURN_SECONDS}"
 # chroot 里没有 vendor/ 目录，自动检测得不出正确答案，这里钉死外面算好的结论
 INCLUDE_NVIDIA="${INCLUDE_NVIDIA}"
 NVIDIA_VERSION="${NVIDIA_VERSION}"
+BUILD_JOBS="${BUILD_JOBS}"
 # casper/vmlinuz 的内核版本。chroot 里看不到 ISO 目录树，只能从外面传进去；
 # 里面**不许**再用 \`ls /lib/modules | head -1\` 猜（那时候常常有两套内核）。
 ISO_KVER="${ISO_KVER}"
@@ -392,7 +406,11 @@ done < <(find "$STAGE/overlay" -type f \( -name '*.sh' -o -name '*.py' -o -name 
 
 # vendor 目录（storcli / nvidia 等离线包）
 mkdir -p "$STAGE/vendor"
-if [[ -d "$PROJ_DIR/vendor" ]]; then
+if [[ "$KLBURN_EDITION" == "mem" ]]; then
+  if [[ -n "${COMPANY_LOGO_FILE:-}" && -f "$PROJ_DIR/vendor/$COMPANY_LOGO_FILE" ]]; then
+    install -m 0644 "$PROJ_DIR/vendor/$COMPANY_LOGO_FILE" "$STAGE/vendor/$COMPANY_LOGO_FILE"
+  fi
+elif [[ -d "$PROJ_DIR/vendor" ]]; then
   rsync -a --exclude='README.md' "$PROJ_DIR/vendor/" "$STAGE/vendor/"
 fi
 
@@ -519,7 +537,7 @@ fi
 
 mksquashfs "$ROOTFS_DIR" "$NEW_SQUASH" \
   -comp "$SQUASHFS_COMP" -Xcompression-level "$SQUASHFS_LEVEL" \
-  -b 1M -noappend -no-progress -quiet
+  -b 1M -noappend -no-progress -quiet -processors "$BUILD_JOBS" -mem 256M
 
 RAW_SIZE="$(du -sb --apparent-size "$ROOTFS_DIR" | cut -f1)"
 printf '%s' "$RAW_SIZE" > "$ISO_DIR/casper/${BASE_NAME}.size"

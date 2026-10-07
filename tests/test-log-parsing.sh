@@ -921,6 +921,16 @@ Memory Device
 EOF
 check "没有 Channel 时退回按 Locator 的字母数（单路）" "2" \
       "$(dmi_channel_count "$TMP/mem-ch-loc.txt")"
+sed 's/CPU0_DIMMB0/CPU1_DIMMA0/' "$TMP/mem-ch-loc.txt" > "$TMP/mem-ch-asym.txt"
+check "两路同字母的通道必须分别计数，不能假定插法对称" "2" \
+      "$(dmi_channel_count "$TMP/mem-ch-asym.txt")"
+printf 'Socket(s): 2\n' > "$RAW_DIR/lscpu.txt"
+check "两路非对称安装不能把已识别通道乘以 CPU 路数" "2" \
+      "$(dmi_channel_count "$TMP/mem-ch-asym.txt")"
+sed 's/CPU[01]_DIMM/DIMM/' "$TMP/mem-ch-asym.txt" > "$TMP/mem-ch-ambiguous.txt"
+check "多路槽位没有 CPU 标识时不猜通道数" "0" \
+      "$(dmi_channel_count "$TMP/mem-ch-ambiguous.txt")"
+rm "$RAW_DIR/lscpu.txt"
 # 0 的含义是「这台机器认不出通道数」，调用方据此**在报告里不写通道数**
 # ——**绝不猜一个**。（这句原来写的是"放弃自动算门槛"，那是 1.9.0 中途
 # 那套阈值留下的说法，阈值早就整个删了，这个返回值现在只影响一句文案。）

@@ -40,6 +40,21 @@ apt-get update -qq || fail "apt update 失败（检查 WSL 网络 / 镜像地址
 # ---------------------------------------------------------------- 装包
 PKGS=( "${PKGS_COLLECT[@]}" "${PKGS_DIAG[@]}" "${PKGS_NET[@]}" "${PKGS_STRESS[@]}"
        "${PKGS_MISC[@]}" "${PKGS_REPORT[@]}" "${PKGS_PLATFORM[@]}" )
+if [[ "${KLBURN_EDITION:-full}" == "mem" ]]; then
+  # 源镜像本来就带有部分整机工具，只是不安装仍会留下它们。
+  # 仅清除配置中明确列出的整机专属包，保留共享包与全部内核驱动。
+  REMOVE_PKGS=()
+  MEM_PKGS=( "${PKGS_MEM[@]}" "${PKGS_NET[@]}" "${PKGS_REPORT[@]}" "${PKGS_PLATFORM[@]}" )
+  for pkg in "${PKGS[@]}"; do
+    keep=0
+    for mem_pkg in "${MEM_PKGS[@]}"; do
+      [[ "$pkg" == "$mem_pkg" ]] && keep=1
+    done
+    (( keep )) || REMOVE_PKGS+=("$pkg")
+  done
+  apt-get purge -y -qq "${REMOVE_PKGS[@]}" || fail "内存盘清理整机专属包失败"
+  PKGS=( "${MEM_PKGS[@]}" )
+fi
 if [[ "${INCLUDE_NVIDIA:-0}" == "1" ]]; then
   PKGS+=( "${PKGS_NVIDIA_BUILD[@]}" )
 fi
@@ -54,11 +69,16 @@ apt-get install -y -qq --no-install-recommends "${PKGS[@]}" \
 # 而 autoremove 的射程比想象中远（第一次跑就顺手带走了 amd64-microcode）。
 # 只在装完时查一次的话，"装上了、后来又被 autoremove 收走"这条路完全没人看着。
 verify_tools() {
-  local when="$1" entry missing=()
-  for entry in dmidecode lshw lspci nvme smartctl ipmitool ethtool jq python3 \
+  local when="$1" entry missing=() required=(
+               dmidecode lshw lspci nvme smartctl ipmitool ethtool jq python3
                stress-ng stressapptest fio sysbench dhclient ping ip chronyd \
                sg_ses sg_logs sg_vpd fwupdmgr \
-               ras-mc-ctl edac-util mstflint cpuid rdmsr lldpctl lldpd; do
+               ras-mc-ctl edac-util mstflint cpuid rdmsr lldpctl lldpd )
+  if [[ "${KLBURN_EDITION:-full}" == "mem" ]]; then
+    required=(dmidecode jq python3 stress-ng stressapptest dhclient ping ip chronyd
+              ethtool ras-mc-ctl edac-util decode-dimms weasyprint)
+  fi
+  for entry in "${required[@]}"; do
     command -v "$entry" >/dev/null 2>&1 || missing+=("$entry")
   done
   if ((${#missing[@]})); then
@@ -252,7 +272,7 @@ chmod 0755 /opt/klburn/factory-test.sh
 chmod 0755 /opt/klburn/memtest.sh
 
 # ---------------------------------------------------------------- 开机拉起哪个脚本
-# 这是 full 盘和 mem 盘**唯一**的行为差别：换掉 klburn.service 的 ExecStart。
+# 选择 edition 对应的开机入口；工具和包也按 edition 安装。
 #
 # ⚠️ 改完必须当场核一遍改成功了没有。sed 没匹配上是**静默**的 ——
 #    做出来的会是一张文件名写着 MEM、开机却跑整机全测流程（还会弹范围菜单）
@@ -495,6 +515,7 @@ if [[ "${INCLUDE_NVIDIA:-0}" == "1" ]]; then
   # 那会被记成 FAIL「驱动加载失败，显卡/供电/插槽异常」，把好卡判成坏卡。
   # 595 系列的默认值恰好就是 open，但默认值是会变的，不能拿它当保证。
   "$RUNFILE" --silent --no-questions --accept-license \
+             --concurrency-level="${BUILD_JOBS:-2}" \
              --kernel-name="$KVER" --no-drm --no-nvidia-modprobe \
              -M=open \
              --install-libglvnd --no-backup --no-check-for-alternate-installs \

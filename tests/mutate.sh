@@ -99,6 +99,8 @@ MUTATIONS=(
 "psu-cap-raw${S}额定功率原样照抄 DMI（0xFFFF 印成「65535 W」，客户每台都要问一遍）${S}test-report-render${S}$RT/report/generate_report.py${S}mut_psu_cap_raw"
 "badindex-content${S}dmidecode 的 <BAD INDEX> 当成厂商/型号内容（四格乱码印进客户报告）${S}test-report-render${S}$RT/report/generate_report.py${S}mut_badindex_content"
 "serial-na${S}整机序列号不认 N/A 这类占位符（报告抬头和报告目录都叫「NA」，而主板序列号是真的）${S}test-hw-checks${S}$RT/lib/core.sh${S}mut_serial_na"
+"serial-punctuation${S}全标点 BIOS/FRU 序列号又当成有效身份${S}test-hw-checks${S}$RT/lib/core.sh${S}mut_serial_punctuation"
+"mem-bmc-clock${S}内存盘无网络时又访问 BMC 校时${S}test-hw-checks${S}$RT/lib/network.sh${S}mut_mem_bmc_clock"
 "gpu-serial-zero${S}消费级显卡的 Serial Number: 0 当成序列号印出去（客户会拿这个 0 去对货）${S}test-report-render${S}$RT/report/generate_report.py${S}mut_gpu_serial_zero"
 "sample-state-persubshell${S}两次采样求差的「上一次读数」传不过子 shell（功耗/占用率/速率全变成「从压测开始到现在的平均值」）${S}test-hw-checks${S}$RT/lib/core.sh${S}mut_sample_state_per_subshell"
 "psu-sdr-outofrange${S}把离散量的 out-of-range 当成没进电（offset 5 明写 but present，会把好电源报成掉电）${S}test-hw-checks${S}$RT/lib/collect.sh${S}mut_psu_sdr_outofrange"
@@ -742,8 +744,8 @@ mut_metric_group_raw() {
 # shell 认、Python 不认，那一格原样印进客户报告。
 mut_bogus_prefix_drop() {
   replace_line "$RT/report/generate_report.py" \
-    '    if not s or s.lower() in BOGUS or s.lower().startswith(_BOGUS_PREFIX):' \
-    '    if not s or s.lower() in BOGUS:'
+    '    if (not s or s.lower() in BOGUS or s.lower().startswith(_BOGUS_PREFIX)' \
+    '    if (not s or s.lower() in BOGUS'
 }
 
 # ================================================================
@@ -884,6 +886,18 @@ mut_serial_na() {
   replace_line "$RT/lib/core.sh" \
     '      |"unknown"|"n/a"|"na"|"o.e.m."|"empty"|"not present"|"0123456789" \' \
     '      |"unknown"|"o.e.m."|"empty"|"not present"|"0123456789" \'
+}
+
+mut_serial_punctuation() {
+  replace_line "$RT/lib/core.sh" \
+    '  [[ "$s" =~ ^[._[:space:]-]+$ ]] && return 0' \
+    '  : # 变异：全标点不再视作占位'
+}
+
+mut_mem_bmc_clock() {
+  replace_line "$RT/lib/network.sh" \
+    '  if (( synced == 0 )) && [[ "${KLBURN_EDITION:-full}" != "mem" ]] && sync_clock_from_bmc; then' \
+    '  if (( synced == 0 )) && sync_clock_from_bmc; then'
 }
 
 # 显存的累计 / 历史读数又漏进客户报告。和硬盘的通电时间、累计读写量

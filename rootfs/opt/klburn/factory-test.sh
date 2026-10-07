@@ -541,7 +541,7 @@ if scope_has_stress && (( SCOPE_ABORT == 0 )); then
   #    origin=self** —— 客户有权知道他点名要测的东西这台机器上没有。
   if scope_runs stress_gpu && (( GPU_USABLE == 0 )); then
     result_add "stress_gpu" "GPU 压力测试" "$ST_SKIP" \
-      "本轮选择的测试范围是显卡专项测试，但本机未检测到可用的独立显卡，\
+      "本机未检测到可用的独立显卡，\
 显卡相关项目均未进行。此项不影响整机结论。" ""
   fi
 

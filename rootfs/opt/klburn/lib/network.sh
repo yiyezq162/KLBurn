@@ -425,7 +425,7 @@ try_sync_clock_via_network() {
   fi
 
   # 一根网线都没接、或者内网也没有任何 NTP —— 还有 BMC 那个一直在走的时钟
-  if (( synced == 0 )) && sync_clock_from_bmc; then
+  if (( synced == 0 )) && [[ "${KLBURN_EDITION:-full}" != "mem" ]] && sync_clock_from_bmc; then
     synced=1
     CLOCK_SOURCE="bmc"
   fi

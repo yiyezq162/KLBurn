@@ -97,7 +97,8 @@ def clean(v):
     if v is None:
         return None
     s = str(v).strip()
-    if not s or s.lower() in BOGUS or s.lower().startswith(_BOGUS_PREFIX):
+    if (not s or s.lower() in BOGUS or s.lower().startswith(_BOGUS_PREFIX)
+            or re.fullmatch(r"[._\s-]+", s)):
         return None
     return s
 
@@ -914,9 +915,8 @@ def build_html(data):
     # ⚠️ 页脚只写"这份报告是谁、什么时候、用哪一版介质出的"。
     #    源码版本、构建目录、盘里带了哪些程序一律不出现（那是内部实现）。
     A("<footer>")
-    A("%s ｜ %s v%s ｜ 报告生成于 %s"
-      % (E(meta.get("company_name")), E(meta.get("product_name") or "KLBurn-MEM"),
-         E(meta.get("klburn_version")), E(meta.get("end_time"))))
+    A("%s ｜ 报告版本 %s ｜ 报告生成于 %s"
+      % (E(meta.get("company_name")), E(meta.get("klburn_version")), E(meta.get("end_time"))))
     if meta.get("clock_suspect"):
         A("<br>注意：本机主板时钟可能不准确，报告中的时间仅供参考。")
     A("</footer></div>")

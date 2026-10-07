@@ -1175,6 +1175,7 @@ cat > "$RDA/raw/bench/fio-sda-read.json" <<'EOF'
 EOF
 OUTA="$TMP/report-accept.html"
 "$GEN" --run-dir "$RDA" --out "$OUTA" >/dev/null 2>&1
+has_no "$OUTA" "本报告由 KLBurn" "交付页脚不披露内部产品名"
 
 check "有性能基准时一级章节变成五节，编号跟着顺延" \
       "一、硬件清单|二、配置核对|三、性能基准|四、压力测试结果|五、原始日志|" \

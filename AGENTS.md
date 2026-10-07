@@ -40,6 +40,14 @@ WSL 只是 Windows 下的一种 Linux 环境，不是项目必须使用的平台
 说明见 [`docs/mem-edition.md`](docs/mem-edition.md)，主流程是
 `rootfs/opt/klburn/memtest.sh`（不是 `factory-test.sh`）。
 
+**发布必须成对**：普通整机测试版（full）每次出盘，都同时构建、验收同版本的
+内存专用版（mem），两张盘对应同一个干净 commit、同一个 annotated tag。
+整机版菜单里的「内存专项」仍属于 full，不是第三种 ISO。
+mem 只安装内存采集/SPD、内存压测/ECC、中文报告、USB 落盘和联网校时所需组件；
+不带 NVIDIA/CUDA、显卡压测/诊断、CPU 性能基准或硬盘/阵列卡/BMC 检测工具。
+保留 CPU 微码和显示、网卡、USB、存储启动所需内核驱动/固件，不能以瘦身破坏启动与报告落盘。
+full ↔ mem 切换时重建 rootfs，保留源 ISO 缓存；必须核对无跨 edition 工具残留。
+
 ## 文档去哪儿找
 
 | 要查什么 | 看哪份 |
@@ -78,6 +86,8 @@ sudo KLBURN_WORK="$HOME/klburn-build" ./build/build-iso.sh --edition mem
 **顺序反过来就会出错**，别把那个 `cp -a` 挪到 sed 后面去。
 
 - 工作区（含源 ISO 缓存）：构建机本地 Linux 文件系统上的固定目录；两种 edition 串行构建
+- 成对构建与验收入口：`sudo KLBURN_WORK=/实际工作区 ./build/release.sh --mutate`。
+  先完成源码测试和提交；入口拒绝脏源码/已有版本 tag，串行构建与验收两版后才打 tag。
 - 首次约 10~15 分钟，增量约 5~8 分钟；产物自动拷回项目的 `out/`
 - 其余参数见 [`docs/building.md`](docs/building.md)
 
@@ -197,7 +207,8 @@ sudo ./tests/e2e-qemu.sh --edition mem --stage smoke --workdir "$HOME/klburn-e2e
 3. git commit          ← 必须在构建之前，工作区要干净
 4. 构建 ISO             ← 这时 klburn.conf 里记的才是干净的 commit hash
 5. check-firmware.sh + e2e-qemu.sh 冒烟
-6. git tag -a v<版本>   ← 打在第 3 步那个 commit 上
+   两个 edition 都验；full 加完整真写盘验收，mem 核对精简工具与报告三件套
+6. git tag -a v<版本>   ← 两版都通过后，打在第 3 步那个 commit 上
 ```
 
 ⚠️⚠️ **第 3 步必须排在第 4 步之前，这一条栽过。**

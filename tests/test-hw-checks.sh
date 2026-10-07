@@ -593,6 +593,15 @@ check "<BAD INDEX> 身份 + 额定 0W -> 判为空槽位" "0" \
 # ================================================================
 echo
 echo "=== 整机序列号的占位符名单（_serial_is_bogus）==="
+clock_source_for_edition() (
+  KLBURN_EDITION="$1"
+  net_phys_ifaces() { :; }
+  sync_clock_from_bmc() { return 0; }
+  try_sync_clock_via_network >/dev/null 2>&1
+  printf '%s' "$CLOCK_SOURCE"
+)
+check "内存盘无网时不得读取 BMC，保留 RTC" "rtc" "$(clock_source_for_edition mem)"
+check "整机盘仍可使用 BMC 校时回退" "bmc" "$(clock_source_for_edition full)"
 # 海光 H210-G30 那台 DMI 写的是 `Serial Number: N/A`。shell 这边原来不认，
 # Python 那边的 BOGUS 认，于是报告抬头「整机序列号 NA」、报告目录也叫 NA，
 # 而同一份 DMI 里主板序列号 24003702CHK04234 是真的。两份名单必须一致。
@@ -627,9 +636,10 @@ BOGUS_CORE=(
   "Not Specified" "Default string" "None" "Unknown" "N/A" "NA" "No DIMM"
   "Not Present" "Empty" "O.E.M." "System Manufacturer" "System Product Name"
   "System Serial Number" "0123456789" "<BAD INDEX>" "<OUT OF SPEC>" "-" "--"
+  "............" "____" ".-._"
 )
 # 反面样本：这些是**真值**，三处都不许当成占位符。
-BOGUS_REAL=( "24003702CHK04234" "21204-00012" "Supermicro" "PWS-2K21A-1R" "100NA460736" )
+BOGUS_REAL=( "24003702CHK04234" "21204-00012" "Supermicro" "PWS-2K21A-1R" "100NA460736" "SN.123-XY" )
 
 # ---- 1) shell ----
 _n_bad=0

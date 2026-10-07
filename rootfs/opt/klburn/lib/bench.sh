@@ -834,26 +834,30 @@ dmi_channel_count() {
   [[ "$n" =~ ^[0-9]+$ ]] || n=0
   (( n > 0 )) && { printf '%s' "$n"; return; }
 
-  n="$(dmi_dimm_field "$f" "Locator" | awk '
+  local keys sockets
+  keys="$(dmi_dimm_field "$f" "Locator" | awk '
         {
           s = toupper($0)
-          # CPU0_DIMMA0 / P1-DIMMB1 / DIMM_C2  ->  A / B / C
+          # 数实际出现的 (CPU/插槽前缀, 通道)，不能假定各路插法对称。
           if (match(s, /DIMM[_-]?[A-Z]+/)) {
+            prefix = substr(s, 1, RSTART-1)
+            sub(/[_-]+$/, "", prefix)
             t = substr(s, RSTART, RLENGTH)
             gsub(/^DIMM[_-]?/, "", t)
-            if (t != "") { print t; next }
+            if (t != "") { print prefix "|" t; next }
           }
           # 退到最朴素的 A1 / B2 这种写法
-          if (match(s, /^[A-Z]+[0-9]+$/)) { gsub(/[0-9]+$/, "", s); print s }
-        }' | sort -u | grep -c . || true)"
-  [[ "$n" =~ ^[0-9]+$ ]] || n=0
-  # 上面那条只数出"字母有几种"，多路机器每颗 CPU 的字母是重复的，
-  # 要乘回插槽数才是整机通道数。
-  if (( n > 0 )); then
-    local sockets
-    sockets="$(awk -F': ' '/^Socket\(s\)/{gsub(/ /,"",$2); print $2; exit}' "$RAW_DIR/lscpu.txt" 2>/dev/null)"
-    [[ "$sockets" =~ ^[0-9]+$ ]] && (( sockets > 1 )) && n=$(( n * sockets ))
+          if (match(s, /^[A-Z]+[0-9]+$/)) { gsub(/[0-9]+$/, "", s); print "|" s }
+        }' | sort -u)"
+  sockets="$(awk -F': ' '/^Socket\(s\)/{gsub(/ /,"",$2); print $2; exit}' \
+    "$RAW_DIR/lscpu.txt" 2>/dev/null || true)"
+  if [[ "$sockets" =~ ^[0-9]+$ ]] && (( sockets > 1 )) \
+     && grep -qE '^[^0-9|]*\|' <<<"$keys"; then
+    # 多路但槽位没给 CPU/插槽标识，无法拆分重复字母，不猜数量。
+    printf '0'; return
   fi
+  n="$(printf '%s\n' "$keys" | grep -c . || true)"
+  [[ "$n" =~ ^[0-9]+$ ]] || n=0
   printf '%s' "$n"
 }
 
@@ -957,7 +961,7 @@ bench_mem_bandwidth() {
 
   local basis=""
   if [[ "$speed" =~ ^[0-9]+$ ]] && [[ "$ch" =~ ^[0-9]+$ ]] && (( ch > 0 )); then
-    basis="（本机内存运行频率 ${speed} MT/s，已装满 ${ch} 个通道）"
+    basis="（本机内存运行频率 ${speed} MT/s，已识别 ${ch} 个已占用通道）"
   fi
   result_add "bench_mem_bw" "内存读取带宽" "$ST_PASS" \
     "内存满负载读取带宽实测 $(num_fmt "$got") MB/s${basis}。" "raw/bench/mem-bandwidth.log"

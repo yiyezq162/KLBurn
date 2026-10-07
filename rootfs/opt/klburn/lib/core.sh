@@ -857,6 +857,8 @@ _serial_is_bogus() {
       |"system serial number"|"<bad index>"|"<out of spec>"|"-"|"--") return 0 ;;
   esac
   # "To be filled by O.E.M." 各家大小写和尾巴都不一样，前缀再兜一道
+  # BIOS/FRU 常用全标点占位；两边相同不代表读到了有效序列号。
+  [[ "$s" =~ ^[._[:space:]-]+$ ]] && return 0
   [[ "$s" == "to be filled"* ]]
 }
 
