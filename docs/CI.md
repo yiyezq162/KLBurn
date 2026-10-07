@@ -1,5 +1,15 @@
 # KLBurn dedicated NAS Runner and build VM
 
+Source SHA `a2381c6`, [run37565057243](https://github.com/yiyezq162/KLBurn/actions/runs/37565057243):
+actual `nas-ci-klburn`, **1937 passed / 2 failed**, finalized log artifact present.
+Both failures are mandatory real-hardware coverage checks requiring private,
+untracked `test_out` samples (including an observed non-AC power case).
+Windows migration had also lost executable modes on both report Python CLIs;
+mode-only repair restored report checks to363passed/0failed. Existing real-PDF
+conversion cases remain skipped without their optional tooling. Do not invent
+samples, upload customer originals or weaken the hardware gate to make CI green.
+This source result is not ISO, QEMU, firmware or hardware acceptance.
+
 | Component | Current role |
 | --- | --- |
 | `nas-ci-klburn` | Repository-specific nonprivileged Docker Actions Runner; selector `self-hosted, Linux, X64, nas-klburn`; source regression only |
