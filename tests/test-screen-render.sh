@@ -743,6 +743,16 @@ echo "=== 掉卡那一帧：整屏画出来是什么样 ==="
 # §11-11「每帧先数行数再画」——数错了就是整屏滚动、越刷越歪。
 GD="$TMP/dashgpu"; mkdir -p "$GD"
 RUN_DIR="$GD"
+# 本组只比较 GPU 正常/掉线的版面；真实 CPU 的首轮 busy 采样没有基线，
+# 次轮才会出现逐路数据，不能让宿主机拓扑改变两帧的 CPU 行数。
+# 用固定输入隔离数据采集，CPU 采样本身由其它套件验证。
+cpu_model_display() { printf 'Fixture CPU'; }
+cpu_freq_per_pkg() { printf '0 3200\n'; }
+cpu_pkg_busy_pct() { printf '0 100\n'; }
+cpu_temp_per_pkg() { printf '55\n'; }
+mem_used_total_mb() { printf '512 2048\n'; }
+mem_ecc_counts() { printf '0 0\n'; }
+ROWS=50
 mk_dash_csv() {   # mk_dash_csv <好的轮数> <掉线的轮数>
   local good="$1" lost="$2" i
   echo "time,index,name,temp_c,power_w,clock_sm_mhz,util_pct,mem_used_mb" > "$GD/gpu_metrics.csv"
