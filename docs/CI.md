@@ -16,6 +16,11 @@ ordinary development does not initialize another Runner.
 shellcheck after main push, PR or manual dispatch. Trusted push/manual uses NAS;
 PRs use disposable Ubuntu24.04 cloud runners. `CI_RUNNER=github` enables cloud
 fallback. Unique run/attempt artifacts preserve source-check logs.
+iproute2 is required by source fixtures and installed with shellcheck if missing.
+Initial NAS upload FinalizeArtifact reset its connection; one bounded retry
+uses direct HTTPS only inside that upload action, preserving Runner/job proxy
+and TLS/credentials. At least one finalized evidence artifact is mandatory;
+failed source tests still fail CI even if upload retries succeed.
 
 **It does not build or release an ISO.** Non-root `run-all.sh` skips root
 disk-exclusion. Full/mem ISO builds, firmware audit, real ISO QEMU smoke/full/
