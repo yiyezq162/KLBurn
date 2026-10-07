@@ -15,8 +15,10 @@ The owner subsequently restored originals from Mac Downloads to local ignored
 223 required sensor/power text files under private0700 home path
 `/home/runner/.private-fixtures/klburn-hardware-v1`, with anonymous sample numbers
 and byte-identical contents; no full HTML/PDF/customer reports were transferred.
-Trusted NAS source checks link this directory for the job then unlink only that
-exact reference. Tests copy required input into temporary directories before
+Trusted NAS source checks create an owned0700 workspace copy, then remove only
+that exact run/attempt-marked copy through an EXIT trap. An initial symlink
+intake did not satisfy the tests' find traversal and retained801PASS/2FAIL;
+the ordinary-copy correction changes no assertion. Tests copy required input into temporary directories before
 writing; originals are not test output. Only aggregate source-check logs are
 uploaded, not private fixtures. Cloud PR/fallback has no private dataset and
 does not establish the mandatory real-sample coverage gate without an approved

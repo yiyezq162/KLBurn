@@ -35,16 +35,18 @@ jobs:
             fixture=/home/runner/.private-fixtures/klburn-hardware-v1
             test -d "$fixture"
             test ! -e test_out && test ! -L test_out
-            ln -s "$fixture" test_out
+            mkdir -m 700 test_out
+            printf '%s\n' "$GITHUB_RUN_ID-$GITHUB_RUN_ATTEMPT" > test_out/.nas-ci-fixture-owner
+            cleanup_fixture() {
+              if [[ -d test_out && ! -L test_out && "$(cat test_out/.nas-ci-fixture-owner)" == "$GITHUB_RUN_ID-$GITHUB_RUN_ATTEMPT" ]]; then
+                rm -rf -- "$GITHUB_WORKSPACE/test_out"
+              fi
+            }
+            trap cleanup_fixture EXIT
+            cp -a "$fixture/." test_out/
           fi
           set -o pipefail
           ./tests/run-all.sh 2>&1 | tee ci-reports/source-checks.log
-      - name: Unlink exact private fixture reference
-        if: always() && runner.environment == 'self-hosted'
-        run: |
-          if [[ -L test_out && "$(readlink test_out)" == /home/runner/.private-fixtures/klburn-hardware-v1 ]]; then
-            unlink test_out
-          fi
       - name: Record explicit release gaps
         if: always()
         run: |
