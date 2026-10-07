@@ -28,6 +28,33 @@
 #
 set -uo pipefail
 
+for tool in readelf modinfo python3; do
+  command -v "$tool" >/dev/null 2>&1 || { printf '缺少验收工具 %s，不能开始对账\n' "$tool" >&2; exit 2; }
+done
+
+# 在 rootfs 内解析绝对符号链接；宿主机的 test -e 会错误地跟到宿主 /etc。
+rootfs_exists() {
+  python3 - "$ROOTFS" "$1" <<'PY'
+import os,sys
+root=os.path.abspath(sys.argv[1]);pending=sys.argv[2].split('/');parts=[];links=0
+while pending:
+    part=pending.pop(0)
+    if part in ('','.') :continue
+    if part=='..':
+        if parts:parts.pop()
+        continue
+    candidate=os.path.join(root,*parts,part)
+    if os.path.islink(candidate):
+        links+=1
+        if links>40:sys.exit(1)
+        target=os.readlink(candidate)
+        if target.startswith('/'):parts=[]
+        pending=target.split('/')+pending
+    else:parts.append(part)
+sys.exit(0 if os.path.exists(os.path.join(root,*parts)) else 1)
+PY
+}
+
 cd "$(dirname "${BASH_SOURCE[0]}")/.." || exit 1
 
 ROOTFS="${KLBURN_ROOTFS:-}"
@@ -341,7 +368,7 @@ else
     local soname="$1" d
     for d in "$ROOTFS"/lib/x86_64-linux-gnu "$ROOTFS"/usr/lib/x86_64-linux-gnu \
              "$ROOTFS"/lib "$ROOTFS"/usr/lib; do
-      [[ -e "$d/$soname" ]] && return 0
+      rootfs_exists "${d#"$ROOTFS"}/$soname" && return 0
     done
     return 1
   }
@@ -356,7 +383,8 @@ else
     while IFS= read -r so; do
       [[ -n "$so" ]] || continue
       # 程序自己目录里带的那份优先（xlinpack 的 libiomp5、opendcdiag 的 libzstd）
-      [[ -e "$(dirname "$exe")/$so" ]] && continue
+      libdir="${exe%/*}"
+      rootfs_exists "${libdir#"$ROOTFS"}/$so" && continue
       lib_in_rootfs "$so" || missing_libs="$missing_libs $so"
     done < <(readelf -d "$exe" 2>/dev/null | sed -nE 's/.*NEEDED.*\[(.+)\]/\1/p')
     if [[ -z "$missing_libs" ]]; then

@@ -45,7 +45,7 @@ macOS 自带 Bash/BSD 工具不作为全套回归环境。已配置专用 NAS �
 # 构建依赖（只需一次）
 sudo apt-get update
 sudo apt-get install -y xorriso squashfs-tools rsync curl ca-certificates \
-                        gdisk fdisk file zstd python3 jq dosfstools mtools
+                        gdisk fdisk file zstd python3 jq dosfstools mtools binutils kmod
 ```
 
 要编可选件的话另外还要：

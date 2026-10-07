@@ -40,6 +40,8 @@ git tag -l --sort=version:refname
   测试入口在失败时保留完整断言输出，便于复查偶发失败。
 - 掉卡仪表盘测试改用固定 CPU/内存采样：首轮真实 CPU busy 没有基线、次轮才有
   逐路数据，原夹具因此错误地把 CPU 行数变化算成 GPU 行数错误；保持原行数断言。
+- 发布预检点名 readelf/modinfo，依赖库对账按目标 rootfs 解析绝对符号链接，
+  避免把 OpenBLAS 的 /etc/alternatives 链接错误地解析到构建宿主机而误报缺库。
 
 ## 仓库维护（2026-10-06，ISO 版本仍为 1.10.5）
 

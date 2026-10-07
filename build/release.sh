@@ -17,6 +17,9 @@ done
 [[ "${KLBURN_WORK:-}" == /* && "$KLBURN_WORK" != / ]] || { echo '必须指定绝对路径 KLBURN_WORK'; exit 1; }
 [[ "$MEM_MB" =~ ^[0-9]+$ ]] && (( MEM_MB >= 2048 )) || { echo '内存至少为 2048 MB'; exit 2; }
 command -v shellcheck >/dev/null || { echo '缺少 shellcheck，不能把跳过 lint 当成通过'; exit 1; }
+for tool in readelf modinfo python3 qemu-system-x86_64; do
+  command -v "$tool" >/dev/null || { echo "缺少发布验收工具 $tool"; exit 1; }
+done
 git_cmd() { git -c "safe.directory=$PROJ_DIR" "$@"; }
 COMMIT="$(git_cmd rev-parse HEAD)"
 SHORT_COMMIT="$(git_cmd rev-parse --short HEAD)"
