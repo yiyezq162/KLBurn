@@ -488,6 +488,20 @@ shot() { mon "screendump $WORK/shot-$1.ppm"; }
 #    每轮里那次 grep 自己就要扫 2.4GB、花掉 3 秒左右，累加出来的数字只有真实
 #    耗时的一半 —— 于是 limit=900 实际能等 1800 秒，日志里"第 252s"其实是第
 #    600 秒。超时和读数一旦对不上，排查的人会从完全错误的地方开始找。
+image_has() {
+  # 二进制镜像没有可靠的行边界；grep -a 会为超长行分配 GB 内存。
+  python3 - "$IMG" "$1" <<'PY'
+import sys
+needle=sys.argv[2].encode();tail=b''
+with open(sys.argv[1],'rb') as stream:
+    for chunk in iter(lambda:stream.read(1024*1024),b''):
+        data=tail+chunk
+        if needle in data:sys.exit(0)
+        tail=data[-(len(needle)-1):] if len(needle)>1 else b''
+sys.exit(1)
+PY
+}
+
 wait_for_log() {
   local needle="$1" limit="$2" label="${3:-$1}" start now
   start="$(date +%s)"
@@ -495,7 +509,7 @@ wait_for_log() {
     now="$(date +%s)"
     (( now - start >= limit )) && break
     kill -0 "$QEMU_PID" 2>/dev/null || { info "等「$label」时虚拟机已经退出"; return 1; }
-    if grep -aqF -- "$needle" "$IMG" 2>/dev/null; then
+    if image_has "$needle"; then
       info "看到「$label」（第 $(( now - start ))s）"
       return 0
     fi
@@ -573,7 +587,7 @@ elif (( DISK_STRESS )); then
   preexist=""
   for n in "Report      :" "$AFTER_DURATION" "verify_dmesg_boot" \
            "Configuration review done" "Disk stress test confirmed by operator"; do
-    grep -aqF -- "$n" "$IMG" 2>/dev/null && preexist="$preexist [$n]"
+    image_has "$n" && preexist="$preexist [$n]"
   done
   if [[ -z "$preexist" ]]; then
     ok "五个日志锚点在开机前都不在镜像里（不会在错误的时刻发出确认键）"
@@ -678,8 +692,12 @@ elif (( DISK_STRESS )); then
   # 压测期间截一张。**界面改动只有截图验得了** —— 单元测试能保证列宽和字符集，
   # 保证不了"在真控制台上看着对不对"（颜色、对齐、有没有被别的输出顶花）。
   # 挑第 90 秒：这时候并发压测已经跑起来、读数都有值了，离硬盘阶段还远。
-  sleep 90
-  shot "burn-in"
+  if wait_for_log "[CPU] stress-ng on all" 1800 "基准与专项验证完成、CPU 压测开始"; then
+    sleep 20
+    shot "burn-in"
+  else
+    bad "未看到 CPU 压测启动锚点，不能把基准阶段截图当成压测仪表盘"
+  fi
 
   if wait_for_log "Sequential write" 900 "fio 开始跑了"; then
     ok "fio 真的启动了（日志里有顺序写那一段）"
@@ -857,9 +875,9 @@ else
   REPORT_WAIT=1500
   if wait_for_log "Time budget:" 420 "时间预算已确定"; then
     sleep 8                     # 让这一行的尾巴也落进镜像
-    if grep -aqF "concurrently for 0h10m00s" "$IMG" 2>/dev/null; then
+    if image_has "concurrently for 0h10m00s"; then
       ok "选档生效：QUICK（10 分钟）"
-    elif grep -aqF "concurrently for 0h30m00s" "$IMG" 2>/dev/null; then
+    elif image_has "concurrently for 0h30m00s"; then
       # 不在这里判失败：[4/4] 那条读 meta.json 的断言才是正式出口，
       # 这里只负责把等待上限放宽到够用，免得整轮以一句看着像产品卡死的
       # 「等了 1500s 也没等到报告」收场。

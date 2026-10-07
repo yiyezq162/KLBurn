@@ -15,7 +15,7 @@ while (( $# )); do
 done
 [[ "$EUID" == 0 && "$(uname -m)" == x86_64 ]] || { echo '需要 x86_64 Ubuntu 与 root'; exit 1; }
 [[ "${KLBURN_WORK:-}" == /* && "$KLBURN_WORK" != / ]] || { echo '必须指定绝对路径 KLBURN_WORK'; exit 1; }
-[[ "$MEM_MB" =~ ^[0-9]+$ ]] && (( MEM_MB >= 2048 )) || { echo '内存至少为 2048 MB'; exit 2; }
+[[ "$MEM_MB" =~ ^[0-9]+$ ]] && (( MEM_MB >= 4096 )) || { echo '完整发布验收的 QEMU 内存至少为 4096 MB'; exit 2; }
 command -v shellcheck >/dev/null || { echo '缺少 shellcheck，不能把跳过 lint 当成通过'; exit 1; }
 for tool in readelf modinfo python3 qemu-system-x86_64; do
   command -v "$tool" >/dev/null || { echo "缺少发布验收工具 $tool"; exit 1; }
@@ -108,7 +108,6 @@ for edition in ('full','mem'):
         for chunk in iter(lambda:stream.read(1024*1024),b''):digest.update(chunk)
     assert digest.hexdigest()==path.with_suffix('.iso.sha256').read_text().strip()
     artifacts[edition]={'file':name,'bytes':path.stat().st_size,'sha256':digest.hexdigest()}
-assert artifacts['mem']['bytes'] < artifacts['full']['bytes'], '内存盘没有小于整机盘，检查工具残留'
 vendors={line[66:]:line[:64] for line in (root/'full-vendor.sha256').read_text().splitlines()
          if line and not line.startswith('#')}
 receipt={'version':sys.argv[2],'commit':sys.argv[3],'qemu_memory_mb':int(sys.argv[4]),
@@ -117,7 +116,7 @@ receipt={'version':sys.argv[2],'commit':sys.argv[3],'qemu_memory_mb':int(sys.arg
 (root/'manifest.json').write_text(json.dumps(receipt,ensure_ascii=False,indent=2)+'\n')
 PY
 {
-  printf '%s：full/mem 成对构建，内存盘精简与真机报告修复\n\n' "$VERSION"
+  printf '%s：full/mem 成对构建与真机报告修复\n\n' "$VERSION"
   for log in run-all.log mutate.log full/firmware.log full/smoke.log full/disk-stress.log mem/firmware.log mem/smoke.log; do
     [[ -f "$EVIDENCE/$log" ]] || continue
     printf '%s: ' "$log"

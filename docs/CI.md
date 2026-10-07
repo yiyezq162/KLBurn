@@ -71,17 +71,21 @@ gh run list --repo yiyezq162/KLBurn --workflow check.yml --limit 5
 
 Native domain `f041a928-d7ee-4dd3-a031-d2b05f57ecef`, title `KLBurn-BuildVM`,
 private guest172.30.91.2. Earlier2GiB bootstrap verified root/chroot/mount/loop/
-exFAT/nested KVM and Mihomo → BitsFlow DE/GitHub. The6GiB stopped configuration
-has not passed a boot/full working-set check. NAS usable physical RAM7.53GiB:
+exFAT/nested KVM and Mihomo → BitsFlow DE/GitHub. The6GiB configuration has since
+booted and built both1.10.6 candidate editions; complete release acceptance is
+recorded separately in `out/release-1.10.6/`. NAS usable physical RAM7.53GiB:
 do not start heavy VM builds beside full CI/lab jobs or assume configured RAM
 is physical capacity. Runner source-check ceiling is2CPU/1GiB+1GiB swap.
 
 Guest source `/srv/klburn/src`, explicit `KLBURN_WORK=/srv/klburn/work`,
 task-specific `/srv/klburn/e2e` directories, `/srv/klburn/artifacts`.
 Only this guest receives privileged mount/loop/KVM work; the Docker Runner has
-no KVM, physical disk or NAS Docker socket. **Runner-to-VM build transport,
-source/vendor migration and Release workflow are NOT_CONFIGURED** by this
-source-Runner onboarding. No NAS root key/generic host-exec API is put in CI.
+no KVM, physical disk or NAS Docker socket. **Automatic Runner-to-VM transport
+and GitHub Release workflow remain NOT_CONFIGURED**. Manual source/vendor
+migration is available through trusted NAS root/QGA and a temporary private
+bridge-only transfer server; source checks and `build/release.sh` execute in
+the guest. Verified artifacts are copied to the Mac project `out/` and their
+SHA256 values checked again. No NAS root key/generic host-exec API is put in CI.
 
 Current guest management is trusted NAS root → QEMU Guest Agent; independent
 guest SSH/key/interactive login is not enrolled. Use pinned NAS alias

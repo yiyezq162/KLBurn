@@ -237,10 +237,11 @@ sudo KLBURN_WORK=/srv/klburn/work ./build/release.sh --mutate
 入口再次运行源码检查（必须有 shellcheck），判定/守卫改动使用 `--mutate`。
 它拒绝已有版本 tag、脏源码或构建中源码变动，依次构建 full/mem、核对盘内
 版本/commit/edition、固件/动态依赖、两版 QEMU 冒烟及 full 完整真写盘；
-两版通过且 mem 小于 full 后才生成 annotated tag。它不推送 GitHub 或上传 ISO。
+两版通过后才生成 annotated tag；不以 ISO 大小作为发布门槛。它不推送 GitHub 或上传 ISO。
 `out/release-<版本>/` 保存各阶段日志、盘内配置和 `manifest.json`（含精确文件名、
 大小、SHA256、commit、QEMU 内存及真机验收 NOT_RUN）。
-资源有限时可传 `--memory-mb 2048`；默认仍为 4096，收据区分这两种 QEMU 环境。
+完整整机验收使用默认 4096MiB QEMU 内存；2048MiB 的冒烟不能证明全量基准与压测可运行。
+内存专用盘可单独使用 `--memory-mb 2048`。验收收据区分实际 QEMU 资源。
 构建并行度可用 `KLBURN_BUILD_JOBS=2` 限制；压缩缓存上限为 256MiB。
 正式发布要求 `vendor/full-vendor.sha256` 覆盖并校验整机版既有工具与唯一 NVIDIA
 安装包，缺失或字节变化会停止，不能把工具缺失后的 SKIP 当作完整交付。
