@@ -31,8 +31,20 @@ jobs:
       - name: Run non-root source regression
         run: |
           mkdir -p ci-reports
+          if [[ "$RUNNER_ENVIRONMENT" == self-hosted ]]; then
+            fixture=/home/runner/.private-fixtures/klburn-hardware-v1
+            test -d "$fixture"
+            test ! -e test_out && test ! -L test_out
+            ln -s "$fixture" test_out
+          fi
           set -o pipefail
           ./tests/run-all.sh 2>&1 | tee ci-reports/source-checks.log
+      - name: Unlink exact private fixture reference
+        if: always() && runner.environment == 'self-hosted'
+        run: |
+          if [[ -L test_out && "$(readlink test_out)" == /home/runner/.private-fixtures/klburn-hardware-v1 ]]; then
+            unlink test_out
+          fi
       - name: Record explicit release gaps
         if: always()
         run: |

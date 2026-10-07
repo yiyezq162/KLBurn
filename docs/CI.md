@@ -10,6 +10,18 @@ conversion cases remain skipped without their optional tooling. Do not invent
 samples, upload customer originals or weaken the hardware gate to make CI green.
 This source result is not ISO, QEMU, firmware or hardware acceptance.
 
+The owner subsequently restored originals from Mac Downloads to local ignored
+`test_out/` (45 sensor-file samples; not45independent machines). NAS keeps only
+223 required sensor/power text files under private0700 home path
+`/home/runner/.private-fixtures/klburn-hardware-v1`, with anonymous sample numbers
+and byte-identical contents; no full HTML/PDF/customer reports were transferred.
+Trusted NAS source checks link this directory for the job then unlink only that
+exact reference. Tests copy required input into temporary directories before
+writing; originals are not test output. Only aggregate source-check logs are
+uploaded, not private fixtures. Cloud PR/fallback has no private dataset and
+does not establish the mandatory real-sample coverage gate without an approved
+private-input workflow. Do not bypass the assertions to hide that boundary.
+
 | Component | Current role |
 | --- | --- |
 | `nas-ci-klburn` | Repository-specific nonprivileged Docker Actions Runner; selector `self-hosted, Linux, X64, nas-klburn`; source regression only |
