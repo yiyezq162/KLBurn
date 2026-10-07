@@ -29,7 +29,10 @@ macOS 自带 Bash/BSD 工具不作为全套回归环境。已配置专用 NAS �
   只 clone 源码可能仍能构建，但可选工具缺失会减少盘内功能。清单见
   [vendor/README.md](../vendor/README.md)。
 - `test_out/` 是不入库的客户真机样本；依赖它的回归需在测试机另行恢复。
-  样本缺失导致跳过时，不能当成已覆盖该组用例。不要把客户原始报告推到 GitHub。
+  当前 Mac 原始样本在项目 `/Users/li/Projects/KLBurn/test_out/`，不再放 Downloads；
+  NAS 源码 CI 只保留匿名编号的必要传感器/电源文本私有副本，见 [CI](CI.md)。
+  现有真机传感器/未接交流电覆盖自检在缺输入时会失败，不能当成跳过或已覆盖。
+  不要把客户原始报告推到 GitHub。
 - `out/` 的旧 ISO、日志和截图另行保存，clone 不会下载它们。
 - 虚拟机跑 QEMU 要开放嵌套虚拟化，让 `/dev/kvm` 可用；脚本支持纯模拟，但会慢很多。
   构建与磁盘测试需要 root、loop 设备及挂载权限。
