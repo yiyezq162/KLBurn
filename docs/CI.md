@@ -1,6 +1,39 @@
 # KLBurn dedicated NAS Runner and build VM
 
-## Current ISO delivery evidence (2026-10-07)
+## Current ISO delivery evidence (2026-10-13)
+
+Version1.10.7, clean source/tag `c4f3b8b`: paired full/mem ISO files copied to
+Mac `out/`, both sizes and SHA256 values verified after transfer. Build-VM
+source2052/root-disk11 and Runner mutation135 passed (clean mutation baseline).
+Full firmware51/smoke10/disk-stress32; mem firmware54/retry-smoke22 passed.
+Real full-ISO keyboard0/root Shell/exit7/menu/re-entry and no report directory
+verified; scope, CPU/memory, disk and final screenshots inspected.
+
+The initial mem smoke was interrupted by a confirmed NAS memory-cgroup OOM
+killing this build VM; original logs are retained, not converted to PASS.
+Same ISO retried without rebuild: full nested QEMU4096MiB, mem retry2048MiB.
+Initial VM live3072MiB, hypervisor limit1536MiB; recovery VM live2048MiB,
+hypervisor limit2304MiB; temporary guest swap3072MiB. Build/full stage cgroup
+2400MiB, recovery mem1500MiB. These are resource-limited software acceptance,
+not performance or physical-hardware evidence. Permanent6vCPU/6GiB unchanged;
+VM shut off after delivery, on-demand proxy stopped, other VMs preserved.
+
+**The mem report itself is FAIL**, solely `check_dimm_serial`: QEMU supplies
+no valid DIMM serial and the existing strict policy rejects that. `stress_mem`
+is PASS for256MiB of1966MiB (13%),150seconds; HTML/PDF/CSV are present. The22
+passing workflow assertions do not mean a healthy physical DIMM was accepted.
+Physical server/GPU/RAID validation remains NOT_RUN. Evidence/manifest and
+retained failures are in `out/release-1.10.7/`.
+
+Pushed source `c4f3b8b`, [run38373267857](https://github.com/yiyezq162/KLBurn/actions/runs/38373267857),
+completed on `nas-ci-klburn`:2044passed/0failed; evidence artifact finalized.
+These Runner counts are separate from the Build-VM2052 denominator.
+
+Public [v1.10.7 prerelease](https://github.com/yiyezq162/KLBurn/releases/tag/v1.10.7)
+contains both ISOs, both SHA256 files and manifest.json. All5server asset digests
+match the local files; publication metadata is retained in the evidence folder.
+
+## Previous ISO delivery evidence (2026-10-07)
 
 Version1.10.6, clean source/tag `a8ffc13`: full and mem artifacts copied to
 `/Users/li/Projects/KLBurn/out/` and both SHA256 values verified after transfer.

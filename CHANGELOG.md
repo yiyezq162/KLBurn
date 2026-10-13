@@ -21,17 +21,35 @@ git tag -l --sort=version:refname
 `v1.5.0` `v1.6.0` `v1.7.0` `v1.7.1` `v1.7.2` `v1.7.3` `v1.7.4` `v1.7.5`
 `v1.7.6` `v1.7.7` `v1.7.8` `v1.8.2` `v1.8.3` `v1.8.4` `v1.9.0` `v1.9.2`
 `v1.9.3` `v1.9.4` `v1.9.5` `v1.9.6` `v1.9.7` `v1.9.8` `v1.9.9` `v1.10.0`
-`v1.10.1` `v1.10.2` `v1.10.3` `v1.10.4` `v1.10.5` `v1.10.6`。
+`v1.10.1` `v1.10.2` `v1.10.3` `v1.10.4` `v1.10.5` `v1.10.6` `v1.10.7`。
 
-## v1.10.7（启动菜单 Shell 入口，尚未完成 ISO 验收）
+## v1.10.7（启动菜单 Shell 入口）
 
 - full 启动范围菜单新增 `[0] SHELL`，直接进入 root Bash；不启动测试、不建立
   本轮报告目录。输入 `exit` 返回范围菜单，重新开始 60 秒倒计时。
 - 保留 1–6 范围、回车/超时默认全量及原时长菜单；启动与收尾共用 Shell 入口，
   提示手动命令的写盘风险及 live 系统修改的临时性。mem 自动测试流程不变。
-- NAS x86 非 root 源码回归 2044 项全绿，变异基线全绿、135 条全抓住；真实交互
-  Bash PTY 验证通过。root 磁盘排除、双版构建、固件、QEMU/截图及真机验收
-  NOT_RUN，尚无 v1.10.7 tag。日志保存在本地 `out/source-1.10.7/`。
+- NAS Runner 源码回归 2044 项全绿，变异基线全绿、135 条全抓住；构建 VM
+  源码 2052 项、root 磁盘排除 11 项全绿。保留各自实际分母。
+- full 固件/依赖 51 项、冒烟 10 项、完整真写盘 32 项通过；mem 固件/工具边界
+  54 项、重跑流程/报告检查 22 项通过。实际 ISO 的 0 → root Shell → exit 7 →
+  返回菜单 → 再次进入已验证；Shell 内未建立报告目录，菜单和仪表盘截图已查看。
+
+> **`v1.10.7` 打在 `c4f3b8b` 上**，两版盘内 commit 相同且无 dirty。
+> full：`out/KLBurn-1.10.7-20261013.iso`，SHA256
+> `a80c46e3b5979cffcb25db68ca27fbb0bd1b3ad64b923371b5e66881dc05a15f`；
+> mem：`out/KLBurn-MEM-1.10.7-20261013.iso`，SHA256
+> `fdafb6d9ec84891e4b4fa868711b2e48c5072ad8241cbb9832249d6644cdc85c`。
+> 首轮 mem 冒烟因 NAS 对构建 VM 的临时内存 cgroup OOM 中断，日志保留；
+> 同一 ISO 调整资源后重跑通过，未重建或替换产物。full QEMU 为 4096MiB，
+> mem 重跑为 2048MiB，临时构建资源见 `out/release-1.10.7/manifest.json`。
+> **mem 虚拟机报告不是全绿**：唯一 FAIL 是缺少有效 DIMM 序列号，符合既有严格规则；
+> 内存压测 PASS，本轮覆盖 256MiB/1966MiB（13%），持续 150 秒。流程检查不等于真机内存验收。
+> 新版物理服务器/GPU/RAID 验收 NOT_RUN。GitHub 源码 CI
+> [38373267857](https://github.com/yiyezq162/KLBurn/actions/runs/38373267857)
+> 在 `nas-ci-klburn` 上 2044/0，证据 artifact 已完成上传。
+> [GitHub v1.10.7 prerelease](https://github.com/yiyezq162/KLBurn/releases/tag/v1.10.7)
+> 已发布双版 ISO、两份 SHA256 和 manifest；五个服务端资产 digest 与本地一致。
 
 ## v1.10.6（双版发布、内存盘精简与真机报告修复）
 
