@@ -64,7 +64,7 @@ read_line_countdown() {
 }
 
 # ---------------------------------------------------------------- 菜单的倒计时循环
-# menu_pick <默认键> <超时秒> <最大键> <倒计时提示语> -> 打印选中的键
+# menu_pick <默认键> <超时秒> <最大键> <倒计时提示语> [最小键=1] -> 打印选中的键
 #
 # 抽出来是因为范围菜单和时长菜单一字不差地重复了这段：数着秒、单键读、
 # 回车用默认、超时也用默认。**"超时自动继续"是这两屏共同的硬约束**
@@ -72,7 +72,7 @@ read_line_countdown() {
 #
 # 单键读（read -n 1），不要回车 —— 现场按 1 就该立刻走。
 menu_pick() {
-  local default_key="$1" timeout="$2" maxkey="$3" hint="$4"
+  local default_key="$1" timeout="$2" maxkey="$3" hint="$4" minkey="${5:-1}"
   local key start now remaining
   start=$(date +%s)
   while :; do
@@ -82,11 +82,18 @@ menu_pick() {
     printf '\r\033[K  %s%s in %2ds%s' "$C_YEL" "$hint" "$remaining" "$C_RST" >&2
     if IFS= read -r -s -t 1 -n 1 key; then
       case "$key" in
-        [1-9]) (( key <= maxkey )) && { printf '\n' >&2; printf '%s' "$key"; return 0; } ;;
+        [0-9]) (( key >= minkey && key <= maxkey )) && { printf '\n' >&2; printf '%s' "$key"; return 0; } ;;
         '')    printf '\n' >&2; printf '%s' "$default_key"; return 0 ;;
       esac
     fi
   done
+}
+
+# 启动菜单和收尾菜单共用；直接接控制台，不能放进命令替换或日志管道。
+maintenance_shell() {
+  printf '  Root shell. Type "exit" to return to the menu.\n'
+  printf '  Manual commands can overwrite disks. Live-system changes are temporary.\n'
+  /bin/bash -i || true
 }
 
 # ---------------------------------------------------------------- 测试范围菜单
@@ -99,27 +106,32 @@ menu_pick() {
 select_scope() {
   local chosen
 
-  brand_bar "$(panel_width)" "SELECT SCOPE"
-  section "SELECT TEST SCOPE"
-  printf '   %s[1]%s  FULL BURN-IN     everything below, run as one session  (default)\n' "$C_BLD" "$C_RST"
-  printf '   %s[2]%s  CPU ONLY         CPU stress + computation validation\n'             "$C_BLD" "$C_RST"
-  printf '   %s[3]%s  MEMORY ONLY      memory stress + ECC re-check\n'                    "$C_BLD" "$C_RST"
-  printf '   %s[4]%s  GPU ONLY         GPU stress + vendor diagnostics\n'                 "$C_BLD" "$C_RST"
-  printf '   %s[5]%s  DISK ONLY        disk stress (still asks before writing)\n'         "$C_BLD" "$C_RST"
-  printf '   %s[6]%s  INVENTORY ONLY   collect + cross-check only, no burn-in at all\n'   "$C_BLD" "$C_RST"
-  printf '\n'
-  printf '   %sInventory, configuration cross-checks and NIC tests run in every mode.%s\n' "$C_GRY" "$C_RST"
-  printf '   %sParts outside the chosen scope are NOT tested and NOT judged - the%s\n'     "$C_GRY" "$C_RST"
-  printf '   %sreport says so, and its folder name carries the scope.%s\n\n'               "$C_GRY" "$C_RST"
+  while :; do
+    brand_bar "$(panel_width)" "SELECT SCOPE"
+    section "SELECT TEST SCOPE"
+    printf '   %s[0]%s  SHELL            root command line; exit returns to this menu\n'       "$C_BLD" "$C_RST"
+    printf '   %s[1]%s  FULL BURN-IN     everything below, run as one session  (default)\n' "$C_BLD" "$C_RST"
+    printf '   %s[2]%s  CPU ONLY         CPU stress + computation validation\n'             "$C_BLD" "$C_RST"
+    printf '   %s[3]%s  MEMORY ONLY      memory stress + ECC re-check\n'                    "$C_BLD" "$C_RST"
+    printf '   %s[4]%s  GPU ONLY         GPU stress + vendor diagnostics\n'                 "$C_BLD" "$C_RST"
+    printf '   %s[5]%s  DISK ONLY        disk stress (still asks before writing)\n'         "$C_BLD" "$C_RST"
+    printf '   %s[6]%s  INVENTORY ONLY   collect + cross-check only, no burn-in at all\n'   "$C_BLD" "$C_RST"
+    printf '\n'
+    printf '   %sModes 1-6 include inventory, configuration cross-checks and NIC tests.%s\n' "$C_GRY" "$C_RST"
+    printf '   %sParts outside the chosen scope are NOT tested and NOT judged - the%s\n'     "$C_GRY" "$C_RST"
+    printf '   %sreport says so, and its folder name carries the scope.%s\n\n'               "$C_GRY" "$C_RST"
 
-  chosen="$(menu_pick 1 "${SCOPE_MENU_TIMEOUT:-60}" 6 \
-              'Press 1-6 to choose, ENTER to accept.  Auto-select FULL BURN-IN')"
+    chosen="$(menu_pick 1 "${SCOPE_MENU_TIMEOUT:-60}" 6 \
+                'Press 0-6 to choose, ENTER to accept.  Auto-select FULL BURN-IN' 0)"
 
-  case "$chosen" in
-    2) KLB_SCOPE="cpu"  ;; 3) KLB_SCOPE="mem"  ;; 4) KLB_SCOPE="gpu" ;;
-    5) KLB_SCOPE="disk" ;; 6) KLB_SCOPE="info" ;; *) KLB_SCOPE="full" ;;
-  esac
-  printf '  %s==> %s%s\n\n' "$C_GRN$C_BLD" "$(scope_label "$KLB_SCOPE")" "$C_RST"
+    case "$chosen" in
+      0) maintenance_shell; continue ;;
+      2) KLB_SCOPE="cpu"  ;; 3) KLB_SCOPE="mem"  ;; 4) KLB_SCOPE="gpu" ;;
+      5) KLB_SCOPE="disk" ;; 6) KLB_SCOPE="info" ;; *) KLB_SCOPE="full" ;;
+    esac
+    printf '  %s==> %s%s\n\n' "$C_GRN$C_BLD" "$(scope_label "$KLB_SCOPE")" "$C_RST"
+    return 0
+  done
 }
 
 # ---------------------------------------------------------------- 时长选择菜单

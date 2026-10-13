@@ -16,7 +16,8 @@
    U 盘里多出一个文件夹：报告 + 全部原始数据 ← PASS / FAIL 大字
 ```
 
-**所有等待的屏都有倒计时、都会自己往下走。** 这是硬约束：
+**自动测试流程的等待屏都有倒计时、都会自己往下走。** 主动选 `0` 进入 Shell 则停留在命令行，直到输入 `exit`。
+这是无人值守测试的硬约束：
 插上盘没人管的时候它必须跑完，绝不能停在一个等按键的屏上。
 
 > 屏幕上全是英文——Linux 文本控制台显示不了中文（会变一屏方块）。
@@ -51,6 +52,7 @@
 +==============================================================================+
 |  SELECT TEST SCOPE                                                           |
 +==============================================================================+
+   [0]  SHELL            root command line; exit returns to this menu
    [1]  FULL BURN-IN     everything below, run as one session  (default)
    [2]  CPU ONLY         CPU stress + computation validation
    [3]  MEMORY ONLY      memory stress + ECC re-check
@@ -58,11 +60,12 @@
    [5]  DISK ONLY        disk stress (still asks before writing)
    [6]  INVENTORY ONLY   collect + cross-check only, no burn-in at all
 
-   Press 1-6 to choose, ENTER to accept.  Auto-select FULL BURN-IN in 34s
+   Press 0-6 to choose, ENTER to accept.  Auto-select FULL BURN-IN in 34s
 ```
 
 | 键 | 什么时候用 | 报告目录后缀 |
 |---|---|---|
+| 0 Shell 命令行 | 便携维护环境；输入 `exit` 返回本菜单 | 不建立本轮报告 |
 | **1 全量** | **出厂验收就用它。** 默认 | `_Full` |
 | 2 CPU 单独 | 只想复验一颗换过的 CPU、或者怀疑算力/算错 | `_CPU` |
 | 3 内存单独 | 换过内存条、或者查 ECC | `_MEM` |
@@ -70,8 +73,15 @@
 | 5 硬盘单独 | 只压盘。**时长全给硬盘**（不是全量档的 30%） | `_DISK` |
 | 6 仅导出报告 | 只想要一份配置清单，几分钟出结果 | `_INFO` |
 
-**不管选哪个，硬件清单、配置核对、网卡三项都照跑**——它们合起来几十秒，
+**选 1–6 时，硬件清单、配置核对、网卡三项都照跑**——它们合起来几十秒，
 回答的是"这台机器装了什么、装得对不对"，那是任何一份报告的底座。
+
+`0` 复用收尾菜单的 root Bash，不自动采集或压测。进入菜单前仍会定位 U 盘报告
+分区并尝试联网校时；退出 Shell 后重新开始 60 秒倒计时，回车或超时仍选全量。
+可使用 full 盘现有工具和驱动，但不保证支持所有硬件，也没有新增桌面环境。
+live 系统内的修改通常重启即失；需要保存的文件请明确写到 U 盘数据分区。
+**Shell 的手动命令不受测试流程的写盘确认保护，能直接修改或擦除硬盘。**
+此入口只属于 full；内存专用盘仍开机自动测试。
 
 > ⚠️ **单项专测的报告不能当整机验收依据。**
 > 报告抬头第一行就写着本轮范围，结论下面还有一句"哪些部件这一轮没测"，

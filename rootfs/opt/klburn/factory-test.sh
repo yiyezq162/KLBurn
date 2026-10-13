@@ -822,7 +822,7 @@ while :; do
   case "$key" in
     r|R) systemctl reboot; exit 0 ;;
     p|P) systemctl poweroff; exit 0 ;;
-    s|S) printf '  Dropping to shell. Type "exit" to return.\n'; /bin/bash -i ;;
+    s|S) maintenance_shell ;;
     t|T) exec "$0" ;;
     c|C) bmc_clear_sel || true ;;
     *)   printf '  Unknown option.\n' ;;

@@ -617,12 +617,31 @@ echo "=== 测试范围菜单 + 仅导出报告那一档的结论屏（1.9.5）==
 SCOPE_MENU="$(declare -f select_scope | grep -oE "'[^']*'" | tr -d "'")"
 check "范围菜单打到屏幕上的内容全是可打印 ASCII" "" \
       "$(printf '%s' "$SCOPE_MENU" | LC_ALL=C grep -nvE '^[ -~]*$' | head -3 | tr '\n' ';')"
-for opt in 'FULL BURN-IN' 'CPU ONLY' 'MEMORY ONLY' 'GPU ONLY' 'DISK ONLY' 'INVENTORY ONLY'; do
+for opt in 'SHELL' 'FULL BURN-IN' 'CPU ONLY' 'MEMORY ONLY' 'GPU ONLY' 'DISK ONLY' 'INVENTORY ONLY'; do
   check "范围菜单里有「$opt」" "yes" \
         "$(declare -f select_scope | grep -qF "$opt" && echo yes || echo no)"
 done
 check "六个选项键 [1]~[6] 都在" "6" \
       "$(declare -f select_scope | grep -oE '\[[1-6]\]' | sort -u | grep -c . || true)"
+check "启动菜单有独立的 [0] Shell 入口" "1" \
+      "$(declare -f select_scope | grep -cF '[0]' || true)"
+# 真正喂按键，防止只加了文字却仍把 0 当无效键，或污染时长菜单。
+check "范围选择允许零键" "0" "$(printf 0 | menu_pick 1 2 6 test 0 2>/dev/null)"
+check "时长选择忽略零键并继续读正常键" "3" "$(printf 03 | menu_pick 2 2 6 test 2>/dev/null)"
+check "范围菜单回车仍选全量" "1" "$(printf '\n' | menu_pick 1 2 6 test 0 2>/dev/null)"
+check "范围菜单超时仍选全量" "1" "$(menu_pick 1 0 6 test 0 </dev/null 2>/dev/null)"
+check "范围菜单忽略越界按键" "6" "$(printf 97x6 | menu_pick 1 2 6 test 0 2>/dev/null)"
+# 只替换启动外部 Bash 的边界，实际菜单与按键循环都运行；非零 Shell 退出也可返回。
+SHELL_FLOW="$(
+  maintenance_shell() { printf 'SHELL_VISIT\n'; return 7; }
+  SCOPE_MENU_TIMEOUT=2
+  select_scope <<< '006' 2>/dev/null
+  printf 'FINAL_SCOPE=%s\n' "$KLB_SCOPE"
+)"
+check "连续两次进入 Shell 后都能返回菜单" "2" \
+      "$(printf '%s\n' "$SHELL_FLOW" | grep -c '^SHELL_VISIT$' || true)"
+check "Shell 返回后能选择仅导出报告" "FINAL_SCOPE=info" \
+      "$(printf '%s\n' "$SHELL_FLOW" | tail -1)"
 # 现场最怕"插上去没反应"。这一屏必须自己往下走。
 check "范围菜单必须走 menu_pick（那里面才有倒计时和超时兜底）" "1" \
       "$(declare -f select_scope | grep -c 'menu_pick' || true)"
