@@ -884,9 +884,10 @@ gpu-burn 的 Makefile 默认动态链接 `-lcuda -lcublas -lcudart`，还往二�
 直接打包出来的盘一跑就是 `error while loading shared libraries: libcublas.so.12`，
 然后被 `gpu_stress()` 判成「gpu_burn 异常退出 → 显卡故障」，纯粹的误杀。
 
-随包带 `.so` 也能解决，但 `libcublasLt.so` 一个就 717MB。所以改成用 `nvprune`
-裁剪静态库（只留 `GPU_ARCHS` 里那几代）再静态链接，最后是一个 330MB 出头的
-自包含二进制。`chroot-setup.sh` 里有自检：装完用 `ldd` 确认没有动态依赖
+1.11.1 起最终程序链接原始、未经裁剪的静态库，不为缩小产物改写厂商对象文件；
+保留 `nvprune` 构建期逐架构检查，但探针输出不参与最终链接。构建前后核对原始库
+哈希，确认没有改变输入。程序体积按实际产物记录，不沿用旧裁剪版本的体积。
+`chroot-setup.sh` 里有自检：装完用 `ldd` 确认没有动态依赖
 cuBLAS/cudart，依赖了就直接让构建失败。
 
 ### NVIDIA 驱动必须用 open kernel module

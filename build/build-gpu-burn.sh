@@ -132,12 +132,14 @@ done
 # 然后被判成"gpu_burn 异常退出 -> 显卡故障"，纯粹的误杀。
 #
 # 随盘带 .so 也能解决，但 libcublasLt.so 一个就 717MB。
-# 改成"裁剪静态库 + 静态链接"之后是一个 300MB 出头的自包含二进制，
-# 少一半体积，还不用操心 rpath。
+# 最终链接原始静态库，不为体积裁剪厂商对象文件。
+# 下方裁剪结果只用来保留既有逐架构检查，不进入最终程序。
 # libcuda 仍然是动态链接的 —— 它属于显卡驱动，必须用目标机器上那一份。
-info "裁剪 cuBLAS 静态库（保留 sm_${GPU_ARCHS// /, sm_}）..."
+info "检查 cuBLAS 架构覆盖（sm_${GPU_ARCHS// /, sm_}）；最终链接原始库..."
 mkdir -p "$TMP_DIR"
 NVPRUNE="$CUDAPATH/bin/nvprune"
+sha256sum "$CUDA_LIB/libcublas_static.a" "$CUDA_LIB/libcublasLt_static.a" \
+  "$CUDA_LIB/libcudart_static.a" "$CUDA_LIB/libculibos.a" > "$TMP_DIR/sdk-libraries.sha256"
 
 # ⚠️⚠️ **必须用 -gencode，绝对不能用重复的 --arch。**
 #
@@ -182,7 +184,6 @@ prune_size_one() {   # prune_size_one <库> <arch> -> 字节数（失败给空�
 }
 
 read -r -a ARCH_LIST <<< "$GPU_ARCHS"
-LINK_L="$TMP_DIR"
 for a in libcublas_static.a libcublasLt_static.a; do
   [[ -f "$CUDA_LIB/$a" ]] || die "缺少 $CUDA_LIB/$a（需要 libcublas-dev 包）"
   if [[ -x "$NVPRUNE" ]] \
@@ -241,11 +242,13 @@ cp "$CUDA_LIB/libcudart_static.a" "$TMP_DIR/" 2>/dev/null || true
 
 info "静态链接 ..."
 g++ -o "$TMP_DIR/gpu_burn" "$SRC_DIR/gpu_burn-drv.o" -O3 \
-    -L"$LINK_L" -L"$CUDA_LIB" -L"$CUDA_LIB/stubs" \
+    -L"$CUDA_LIB" -L"$CUDA_LIB/stubs" \
     -lcublas_static -lcublasLt_static -lcudart_static -lculibos \
     -lcuda -lpthread -ldl -lrt \
   || die "静态链接失败"
 strip "$TMP_DIR/gpu_burn" 2>/dev/null || true
+sha256sum --check --status "$TMP_DIR/sdk-libraries.sha256" \
+  || die "CUDA 原始静态库在构建期间被修改，停止交付"
 
 # 自检：除了 libcuda 和系统库，不该再动态依赖任何 CUDA 库，
 # 否则出盘照样是 "error while loading shared libraries"。
@@ -263,12 +266,18 @@ install -m 0755 "$TMP_DIR/gpu_burn"    "$OUT_DIR/gpu_burn"
 install -m 0644 "$SRC_DIR/$COMPARE"    "$OUT_DIR/$COMPARE"
 python3 "$SCRIPT_DIR/vendor-notices.py" "$SRC_DIR" "$OUT_DIR" \
   --required LICENSE --optional NOTICE
+python3 "$SCRIPT_DIR/vendor-notices.py" "$CUDAPATH" "$OUT_DIR" --required EULA.txt
 git -C "$SRC_DIR" rev-parse HEAD > "$OUT_DIR/SOURCE-COMMIT.txt"
+printf '%s\n' "Source: $GPU_BURN_REPO" "CUDA compiler: $NVCC_VER" \
+  "PTX baseline: $COMPUTE" "Architecture checks: $GPU_ARCHS" \
+  'SDK static libraries: original, unpruned; source-library hashes verified unchanged.' \
+  'Licenses: LICENSE (gpu-burn), EULA.txt (CUDA); separate redistribution review required.' \
+  > "$OUT_DIR/SOURCE.txt"
 
 info "完成："
 ls -la "$OUT_DIR"
 printf '\n'
 info "compare 文件: $COMPARE"
 info "PTX 基线: compute_${COMPUTE}（更新的架构由驱动 JIT）"
-info "cuBLAS 保留架构: sm_${GPU_ARCHS// /, sm_}"
+info "cuBLAS 使用未裁剪原始静态库；检查架构: sm_${GPU_ARCHS// /, sm_}"
 info "下一步: sudo ./build/build-iso.sh --with-nvidia"

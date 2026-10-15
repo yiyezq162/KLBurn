@@ -554,7 +554,8 @@ if [[ "${INCLUDE_NVIDIA:-0}" == "1" ]]; then
     [[ -s "$STAGE/vendor/gpu_burn/LICENSE" ]] || fail "gpu_burn 缺少上游 LICENSE 原文，停止打包"
     mkdir -p /opt/klburn/tools/licenses/gpu_burn
     install -m 0644 "$STAGE/vendor/gpu_burn/LICENSE" /opt/klburn/tools/licenses/gpu_burn/LICENSE
-    for notice in NOTICE SOURCE-COMMIT.txt; do
+    [[ -s "$STAGE/vendor/gpu_burn/EULA.txt" ]] || fail "gpu_burn 缺少对应 CUDA EULA 原文，停止打包"
+    for notice in EULA.txt NOTICE SOURCE-COMMIT.txt SOURCE.txt; do
       if [[ -f "$STAGE/vendor/gpu_burn/$notice" ]]; then
         install -m 0644 "$STAGE/vendor/gpu_burn/$notice" "/opt/klburn/tools/licenses/gpu_burn/$notice"
       fi

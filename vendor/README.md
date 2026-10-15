@@ -7,6 +7,8 @@
 会拒绝缺少必需离线组件的 full 构建。1.11.1 起源码编译助手保留上游许可原文，
 发布清单也必须纳入这些文件；gpu-burn 存在但许可缺失时底层构建同样停止。
 详见 [第三方分发边界](../docs/third-party.md)，不要把“可下载”当作分发授权。
+编译 GPU 工具时必须保留所用 CUDA 工具链根目录的 `EULA.txt`（对应版本的
+`cuda-documentation` 包提供该文件）；只有编译器而缺少许可原文时会停止。
 
 以上自动检测针对 full。1.10.6 起 mem 不复制或安装
 NVIDIA/CUDA、显卡压测、阵列卡管理或性能基准程序；`--edition mem --with-nvidia`
@@ -116,7 +118,7 @@ sudo apt-get install -y cuda-toolkit-12-8 build-essential git
 
 脚本会：自动在 `/usr/local/cuda*` 下找 `nvcc` → 从 GitHub 克隆
 [wilicc/gpu-burn](https://github.com/wilicc/gpu-burn) → 编译 →
-**裁剪 cuBLAS 静态库并静态链接** → 把 `gpu_burn` 和 `compare.fatbin` 装进
+**保留逐架构检查、最终链接原始静态库** → 把 `gpu_burn` 和 `compare.fatbin` 装进
 `vendor/gpu_burn/`。克隆失败的话脚本会提示你手动把源码解压到那个目录再重跑。
 
 三个可用的环境变量：
@@ -124,8 +126,8 @@ sudo apt-get install -y cuda-toolkit-12-8 build-essential git
 | 变量 | 默认 | 用途 |
 |---|---|---|
 | `CUDAPATH` | 自动在 `/usr/local/cuda`、`cuda-13*`、`cuda-12*` 里找 | 自动找不到 nvcc 时手工指定 |
-| `COMPUTE`  | `75` | gpu_burn 自己那个 compare 核的 PTX 基线架构 |
-| `GPU_ARCHS`| `80 86 89 90 120` | cuBLAS 里保留哪几代卡的 cubin |
+| `COMPUTE`  | `60` | gpu_burn 自己那个 compare 核的 PTX 基线架构 |
+| `GPU_ARCHS`| `60 61 70 75 80 86 89 90 100 120` | 构建期检查哪些架构；不裁剪最终链接库 |
 
 > `COMPUTE` 定低不会削弱压测强度：`compare` 核走 PTX/fatbin + 驱动 JIT，PTX 向上兼容；
 > 真正的算力负载来自 cuBLAS 里的预编译 cubin。定低反而让更老的卡也能跑。
@@ -281,19 +283,19 @@ build/custom-logo.png
 ```
 vendor/bench/
 ├── cpuflops/
-│   └── klburn_flops                  # CPU 浮点算力（1.9.5 起**首选**这个）
+│   └── klburn_flops                  # CPU 浮点算力（非 Intel 平台首选）
 ├── cuda-samples/
 │   ├── bandwidthTest                 # 主机↔显存、显存内部的传输带宽
 │   └── p2pBandwidthLatencyTest       # 显卡两两之间的互联带宽
 ├── linpack/
-│   ├── xlinpack_xeon64               # CPU 浮点算力（只在 cpuflops 没放时兜底）
+│   ├── xlinpack_xeon64               # CPU 浮点算力（Intel 平台首选）
 │   ├── help.lpk  xhelp.lpk           # 它自己要读的帮助文件，一起放
 │   └── （老版本还要 libiomp5.so，见下）
 └── mlc/
     └── mlc                           # 内存峰值读带宽
 ```
 
-> **`cpuflops/` 是 1.9.5 新增的，而且优先于 `linpack/`。**
+> **`cpuflops/` 是 1.9.5 新增的；当前非 Intel 平台优先使用它，Intel 平台优先使用 `linpack/`。**
 > `xlinpack_xeon64` 是 Intel 发布的二进制，在海光 / AMD 上第一行就打
 > `runs on only genuine Intel processors` 然后退出 —— 非 Intel 机器的
 > 「CPU 浮点算力」于是永远测不出来。`klburn_flops` 是我们自己写的
@@ -305,9 +307,8 @@ vendor/bench/
 > ./build/build-cpuflops.sh
 > ```
 >
-> ⚠️ **它在 Intel 机器上的数字比 `xlinpack_xeon64` 低一到两成**（OpenBLAS 对
-> MKL 的常见差距），这是换了尺子、不是机器变慢了。统一用它换来的是
-> **全系列机器的数字可比**，而这一项本来就只报数、不判合格。
+> ⚠️ OpenBLAS 与 Intel LINPACK 的实现不同，不能把不同测试实现之间的数字差异
+> 直接当作硬件退化；这一项只报实测数、不判合格。
 > 这一轮用的是哪套记在 `meta.json` 的 `bench_params.flops_method` 里
 > （只在内部工程报告里显示）。
 >

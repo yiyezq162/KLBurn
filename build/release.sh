@@ -56,7 +56,8 @@ required=('gpu_burn/gpu_burn','gpu_burn/compare.fatbin','storcli/storcli64',
           'bench/mlc/mlc','bench/linpack/xlinpack_xeon64','bench/cpuflops/klburn_flops',
           'bench/opendcdiag/opendcdiag','bench/cuda-samples/bandwidthTest',
           'bench/cuda-samples/p2pBandwidthLatencyTest',
-          'gpu_burn/LICENSE','gpu_burn/SOURCE-COMMIT.txt','bench/cuda-samples/LICENSE',
+          'gpu_burn/LICENSE','gpu_burn/EULA.txt','gpu_burn/SOURCE-COMMIT.txt',
+          'bench/cuda-samples/LICENSE','bench/cuda-samples/EULA.txt',
           'bench/opendcdiag/LICENSE','bench/opendcdiag/LICENSE.3rdparty',
           'bench/opendcdiag/COPYRIGHT.zlib1g','bench/opendcdiag/COPYRIGHT.libzstd1')
 if any(name not in entries for name in required):raise SystemExit('整机版工具清单不完整')

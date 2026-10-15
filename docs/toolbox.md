@@ -92,14 +92,18 @@ CPU 微码、显示/网络/USB/启动存储内核驱动及固件仍保留。
 |---|---|---|
 | `nvidia/*.run` | 显卡识别与压测的前提 | 出一张不含显卡驱动的盘；有卡的机器 GPU 各项 SKIP |
 | `gpu_burn/` | `stress_gpu` 满载烤卡 | 显卡型号/显存/驱动版本照常进报告，但没有满载压测，也就没有温度功耗曲线 |
-| `bench/cpuflops/klburn_flops` | `bench_cpu_flops` —— **我们自己写的**（源码 `build/src/klburn-flops.c` 随仓库） | 退回 `linpack/` 那个 Intel 专用二进制 → **非 Intel 机器这一项永远测不出来** |
-| `bench/linpack/xlinpack_xeon64` | 同上，只在自研那个没进盘时兜底 | 两个都不放才 SKIP |
+| `bench/cpuflops/klburn_flops` | `bench_cpu_flops`，非 Intel 平台首选；源码 `build/src/klburn-flops.c` 随仓库 | 非 Intel 平台可能无法运行 Intel 专用兜底程序，届时 SKIP |
+| `bench/linpack/xlinpack_xeon64` | Intel 平台首选，缺少时退回自研 OpenBLAS 程序 | 两个都不放才 SKIP |
 | `bench/mlc/mlc` | `bench_mem_bw` 内存峰值读带宽 | 那一项 SKIP |
 | `bench/cuda-samples/` | `bench_gpu_bw_*`（显卡传输/显存带宽）、`bench_gpu_p2p`（卡间互联） | 那几项 SKIP |
 | `bench/opendcdiag/` | `validate_cpu_sdc` —— **算完了但算错了**（静默数据损坏 SDC） | 那一项 SKIP，而且是 `origin=self` 的 SKIP：**不进交付报告** |
-| `dcgm/dcgmi` | `validate_gpu_diag` 显卡厂商诊断 | 同上。⚠️ **NVIDIA 不允许随包重分发，所以我们不带** |
+| `dcgm/dcgmi` | `validate_gpu_diag` 显卡厂商诊断 | 同上；所选版本的再分发条件尚未核实，当前不随盘提供 |
 | `storcli64` / `perccli64` / `ssacli` / `sas3ircu` | 阵列卡型号、固件、逻辑盘状态 | 阵列卡只能报 PCI 反查到的型号。**卡后面物理盘的 SMART 不依赖它** |
-| `logo.png` | 报告抬头 | 报告不显示 logo |
+| 品牌配置中的可选 PNG | 报告抬头 | 默认显示中性的 KLBurn 文字标识 |
+
+1.11.1 的 gpu-burn 构建保留逐架构检查，最终链接未经裁剪的 CUDA 原始静态库，
+并附带对应 EULA 与程序许可证。不能把这些第三方组件统称为 MIT；分发条件另见
+[第三方说明](third-party.md)。
 
 > **为什么 `origin=self` 的 SKIP 不进交付报告**：客户读到
 > 「SKIP 显卡专项诊断 当前测试环境未包含显卡厂商诊断程序」，
