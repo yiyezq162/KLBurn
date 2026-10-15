@@ -410,6 +410,8 @@ install -m 0644 "$SCRIPT_DIR/branding.json" "$STAGE/overlay/opt/klburn/branding.
 mkdir -p "$STAGE/overlay/usr/share/doc/klburn"
 install -m 0644 "$PROJ_DIR/LICENSE" "$STAGE/overlay/usr/share/doc/klburn/LICENSE"
 install -m 0644 "$PROJ_DIR/docs/third-party.md" "$STAGE/overlay/usr/share/doc/klburn/THIRD-PARTY.md"
+python3 "$SCRIPT_DIR/vendor-notices.py" "$PROJ_DIR/docs/licenses" \
+  "$STAGE/overlay/usr/share/doc/klburn/licenses" --boot-iso-sha256 "$SRC_ISO_SHA256"
 while IFS= read -r -d '' f; do
   sed -i 's/\r$//' "$f"
 done < <(find "$STAGE/overlay" -type f \( -name '*.sh' -o -name '*.py' -o -name '*.service' -o -name '*.conf' \) -print0)

@@ -242,11 +242,12 @@ Settings for ens9f0:
 	Duplex: Full
 	Link detected: yes
 EOF
+# RFC 5737 文档地址：虚构报告输入，不携带现场网络配置。
 cat > "$RD/raw/nic/ens9f0-test.txt" <<'EOF'
 Interface : ens9f0
 Carrier   : yes
-IPv4      : 192.168.1.87/24
-Gateway   : 192.168.1.1
+IPv4      : 198.51.100.87/24
+Gateway   : 198.51.100.1
 Ping      : 4/4 通，平均 0.203ms
 Result    : OK
 EOF
@@ -563,8 +564,8 @@ echo "=== 网卡：连通性 + Unknown! 归一化 + 型号 ==="
 has_no "$OUT" "Unknown!"                     "ethtool 的原始占位不能进表格"
 has    "$OUT" "已连通（4/4 通，平均 0.203ms）" "接了线的口"
 has    "$OUT" "未连接链路（未接网线）"        "没接线的口"
-has    "$OUT" "192.168.1.87/24"              "DHCP 拿到的地址"
-has    "$OUT" "192.168.1.1"                  "默认网关"
+has    "$OUT" "198.51.100.87/24"              "DHCP 拿到的地址"
+has    "$OUT" "198.51.100.1"                  "默认网关"
 has    "$OUT" "Intel Corporation 82599ES 10-Gigabit SFI/SFP+ Network Connection" \
               "网卡型号（从 lspci 反查回来的）"
 

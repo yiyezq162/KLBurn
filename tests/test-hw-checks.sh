@@ -883,14 +883,15 @@ RAW_DIR="$TMP"; RUN_DIR="$TMP"
 echo
 echo "=== 网卡 ping / 地址判读 ==="
 
+# 以下 IPv4 地址使用 RFC 5737 文档网段，均为虚构输入；保留现场输出格式。
 cat > "$TMP/ping-ok.txt" <<'EOF'
-PING 192.168.1.1 (192.168.1.1) from 192.168.1.87 ens9f0: 56(84) bytes of data.
-64 bytes from 192.168.1.1: icmp_seq=1 ttl=64 time=0.152 ms
-64 bytes from 192.168.1.1: icmp_seq=2 ttl=64 time=0.281 ms
-64 bytes from 192.168.1.1: icmp_seq=3 ttl=64 time=0.196 ms
-64 bytes from 192.168.1.1: icmp_seq=4 ttl=64 time=0.183 ms
+PING 198.51.100.1 (198.51.100.1) from 198.51.100.87 ens9f0: 56(84) bytes of data.
+64 bytes from 198.51.100.1: icmp_seq=1 ttl=64 time=0.152 ms
+64 bytes from 198.51.100.1: icmp_seq=2 ttl=64 time=0.281 ms
+64 bytes from 198.51.100.1: icmp_seq=3 ttl=64 time=0.196 ms
+64 bytes from 198.51.100.1: icmp_seq=4 ttl=64 time=0.183 ms
 
---- 192.168.1.1 ping statistics ---
+--- 198.51.100.1 ping statistics ---
 4 packets transmitted, 4 received, 0% packet loss, time 3005ms
 rtt min/avg/max/mdev = 0.152/0.203/0.281/0.049 ms
 EOF
@@ -911,15 +912,15 @@ check "空的 ping 输出不崩、三项都给 -" \
       "- - -" "$(net_parse_ping "$TMP/ping-empty.txt")"
 
 check "从 ip addr 输出里取出 IPv4" \
-      "192.168.1.87/24" \
-      "$(net_parse_addr '2: ens9f0    inet 192.168.1.87/24 brd 192.168.1.255 scope global dynamic ens9f0\       valid_lft 43199sec')"
+      "198.51.100.87/24" \
+      "$(net_parse_addr '2: ens9f0    inet 198.51.100.87/24 brd 198.51.100.255 scope global dynamic ens9f0\       valid_lft 43199sec')"
 check "没有 IPv4 时给空" \
       "" "$(net_parse_addr '3: ens9f1    inet6 fe80::6eb3:11ff:fe09:24f6/64 scope link')"
 
 check "从 ip route 输出里取出默认网关" \
-      "192.168.1.1" "$(net_parse_gateway 'default via 192.168.1.1 dev ens9f0 proto dhcp src 192.168.1.87 metric 100')"
+      "198.51.100.1" "$(net_parse_gateway 'default via 198.51.100.1 dev ens9f0 proto dhcp src 198.51.100.87 metric 100')"
 check "路由里没有 via 时给空（DHCP 只给地址不给网关）" \
-      "" "$(net_parse_gateway '192.168.1.0/24 dev ens9f0 proto kernel scope link src 192.168.1.87')"
+      "" "$(net_parse_gateway '198.51.100.0/24 dev ens9f0 proto kernel scope link src 198.51.100.87')"
 
 check "未接网线的结论文案" \
       "未连接链路（未接网线）" "$(net_result_text NO_LINK)"
@@ -3593,8 +3594,9 @@ check "两样都读不到时按真网口算（宁可多测一个，不可漏测�
 # 169.254 是没拿到 DHCP 时自己编的地址，不是租约
 check "169.254 是链路本地地址" "yes" \
       "$(net_addr_is_linklocal 169.254.3.1 && echo yes || echo no)"
-check "正常的内网地址不是" "no" \
-      "$(net_addr_is_linklocal 192.168.110.147 && echo yes || echo no)"
+# 虚构 RFC 1918 地址，保留“普通内网地址不是链路本地”的原有覆盖。
+check "虚构内网地址不是链路本地地址" "no" \
+      "$(net_addr_is_linklocal 10.23.0.147 && echo yes || echo no)"
 check "空串不是（不能把'读不到'当成链路本地）" "no" \
       "$(net_addr_is_linklocal '' && echo yes || echo no)"
 
@@ -3605,18 +3607,19 @@ echo "=== 校时：内网也要能对上时间（1.9.8）==="
 # ⚠️ 1.9.7 现场那台 7542 网是通的（ping 网关 4/4 通、0.525ms），但那个网
 #    出不了公网，三个公网 NTP 全部拨不通，报告日期停在一个八个月前的假日期上。
 #    DHCP 下发的 NTP 服务器（option 42）是内网机器最靠谱的一条路。
+# 下面租约地址是 RFC 5737 文档地址，不保留现场网络配置。
 cat > "$TMP/dhclient.leases" <<'EOF'
 lease {
   interface "eno1";
-  fixed-address 192.168.110.147;
+  fixed-address 192.0.2.147;
   option subnet-mask 255.255.255.0;
-  option routers 192.168.110.1;
-  option ntp-servers 192.168.110.1, 192.168.110.9;
-  option domain-name-servers 192.168.110.1;
+  option routers 192.0.2.1;
+  option ntp-servers 192.0.2.1, 192.0.2.9;
+  option domain-name-servers 192.0.2.1;
 }
 EOF
-check "从 DHCP 租约里抠出 NTP 服务器" "192.168.110.1
-192.168.110.9" "$(net_dhcp_ntp_servers "$TMP/dhclient.leases")"
+check "从 DHCP 租约里抠出 NTP 服务器" "192.0.2.1
+192.0.2.9" "$(net_dhcp_ntp_servers "$TMP/dhclient.leases")"
 printf 'lease {\n  interface "eno1";\n  option routers 10.0.0.1;\n}\n' \
   > "$TMP/dhclient-nontp.leases"
 check "租约里没有 NTP 那一项时给空（不能把 routers 当成 NTP）" "" \

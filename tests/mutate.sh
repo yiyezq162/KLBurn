@@ -52,6 +52,8 @@ RT="rootfs/opt/klburn"
 # 让函数兼职报告文件名的话就得先跑一次再回滚，那才是真正危险的设计。
 S=$'\x1f'
 MUTATIONS=(
+"mem-report-early-success${S}未等到内存报告就宣称完成（固定计时曾提前关机导致报告丢失）${S}test-e2e-log-wait${S}tests/lib/e2e-log-wait.sh${S}mut_mem_report_early_success"
+"mem-report-stale-anchor${S}允许启动前已有的报告完成字节冒充本轮完成${S}test-e2e-log-wait${S}tests/lib/e2e-log-wait.sh${S}mut_mem_report_stale_anchor"
 "verdict-grep${S}整机结论换回 grep 匹配 JSON 文本（§11-1 的 JSON 版：格式一变就每台机器都判 PASS）${S}test-hw-checks${S}$RT/factory-test.sh${S}mut_verdict_grep"
 "verdict-empty${S}交付报告把「一条判定都没有」当成通过（什么都没测过的机器打绿色 PASS）${S}test-report-render${S}$RT/report/generate_report.py${S}mut_verdict_empty"
 "verdict-empty-int${S}内部报告把「一条判定都没有」当成通过（三处结论口径必须一致）${S}test-internal-report${S}$RT/report/generate_internal.py${S}mut_verdict_empty_int"
@@ -266,6 +268,14 @@ delete_line() {
 # 各条变异（函数名要和上面清单里的对上）
 # 每个函数只负责改文件，成功回 0、失败把原因打到 stdout
 # ================================================================
+
+mut_mem_report_early_success() {
+  replace_line tests/lib/e2e-log-wait.sh "if wait_for_log 'Report PDF written'" '  if true; then'
+}
+
+mut_mem_report_stale_anchor() {
+  replace_line tests/lib/e2e-log-wait.sh 'if image_has "$1"; then' '  if false; then'
+}
 
 mut_verdict_grep() {
   replace_line "$RT/factory-test.sh" \

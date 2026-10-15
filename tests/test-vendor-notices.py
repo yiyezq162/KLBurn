@@ -1,9 +1,12 @@
 #!/usr/bin/env python3
 """Notice preservation and file boundaries; no compiler required."""
 import importlib.util
+import hashlib
+import json
 from pathlib import Path
 import sys
 import tempfile
+import shutil
 import unittest
 
 spec = importlib.util.spec_from_file_location("notices", Path(__file__).resolve().parents[1] / "build/vendor-notices.py")
@@ -72,6 +75,58 @@ class NoticeTests(unittest.TestCase):
         with self.assertRaises(ValueError):
             notices.copy_notices(self.src, self.out, ["LICENSE"])
         self.assertEqual(outside.read_text(), "preserve")
+
+    def boot_fixture(self):
+        upstream = Path(__file__).resolve().parents[1] / "docs/licenses"
+        shutil.copytree(upstream, self.src, dirs_exist_ok=True)
+        manifest = self.src / "boot-components.json"
+        data = json.loads(manifest.read_text())
+        return manifest, data, data["source_iso"]["sha256"]
+
+    def test_boot_exact_notice_set(self):
+        manifest, data, digest = self.boot_fixture()
+        self.assertEqual(notices.copy_boot_notices(self.src, self.out, digest), 7)
+        self.assertEqual((self.out / manifest.name).read_bytes(), manifest.read_bytes())
+        for item in data["notices"]:
+            content = (self.out / item["file"]).read_bytes()
+            self.assertEqual(content, (self.src / item["file"]).read_bytes())
+            self.assertEqual(hashlib.sha256(content).hexdigest(), item["sha256"])
+
+    def test_boot_wrong_iso_rejected(self):
+        self.boot_fixture()
+        with self.assertRaises(ValueError):
+            notices.copy_boot_notices(self.src, self.out, "0" * 64)
+        self.assertFalse(self.out.exists())
+
+    def test_boot_incomplete_manifest_rejected(self):
+        manifest, data, digest = self.boot_fixture()
+        data["notices"].pop()
+        manifest.write_text(json.dumps(data))
+        with self.assertRaises(ValueError):
+            notices.copy_boot_notices(self.src, self.out, digest)
+        self.assertFalse(self.out.exists())
+
+    def test_boot_tampered_notice_rejected(self):
+        _, data, digest = self.boot_fixture()
+        (self.src / data["notices"][-1]["file"]).write_bytes(self.data)
+        with self.assertRaises(ValueError):
+            notices.copy_boot_notices(self.src, self.out, digest)
+        self.assertFalse(self.out.exists())
+
+    def test_boot_traversal_rejected(self):
+        manifest, data, digest = self.boot_fixture()
+        data["notices"][0]["file"] = "../LICENSE"
+        manifest.write_text(json.dumps(data))
+        with self.assertRaises(ValueError):
+            notices.copy_boot_notices(self.src, self.out, digest)
+        self.assertFalse(self.out.exists())
+
+    def test_boot_missing_notice_rejected(self):
+        _, data, digest = self.boot_fixture()
+        (self.src / data["notices"][-1]["file"]).unlink()
+        with self.assertRaises(ValueError):
+            notices.copy_boot_notices(self.src, self.out, digest)
+        self.assertFalse(self.out.exists())
 
 
 if __name__ == "__main__":

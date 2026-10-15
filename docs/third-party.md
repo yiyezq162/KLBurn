@@ -16,7 +16,7 @@ Ubuntu 系统、Linux 内核、固件、字体、运行库和第三方工具保�
 | UEFI 启动链 shim | 实际 EFI 文件已与 Ubuntu 的 `shim-signed 1.58+15.8-0ubuntu1` 对账，其 Built-Using 指向 `shim 15.8-0ubuntu1`。完整源码版权声明还包含 OpenSSL／SSLeay 等条款，不能仅按签名包的简短 BSD 声明处理。当前源码保留[完整原文](licenses/shim-15.8.COPYRIGHT)及相应致谢；旧私有 ISO 尚未补入这份完整声明，不据此宣称可公开分发。 |
 | OpenBLAS、字体、zlib、zstd | 保留对应许可证、版权及适用的再分发说明。静态或动态链接方式须按实际产物核对。 |
 | NVIDIA 驱动和 CUDA 运行库 | 已从哈希核对一致的 595.84 安装包提取 Driver License Agreement（2025-02-25）。第 1.1(d) 条有条件允许用于开源内核的分发，要求不修改二进制并向接收者提供协议；另有硬件与用途限制。实际 ISO 条件符合性及 CUDA 运行库条款尚未全部核清，不能把 open 内核模块许可套用于全部组件。 |
-| gpu-burn、cuda-samples、OpenDCDiag | 已取得 cuda-samples 固定源码版本的 BSD-3 文本，及 OpenDCDiag 固定版本的 Apache-2.0 与附带 MIT/BSD-3 声明；必须保留全部适用归属。gpu-burn 当前上游为 BSD-2，但现有二进制对应源码 commit 尚需核实。 |
+| gpu-burn、cuda-samples、OpenDCDiag | 已取得 cuda-samples 固定源码版本的 BSD-3 文本，及 OpenDCDiag 固定版本的 Apache-2.0 与附带 MIT/BSD-3 声明；必须保留全部适用归属。当前私有候选的 gpu-burn 来源记录为 `0d19c94dcb2e9b6858b7586a4c327674cd67113b`，保留 BSD-2 原文及实际 CUDA 工具链 EULA；来源记录不替代静态链接组件的分发审查，也不能证明其他旧二进制的来源。 |
 | Intel LINPACK、MLC | 免费下载不等于无条件再分发；`redist.txt` 也不能替代其所引用的完整许可协议。 |
 | Broadcom StorCLI 及其他厂商管理工具 | 须获得适用版本的分发依据；不能因为内部测试盘已有二进制就直接向公众发布。 |
 
@@ -27,7 +27,9 @@ Ubuntu 系统、Linux 内核、固件、字体、运行库和第三方工具保�
 索引绑定当前锁定的 Ubuntu 源 ISO SHA256；更换基础 ISO 时不能直接沿用旧版本
 声明。文件逐字节保留上游格式，包括个别行末空白，不将第三方原文重新格式化。
 此集合只覆盖所列启动组件，不是整张 ISO 的组件清单或许可通过证明。
-这些原文目前保存在源码文档目录；旧私有 ISO 尚未随附这一完整集合。
+1.11.3 构建入口校验集合、原文哈希及基础 ISO 哈希后，将索引与原文复制到
+`/usr/share/doc/klburn/licenses/`，两版一致；不匹配时停止构建。
+1.11.2 及更早的私有 ISO 尚未随附这一完整集合，不能用当前源码文档替代盘内检查。
 
 ## 发布边界
 

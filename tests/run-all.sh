@@ -26,6 +26,7 @@ SUITES=(
   test-batch-tools
   test-branding
   test-vendor-notices
+  test-e2e-log-wait
   test-customize
   test-tool-packaging
   test-public-metadata

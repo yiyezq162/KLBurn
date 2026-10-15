@@ -14,12 +14,13 @@
 上执行**，产物是自启动的 amd64 ISO。Linux 可以是物理机、局域网虚拟机或 WSL；
 WSL 是 Windows 的一种选择，不是构建脚本的强制前提。
 
-### Mac mini M4 开发
+### Apple Silicon Mac 开发
 
-Mac mini M4（arm64）可直接 clone 仓库、编辑和提交代码、查看生成的报告与截图。
+Apple Silicon Mac（arm64）可直接 clone 仓库、编辑和提交代码、查看生成的报告与截图。
 现有构建会在 amd64 rootfs 内执行 chroot 命令，不能直接拿 ARM Ubuntu 替代构建机。
 Mac 通过已配置的 SSH 连接到 **x86_64 Ubuntu** 后，在 Linux 源码目录执行本文命令。
-macOS 自带 Bash/BSD 工具不作为全套回归环境。已配置专用 NAS 源码检查 Runner 与 Linux 构建 VM，真实入口和尚未接通的 ISO/Release 部分见 [CI 说明](CI.md)，不能把源码检查当成整套发布验收。
+macOS 自带 Bash/BSD 工具不作为全套回归环境。请使用自己配置的兼容 Linux 后端；
+源码 CI 与 ISO 发行验收的边界见 [CI 说明](CI.md)，不能把源码检查当成整套发布验收。
 
 迁移或首次 clone 时注意：
 
@@ -27,11 +28,12 @@ macOS 自带 Bash/BSD 工具不作为全套回归环境。已配置专用 NAS �
 - 文本使用 UTF-8 无 BOM、LF（由 `.gitattributes` 固定），入口脚本的执行权限由 Git 保存。
 - `vendor/` 不进版本库，驱动和基准程序要单独迁移到 Linux checkout。
   定制 logo 位于独立定制源码的 `build/custom-logo.png`，与品牌配置一并提交追溯。
-  只 clone 源码可能仍能构建，但可选工具缺失会减少盘内功能。清单见
+  低层构建成功不等于完整发行验收：严格成对发布入口在离线组件缺失时停止，
+  不能把缺件产物称为完整可用版本。组件清单及官方获取入口见
   [vendor/README.md](../vendor/README.md)。
-- `test_out/` 是不入库的客户真机样本；依赖它的回归需在测试机另行恢复。
-  当前 Mac 原始样本在项目 `/Users/li/Projects/KLBurn/test_out/`，不再放 Downloads；
-  NAS 源码 CI 只保留匿名编号的必要传感器/电源文本私有副本，见 [CI](CI.md)。
+- `test_out/` 存放调用者有权使用的私有真机回放样本，不进入版本库；
+  依赖它的回归需在自己的测试机另行配置，不依赖维护者的存储或账号。
+  可信 CI 仅使用必要传感器/电源文本的私有副本，见 [CI](CI.md)。
   现有真机传感器/未接交流电覆盖自检在缺输入时会失败，不能当成跳过或已覆盖。
   不要把客户原始报告推到 GitHub。
 - `out/` 的旧 ISO、日志和截图另行保存，clone 不会下载它们。
@@ -39,6 +41,10 @@ macOS 自带 Bash/BSD 工具不作为全套回归环境。已配置专用 NAS �
   构建与磁盘测试需要 root、loop 设备及挂载权限。
 - 同一个 `KLBURN_WORK` 的任务串行运行，缓存保留在 Linux 本地文件系统。
   full / mem 可以依次共用；长任务使用持久会话或后台任务并保存日志。
+
+内存版 QEMU 验收根据实际报告完成信号结束等待，上限 900 秒；不是睡够一个固定
+时长就关机。受限虚拟机的内存分配和 PDF 生成可能变慢，超时仍算验收失败，
+须保留日志排查，不能缩短压测或跳过 HTML/PDF/CSV 检查。
 
 以下安装与测试命令均在 Linux 上执行。
 
@@ -62,7 +68,8 @@ sudo apt-get install -y git meson ninja-build g++ libboost-dev libeigen3-dev \
 
 ### 构建工作区放 Linux 本地文件系统
 
-工作区默认 **`~/klburn-build`**，使用构建机本地 Linux 文件系统（例如 ext4），
+工作区必须显式指定 **`KLBURN_WORK`**（例如普通用户的 `~/klburn-build`），
+使用构建机本地 Linux 文件系统（例如 ext4），
 不要放 Mac/NAS 网络共享或宿主机共享目录。
 
 Windows 的 WSL 中，`/mnt/c` 走 9p 协议，解 squashfs 要写几十万个小文件，性能会差到不可用
@@ -71,10 +78,10 @@ Windows 的 WSL 中，`/mnt/c` 走 9p 协议，解 squashfs 要写几十万个�
 
 源码推荐 clone 到构建机本地目录；WSL 下源码放 `/mnt/c` 也可以。
 产物最终复制到**执行构建的那份 checkout** 的 `out/`，不会自动传回 Mac 或上传发布页。
-交付到 Mac 的统一位置为 `/Users/li/Projects/KLBurn/out/`；下载/复制后须复核 `.sha256`。
+下载或复制到自己的 Mac/Linux/Windows 产物目录后，须复核 `.sha256`。
 
-需要约 **12 GB** 磁盘（源 ISO 缓存 3.2G + 解包 3.2G + 根文件系统 2.5G +
-临时 1.5G + 输出 ~1.5G）。
+自动构建工具预检要求工作区所在文件系统至少 **40 GiB 可用空间**，用于源 ISO、
+解包、两版构建、产物和隔离 QEMU 测试镜像；保留多个工作区时还需额外空间。
 
 ---
 
@@ -236,27 +243,22 @@ sudo KLBURN_WORK=/srv/klburn/work ./build/release.sh --mutate
 安装包，缺失或字节变化会停止，不能把工具缺失后的 SKIP 当作完整交付。
 两版包版本清单保存为 `packages.tsv`，离线组件哈希也写进发布收据。
 
-当前 NAS 尚未升级内存。1.10.6 在 6GiB 构建 VM 崩溃后，从已经通过的源码/变异
-阶段恢复；每个构建、固件与 QEMU 阶段仍逐项通过才打 tag。该次构建 VM 临时
-使用 3GiB live balloon + 3GiB guest swap，构建 cgroup 上限 1.8GiB、QEMU 宿主
-cgroup 上限 2.4GiB，QEMU 内仍是 4GiB。这是本次受限环境的验收条件，不能作为
-性能基准。`out/release-1.10.6/manifest.json` 保留实际资源，失败日志另外留存。
+受限构建机应记录实际 RAM、swap、虚拟机 balloon 与 cgroup 限额，串行执行构建。
+失败重试必须保留首次失败证据，不把受限虚拟机中的性能数值作为真机性能基准。
 `build/release.sh` 自身不设置 VM balloon/swap/cgroup；后台启动者须按实际主机
-资源提供限制，不能仅凭 VM 配置的 6GiB 推断有足够物理内存。
+资源提供限制，不能仅凭虚拟机配置的标称内存推断有足够物理内存。
 
-### NAS 空间与冷数据
+### 空间与冷数据
 
-`/volume1` 空间紧张时，优先清理本项目以后不再使用的一次性构建/测试组件和重复副本。
-仍需保留但不常用的数据允许迁到 `/volume2`，当前冷归档入口为
-`/volume2/services/klburn-buildvm/archive/2026-10-07/`；迁移前后核对 SHA256。
+空间紧张时，先确认文件归属、进程和挂载状态，再清理本项目不再使用的
+一次性构建/测试文件与重复副本。仍需保留的冷数据可归档到自己选择的存储，
+迁移前后核对 SHA256；不能删除正在构建或验收的工作区。
 当前源码、vendor、源 ISO 缓存和正式发布产物保留在活跃工作区；客户原始报告不能
 按临时测试输出删除。模拟 U 盘的报告先只读提取并逐文件校验，日志/截图留存后
 才删除一次性 `usb.img`/`spare*.img`。
 
-本次删除 32 个生成文件/重复副本，约 25.4GiB 已分配空间；保留 714 个报告/证据文件。
-专用 VM 的 vda 启用 `discard=unmap` 后对 guest 根文件系统运行 fstrim，NAS 才实际
-回收 qcow2 空洞：`/volume1` 可用空间约 18GiB → 56GiB。除该磁盘属性外，VM XML
-读回与原件字节一致。XML 回退材料在 `/volume2/services/klburn-buildvm/recovery/discard-20261007/`。
+虚拟磁盘释放的 guest 空间不一定立即成为宿主机可用空间；是否支持回收由
+宿主存储和虚拟磁盘配置决定。本工具不修改这些配置，也不自动执行磁盘回收操作。
 
 > **为什么"先 bump 再构建"要单独强调**：0.3.0 栽过一次——ISO 构建完之后又改了
 > 代码却没动版本号，于是现场那根盘自称 0.3.0、跑的却是修复前的代码，

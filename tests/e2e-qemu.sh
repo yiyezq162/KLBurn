@@ -49,6 +49,8 @@
 set -uo pipefail
 
 cd "$(dirname "${BASH_SOURCE[0]}")/.." || exit 1
+# shellcheck source=tests/lib/e2e-log-wait.sh
+source tests/lib/e2e-log-wait.sh
 
 # ---------------------------------------------------------------- 参数
 STAGE="smoke"
@@ -434,6 +436,11 @@ fi
 #    "No bootable device" 停在那儿 —— 而脚本这边看到的现象是
 #    "跑完 U 盘里什么都没有"，和产品没落盘长得一模一样。
 #    现场是工程师在 BIOS 菜单里手动选 U 盘，bootindex 就是在模拟这一下。
+if [[ "$EDITION" == mem && "$STAGE" == smoke ]]; then
+  require_absent_log_anchor 'Report PDF written' || die '内存报告完成锚点在启动前已存在'
+  ok '内存报告完成锚点在启动前不存在'
+fi
+
 qemu-system-x86_64 \
   "${KVM_ARGS[@]}" \
   "${FW_ARGS[@]}" \
@@ -488,36 +495,7 @@ shot() { mon "screendump $WORK/shot-$1.ppm"; }
 #    每轮里那次 grep 自己就要扫 2.4GB、花掉 3 秒左右，累加出来的数字只有真实
 #    耗时的一半 —— 于是 limit=900 实际能等 1800 秒，日志里"第 252s"其实是第
 #    600 秒。超时和读数一旦对不上，排查的人会从完全错误的地方开始找。
-image_has() {
-  # 二进制镜像没有可靠的行边界；grep -a 会为超长行分配 GB 内存。
-  python3 - "$IMG" "$1" <<'PY'
-import sys
-needle=sys.argv[2].encode();tail=b''
-with open(sys.argv[1],'rb') as stream:
-    for chunk in iter(lambda:stream.read(1024*1024),b''):
-        data=tail+chunk
-        if needle in data:sys.exit(0)
-        tail=data[-(len(needle)-1):] if len(needle)>1 else b''
-sys.exit(1)
-PY
-}
-
-wait_for_log() {
-  local needle="$1" limit="$2" label="${3:-$1}" start now
-  start="$(date +%s)"
-  while :; do
-    now="$(date +%s)"
-    (( now - start >= limit )) && break
-    kill -0 "$QEMU_PID" 2>/dev/null || { info "等「$label」时虚拟机已经退出"; return 1; }
-    if image_has "$needle"; then
-      info "看到「$label」（第 $(( now - start ))s）"
-      return 0
-    fi
-    sleep 3
-  done
-  info "等了 ${limit}s 也没等到「$label」"
-  return 1
-}
+# 扫描与等待函数位于 tests/lib/e2e-log-wait.sh，启动前与运行中共用。
 
 # ---------------------------------------------------------------- 3. 驱动它
 printf '\n\033[1m[3/4] 操作虚拟机\033[0m\n'
@@ -548,13 +526,10 @@ if [[ "$STAGE" == "smoke" ]]; then
   # 整轮约三分钟（采集几秒 + 压测 150 秒 + 复查出报告十几秒），
   # 所以冒烟档等到它**真的跑完**，断言能一直做到报告本体。
   if [[ "$EDITION" == "mem" ]]; then
-    info "内存盘：不发任何按键，等它自己跑完（约 3 分钟）"
-    for t in 45 75 105 135 165 195 225 255; do
-      sleep 30
-      kill -0 "$QEMU_PID" 2>/dev/null || { bad "虚拟机在第 ${t}s 意外退出了"; break; }
-      shot "$t"
-      printf '       ... %ss\n' "$t"
-    done
+    info "内存盘：不发任何按键，按报告完成信号等待（最多 900 秒）"
+    # 内存分配、交换与 PDF 生成会增加时间，不能在固定 255 秒后打断压测。
+    # 超时会增加 FAIL，后面的全部产物断言仍照常执行。
+    wait_for_mem_report || true
   else
 
   # ---------------- 范围菜单（1.9.5）----------------
@@ -1082,6 +1057,8 @@ if [[ "$EDITION" == "mem" ]]; then
                                || bad "交付报告没生成 —— 现场白跑一趟"
   [[ -s "$RUNDIR/$TAG.csv" ]]  && ok "工程文件 <目录名>.csv 生成了" \
                                || bad "CSV 没生成（拼总表就少了这一台）"
+  [[ -s "$RUNDIR/$TAG.pdf" ]]  && ok "交付报告 <目录名>.pdf 生成了" \
+                               || bad "PDF 没生成（不能把仅有 HTML 当成三件套齐全）"
   [[ -s "$RUNDIR/results.jsonl" ]] && ok "results.jsonl 非空" \
                                    || bad "results.jsonl 空的 —— 这一轮什么都没判"
 
