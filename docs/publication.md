@@ -23,6 +23,13 @@
 需要撤销凭据、删除历史资产或重写历史的问题，交由项目所有者决定。
 不覆盖旧 tag 或历史发布资产。
 
+包含 Intel LINPACK/HPL 功能的公开介绍、官网和 Release 说明须显示以下归属，
+并随二进制保留适用版权、条件和免责声明；不得暗示权利人为 KLBurn 背书：
+
+> This product includes software developed at the University of Tennessee, Knoxville, Innovative Computing Laboratory.
+
+这是对应 LINPACK 附带 HPL 2.3 声明中的广告归属条件，不是其他组件的分发许可。
+
 ## 三平台工具资产
 
 在与 ISO 相同的干净源码 commit 运行：

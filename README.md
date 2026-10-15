@@ -168,11 +168,11 @@ fio 的目标盘要过五道排除。Ventoy 场景下 udev 被禁、`lsblk` 完�
 颜色码混进去整屏重绘立刻错位）。核心断言只有一条：
 **把颜色码去掉之后，必须和不上色时一字不差。**
 
-**⑩ 1472 项回归测试 + 105 条变异，全都不需要真实硬件**
+**⑩ 源码回归与变异测试，不替代真实硬件验收**
 
 ```bash
-./tests/run-all.sh      # 1472 项断言，顺带过一遍 shellcheck
-./tests/mutate.sh       # 把修好的 105 个 bug 塞回去，守卫必须跑红（约 3 分半）
+./tests/run-all.sh      # 完整源码回归，包含 shellcheck；计数以本轮输出为准
+./tests/mutate.sh       # 在隔离副本注入故障，守卫必须跑红；计数与耗时以本轮为准
 ```
 
 「一个从没红过的测试等于没写」——所以每条守卫都有一条变异专门验证它真的会红。
@@ -235,11 +235,20 @@ KLBurn/
 ├── tools/                       仓库侧 Python 工具，**不进盘**
 │   ├── klburn-summary.py        一批机器一张 CSV（非全量的写成 PASS(CPU) 这种形状）
 │   └── klburn-diff.py           两份 run-dir 逐项对比（只报差异不判合格）
-├── tests/                       9 个回归测试 + shellcheck，都不需要真实硬件
-│   ├── run-all.sh               一次跑完（合计 1472 项断言）
+├── tests/                       源码回归、变异、构建后检查和 QEMU 验收
+│   ├── run-all.sh               一次跑完源码回归（计数以本轮输出为准）
 │   ├── mutate.sh            ★   变异测试（跑在源码副本里、默认并行，真工作区只读）
 │   ├── check-firmware.sh    ★   固件 + vendor 依赖库对账（要一个已构建的 rootfs）
 │   └── e2e-qemu.sh          ★   把 ISO 在 QEMU 里真开机跑一遍（要 root）
 ├── vendor/                      离线包（不进版本库，见 vendor/README.md）
 └── out/                         构建产物 ISO
 ```
+
+## 第三方归属
+
+整机版使用的 Intel LINPACK 附带 HPL 归属声明：
+
+> This product includes software developed at the University of Tennessee, Knoxville, Innovative Computing Laboratory.
+
+此声明不代表上述机构为 KLBurn 背书，也不代表整张 ISO 已完成分发许可审查。
+各组件仍适用自己的许可，见[第三方分发边界](docs/third-party.md)。
