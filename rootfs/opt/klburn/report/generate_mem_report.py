@@ -674,6 +674,12 @@ border:1px solid var(--line);border-left-width:5px;border-radius:5px;margin-bott
 .notice-info{background:#eef4fd;border-color:#b9d0f0;color:#1f4d8f}
 footer{margin-top:44px;padding-top:14px;border-top:1px solid var(--line);
 color:var(--muted);font-size:12px}
+@media screen and (max-width:640px){
+  .result-row{display:block}
+  .result-row .rn{display:inline;min-width:0;margin-left:8px}
+  .result-row .rd{display:block;margin-top:8px;overflow-wrap:anywhere}
+  .kv{grid-template-columns:minmax(0,1fr)}
+}
 @page{size:A4;margin:14mm 12mm}
 @media print{
   body{font-size:11pt}
