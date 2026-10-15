@@ -407,6 +407,9 @@ printf '\n%s\n' "$BRAND_CONSTANTS" >> "$STAGE/config.sh"
 rsync -a --chmod=D755 --exclude='__pycache__' --exclude='*.pyc' \
       "$PROJ_DIR/rootfs/" "$STAGE/overlay/"
 install -m 0644 "$SCRIPT_DIR/branding.json" "$STAGE/overlay/opt/klburn/branding.json"
+mkdir -p "$STAGE/overlay/usr/share/doc/klburn"
+install -m 0644 "$PROJ_DIR/LICENSE" "$STAGE/overlay/usr/share/doc/klburn/LICENSE"
+install -m 0644 "$PROJ_DIR/docs/third-party.md" "$STAGE/overlay/usr/share/doc/klburn/THIRD-PARTY.md"
 while IFS= read -r -d '' f; do
   sed -i 's/\r$//' "$f"
 done < <(find "$STAGE/overlay" -type f \( -name '*.sh' -o -name '*.py' -o -name '*.service' -o -name '*.conf' \) -print0)

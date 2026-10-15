@@ -25,6 +25,7 @@ SUITES=(
   test-concurrent-burn
   test-batch-tools
   test-branding
+  test-vendor-notices
   test-customize
   test-tool-packaging
   test-public-metadata

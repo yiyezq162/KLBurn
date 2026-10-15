@@ -551,6 +551,14 @@ if [[ "${INCLUDE_NVIDIA:-0}" == "1" ]]; then
   fi
 
   if [[ -f "$STAGE/vendor/gpu_burn/gpu_burn" ]]; then
+    [[ -s "$STAGE/vendor/gpu_burn/LICENSE" ]] || fail "gpu_burn 缺少上游 LICENSE 原文，停止打包"
+    mkdir -p /opt/klburn/tools/licenses/gpu_burn
+    install -m 0644 "$STAGE/vendor/gpu_burn/LICENSE" /opt/klburn/tools/licenses/gpu_burn/LICENSE
+    for notice in NOTICE SOURCE-COMMIT.txt; do
+      if [[ -f "$STAGE/vendor/gpu_burn/$notice" ]]; then
+        install -m 0644 "$STAGE/vendor/gpu_burn/$notice" "/opt/klburn/tools/licenses/gpu_burn/$notice"
+      fi
+    done
     install -m 0755 "$STAGE/vendor/gpu_burn/gpu_burn" /opt/klburn/tools/gpu_burn
     # 上游从 compare.ptx 换成了 compare.fatbin，两个名字都认。
     # 这个文件 gpu_burn 是在运行时按相对路径加载的，丢了会直接跑不起来。

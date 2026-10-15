@@ -55,7 +55,10 @@ for line in manifest.read_text().splitlines():
 required=('gpu_burn/gpu_burn','gpu_burn/compare.fatbin','storcli/storcli64',
           'bench/mlc/mlc','bench/linpack/xlinpack_xeon64','bench/cpuflops/klburn_flops',
           'bench/opendcdiag/opendcdiag','bench/cuda-samples/bandwidthTest',
-          'bench/cuda-samples/p2pBandwidthLatencyTest')
+          'bench/cuda-samples/p2pBandwidthLatencyTest',
+          'gpu_burn/LICENSE','gpu_burn/SOURCE-COMMIT.txt','bench/cuda-samples/LICENSE',
+          'bench/opendcdiag/LICENSE','bench/opendcdiag/LICENSE.3rdparty',
+          'bench/opendcdiag/COPYRIGHT.zlib1g','bench/opendcdiag/COPYRIGHT.libzstd1')
 if any(name not in entries for name in required):raise SystemExit('整机版工具清单不完整')
 drivers=list(root.glob('nvidia/NVIDIA-Linux-x86_64-*.run'))
 if len(drivers)!=1 or str(drivers[0].relative_to(root)) not in entries:

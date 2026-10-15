@@ -1,161 +1,50 @@
-# KLBurn dedicated NAS Runner and build VM
+# 源码检查与发行验收
 
-## Current ISO delivery evidence (2026-10-13)
+`.github/workflows/check.yml` 在 main 推送、Pull Request 和手动触发时运行源码回归。
+它不是 ISO 发布流水线，不构建或发布 ISO，也不以源码测试成功代替硬件验收。
 
-Version1.10.7, clean source/tag `c4f3b8b`: paired full/mem ISO files copied to
-Mac `out/`, both sizes and SHA256 values verified after transfer. Build-VM
-source2052/root-disk11 and Runner mutation135 passed (clean mutation baseline).
-Full firmware51/smoke10/disk-stress32; mem firmware54/retry-smoke22 passed.
-Real full-ISO keyboard0/root Shell/exit7/menu/re-entry and no report directory
-verified; scope, CPU/memory, disk and final screenshots inspected.
+## 运行环境
 
-The initial mem smoke was interrupted by a confirmed NAS memory-cgroup OOM
-killing this build VM; original logs are retained, not converted to PASS.
-Same ISO retried without rebuild: full nested QEMU4096MiB, mem retry2048MiB.
-Initial VM live3072MiB, hypervisor limit1536MiB; recovery VM live2048MiB,
-hypervisor limit2304MiB; temporary guest swap3072MiB. Build/full stage cgroup
-2400MiB, recovery mem1500MiB. These are resource-limited software acceptance,
-not performance or physical-hardware evidence. Permanent6vCPU/6GiB unchanged;
-VM shut off after delivery, on-demand proxy stopped, other VMs preserved.
+- 源码回归使用 x86_64 Ubuntu 24.04、Bash、Python 3、shellcheck 和 iproute2。
+- Pull Request 使用一次性 GitHub 托管环境。维护者可信分支可使用专用自托管
+  Runner；fork 仓库可设置仓库变量 `CI_RUNNER=github` 选择 GitHub 托管环境。
+- 不向不可信 Pull Request 提供私有回归样本、凭据或构建机管理权限。
+- ISO 的 root、chroot、loop/mount 和 KVM 操作在符合条件的独立后端执行，
+  不在普通容器 Runner 中执行；普通开发不需要重新注册维护者的 Runner。
 
-**The mem report itself is FAIL**, solely `check_dimm_serial`: QEMU supplies
-no valid DIMM serial and the existing strict policy rejects that. `stress_mem`
-is PASS for256MiB of1966MiB (13%),150seconds; HTML/PDF/CSV are present. The22
-passing workflow assertions do not mean a healthy physical DIMM was accepted.
-Physical server/GPU/RAID validation remains NOT_RUN. Evidence/manifest and
-retained failures are in `out/release-1.10.7/`.
+## 真实回放样本与测试分母
 
-Pushed source `c4f3b8b`, [run38373267857](https://github.com/yiyezq162/KLBurn/actions/runs/38373267857),
-completed on `nas-ci-klburn`:2044passed/0failed; evidence artifact finalized.
-These Runner counts are separate from the Build-VM2052 denominator.
+`tests/run-all.sh` 同时包含合成输入测试和真实传感器/电源样本回放守卫。
+后者要求调用者有权使用的 `test_out/` 输入，包含传感器读数及未接交流电的真实
+观察。没有这些资料时检查会明确失败；不能伪造输入、删除守卫或把空转计作通过。
+源码中不包含客户原始报告。样本不得作为公共 Actions artifact 上传。
 
-Public [v1.10.7 prerelease](https://github.com/yiyezq162/KLBurn/releases/tag/v1.10.7)
-contains both ISOs, both SHA256 files and manifest.json. All5server asset digests
-match the local files; publication metadata is retained in the evidence folder.
+公开源码在无私有样本的环境中运行，不等于能够复现维护者的完整回放分母。
+必须分别记录实际 PASS、FAIL、SKIP/NOT_RUN、样本覆盖和执行环境。
+回放历史样本不是新一轮真机验收；非 root 源码回归也不包含 root 磁盘排除检查。
 
-## Previous ISO delivery evidence (2026-10-07)
+可信自托管流程只在自己拥有的任务工作区复制样本，退出时清理该次任务的副本，
+不修改原始资料。构建工具使用外部用户自己的后端、离线组件和样本，
+不提供对维护者环境的访问。
 
-Version1.10.6, clean source/tag `a8ffc13`: full and mem artifacts copied to
-`/Users/li/Projects/KLBurn/out/` and both SHA256 values verified after transfer.
-Source2043/root-disk11/mutation135 passed; full firmware51/smoke10/disk-stress32,
-mem firmware54/smoke22 passed. Exact artifact names, hashes and resource limits
-are in `out/release-1.10.6/manifest.json`; CHANGELOG records the same source.
-This is software/ISO acceptance, not fresh physical hardware acceptance.
+## 日志与 artifact
 
-Manual prerelease publication completed:
-[v1.10.6](https://github.com/yiyezq162/KLBurn/releases/tag/v1.10.6), both ISO
-assets and their SHA256 files plus the manifest uploaded. Server asset digests
-match the locally verified images. Main-source CI at `0523969`,
-[run37658758865](https://github.com/yiyezq162/KLBurn/actions/runs/37658758865),
-completed on `nas-ci-klburn`:2035passed/0failed, finalized evidence uploaded.
-The VM's private sample set yields2043source assertions; retain each actual
-denominator. CI still does not automatically build or publish ISO artifacts.
+源码工作流按 run/attempt 保存检查日志，并在上传失败时作一次有界重试。
+测试失败仍然失败；上传成功不是测试成功。没有完成上传的证据不能写成已交付。
 
-The6GiB VM crashed while starting a build after mutation passed; cause UNKNOWN.
-Recovery used a temporary3GiB live balloon,3GiB guest swap and sequential stage
-cgroups (build1.8GiB maximum; QEMU2.4GiB maximum plus swap), preserving4GiB of
-memory visible inside QEMU. Logs retain earlier OOM/time-window failures.
-Persistent6vCPU/6GiB configuration and other VMs were unchanged.
-No installed RAM upgrade is assumed. The VM is shut down after delivery.
+公开前必须单独审核旧 Actions 日志/artifact、Release 附件和发布说明。
+不把包含内部路径、客户资料或运维记录的 manifest 直接转换为公共附件。
+公开下载元数据使用 [发布说明](publication.md) 中的受限生成流程。
 
-## Earlier source Runner onboarding evidence
+## 成对发行验收
 
-Verified source `95533ae`, [run37565544801](https://github.com/yiyezq162/KLBurn/actions/runs/37565544801):
-actual `nas-ci-klburn`, **2029 passed / 0 failed**, finalized source log present.
-Hardware replay893passed and report checks363passed; both Mac originals and
-all223NAS private input files remained hash-identical and job copies were cleaned.
-This includes45sensor samples, not45distinct physical machines or fresh hardware
-acceptance. ISO/root/firmware/QEMU gates were NOT_RUN during this onboarding;
-current ISO evidence is recorded above.
+完整规则见 [构建说明](building.md)，顺序为：源码检查（需要时变异测试）→
+提交并保持源码干净 → 同一 commit 串行构建 full/mem → 两版固件/依赖与
+QEMU 验收 → full 完整写盘验收 → 实际截图和报告检查 → annotated tag。
 
-## Retained migration failures
+QEMU 写盘验收使用隔离测试镜像，不能称作物理服务器、GPU、RAID 或真实内存条
+验收。未执行项保留 NOT_RUN。失败重跑保留首次失败，不覆盖历史 tag 或资产。
 
-Source SHA `a2381c6`, [run37565057243](https://github.com/yiyezq162/KLBurn/actions/runs/37565057243):
-actual `nas-ci-klburn`, **1937 passed / 2 failed**, finalized log artifact present.
-Both failures are mandatory real-hardware coverage checks requiring private,
-untracked `test_out` samples (including an observed non-AC power case).
-Windows migration had also lost executable modes on both report Python CLIs;
-mode-only repair restored report checks to363passed/0failed. Existing real-PDF
-conversion cases remain skipped without their optional tooling. Do not invent
-samples, upload customer originals or weaken the hardware gate to make CI green.
-This source result is not ISO, QEMU, firmware or hardware acceptance.
-
-The owner subsequently restored originals from Mac Downloads to local ignored
-`test_out/` (45 sensor-file samples; not45independent machines). NAS keeps only
-223 required sensor/power text files under private0700 home path
-`/home/runner/.private-fixtures/klburn-hardware-v1`, with anonymous sample numbers
-and byte-identical contents; no full HTML/PDF/customer reports were transferred.
-Trusted NAS source checks create an owned0700 workspace copy, then remove only
-that exact run/attempt-marked copy through an EXIT trap. An initial symlink
-intake did not satisfy the tests' find traversal and retained801PASS/2FAIL;
-the ordinary-copy correction changes no assertion. Tests copy required input into temporary directories before
-writing; originals are not test output. Only aggregate source-check logs are
-uploaded, not private fixtures. Cloud PR/fallback has no private dataset and
-does not establish the mandatory real-sample coverage gate without an approved
-private-input workflow. Do not bypass the assertions to hide that boundary.
-
-| Component | Current role |
-| --- | --- |
-| `nas-ci-klburn` | Repository-specific nonprivileged Docker Actions Runner; selector `self-hosted, Linux, X64, nas-klburn`; source regression only |
-| `KLBurn-BuildVM` | Dedicated Ubuntu24.04 x86 ISO backend; configured6vCPU/6GiB/64GiB sparse disk, stopped/on-demand, autostart off |
-
-Neither is shared with other projects. Runner runtime
-`/volume1/services/ci-klburn/compose.yaml`; independent volume
-`nas-ci-klburn-home`, workspace `/home/runner/_work`. Registration persists;
-ordinary development does not initialize another Runner.
-
-## GitHub workflow and release boundary
-
-`.github/workflows/check.yml` runs non-root source regression with actual
-shellcheck after main push, PR or manual dispatch. Trusted push/manual uses NAS;
-PRs use disposable Ubuntu24.04 cloud runners. `CI_RUNNER=github` enables cloud
-fallback. Unique run/attempt artifacts preserve source-check logs.
-iproute2 is required by source fixtures and installed with shellcheck if missing.
-Initial NAS upload FinalizeArtifact reset its connection; one bounded retry
-uses direct HTTPS only inside that upload action, preserving Runner/job proxy
-and TLS/credentials. At least one finalized evidence artifact is mandatory;
-failed source tests still fail CI even if upload retries succeed.
-
-**It does not build or release an ISO.** Non-root `run-all.sh` skips root
-disk-exclusion. Full/mem ISO builds, firmware audit, real ISO QEMU smoke/full/
-disk-stress and physical hardware checks remain required separate gates.
-The summary records them as NOT_RUN; never interpret source green as release
-acceptance, silently accept missing vendor or publish old/dirty artifacts.
-
-```sh
-gh api repos/yiyezq162/KLBurn/actions/runners \
-  --jq '.runners[] | {name,status,busy,labels:[.labels[].name]}'
-gh run list --repo yiyezq162/KLBurn --workflow check.yml --limit 5
-```
-
-## Dedicated build backend facts
-
-Native domain `f041a928-d7ee-4dd3-a031-d2b05f57ecef`, title `KLBurn-BuildVM`,
-private guest172.30.91.2. Earlier2GiB bootstrap verified root/chroot/mount/loop/
-exFAT/nested KVM and Mihomo → BitsFlow DE/GitHub. The6GiB configuration has since
-booted and built both1.10.6 candidate editions; complete release acceptance is
-recorded separately in `out/release-1.10.6/`. NAS usable physical RAM7.53GiB:
-do not start heavy VM builds beside full CI/lab jobs or assume configured RAM
-is physical capacity. Runner source-check ceiling is2CPU/1GiB+1GiB swap.
-
-Guest source `/srv/klburn/src`, explicit `KLBURN_WORK=/srv/klburn/work`,
-task-specific `/srv/klburn/e2e` directories, `/srv/klburn/artifacts`.
-Only this guest receives privileged mount/loop/KVM work; the Docker Runner has
-no KVM, physical disk or NAS Docker socket. **Automatic Runner-to-VM transport
-and GitHub Release workflow remain NOT_CONFIGURED**. Manual source/vendor
-migration is available through trusted NAS root/QGA and a temporary private
-bridge-only transfer server; source checks and `build/release.sh` execute in
-the guest. Verified artifacts are copied to the Mac project `out/` and their
-SHA256 values checked again. No NAS root key/generic host-exec API is put in CI.
-
-Current guest management is trusted NAS root → QEMU Guest Agent; independent
-guest SSH/key/interactive login is not enrolled. Use pinned NAS alias
-`nas-dxp4800-plus` and explicit root only for authorized VM/build maintenance.
-UGOS mislabels private network/NoCloud seed as missing: do not save those
-defaults. VPSManage/vault `20-服务/nas-klburn-buildvm.md` and `nas-ci-runners.md`
-own lifecycle/recovery. No global prune or other-project/VM modification.
-
-Before real ISO delivery restore approved offline components/private samples,
-confirm a clean commit and follow `docs/building.md` release order. Do not
-commit customer originals/licensed binaries. CI/docs-only changes need no ISO
-version bump or release tag.
+版本变化见 [CHANGELOG](../CHANGELOG.md)。内部构建收据保存版本、commit、
+两版文件大小及 SHA256、各套件分母和限制，但不自动公开。
+另见 [第三方分发边界](third-party.md)；软件测试通过不证明分发权利。

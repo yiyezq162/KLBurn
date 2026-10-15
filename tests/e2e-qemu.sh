@@ -695,6 +695,10 @@ elif (( DISK_STRESS )); then
   if wait_for_log "[CPU] stress-ng on all" 1800 "基准与专项验证完成、CPU 压测开始"; then
     sleep 20
     shot "burn-in"
+    # 受限后端上，启动锚点后的第一张仍可能是采集日志；保留它，再取稳态画面。
+    # 两张都要人工检查，文件存在不等于仪表盘视觉通过。
+    sleep 70
+    shot "burn-in-90"
   else
     bad "未看到 CPU 压测启动锚点，不能把基准阶段截图当成压测仪表盘"
   fi

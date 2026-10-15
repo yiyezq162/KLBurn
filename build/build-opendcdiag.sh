@@ -124,10 +124,19 @@ while read -r soname _ sopath _; do
   log "同目录附带运行库：$soname"
 done < <(ldd "$BIN" 2>/dev/null)
 
+python3 "$SCRIPT_DIR/vendor-notices.py" "$SRC_DIR" "$OUT_DIR" \
+  --required LICENSE LICENSE.3rdparty --optional NOTICE
+# 附带库的版权原文也必须随二进制保留；不存在时停止，不能只写“见上游”。
+for pkg in zlib1g libzstd1; do
+  notice="/usr/share/doc/$pkg/copyright"
+  [[ -s "$notice" ]] || die "缺少附带库的版权原文：$notice"
+  install -m 0644 "$notice" "$OUT_DIR/COPYRIGHT.$pkg"
+done
+
 cat > "$OUT_DIR/SOURCE.txt" <<EOF
 OpenDCDiag @ $OPENDCDIAG_REF
 $REPO
-License: Apache-2.0（见上游 LICENSE）—— 可自由分发，所以能随盘带
+License: Apache-2.0；原文与附带第三方声明见同目录 LICENSE、LICENSE.3rdparty、COPYRIGHT.*
 版本自述: $(cd "$OUT_DIR" && LD_LIBRARY_PATH=. ./opendcdiag --version 2>/dev/null || echo '(取不到)')
 编译: $(g++ --version | head -1)，meson --buildtype=release，strip -s
 同目录附带: $(cd "$OUT_DIR" && ls *.so* 2>/dev/null | tr '\n' ' ')

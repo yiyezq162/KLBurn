@@ -111,6 +111,8 @@ build_one "$BW_SRC"  bandwidthTest
 build_one "$P2P_SRC" p2pBandwidthLatencyTest
 
 # ---------------------------------------------------------------- 收尾
+python3 "$SCRIPT_DIR/vendor-notices.py" "$SRC_DIR" "$OUT_DIR" \
+  --required LICENSE --optional NOTICE
 cat > "$OUT_DIR/SOURCE.txt" <<EOF
 NVIDIA cuda-samples $SAMPLES_TAG ($(git log -1 --format=%H))
 $REPO

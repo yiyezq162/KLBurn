@@ -261,6 +261,9 @@ rm -f "$OUT_DIR"/libcublas*.so* "$OUT_DIR"/libcudart*.so* \
       "$OUT_DIR/gpu_burn" "$OUT_DIR/compare.ptx" "$OUT_DIR/compare.fatbin"
 install -m 0755 "$TMP_DIR/gpu_burn"    "$OUT_DIR/gpu_burn"
 install -m 0644 "$SRC_DIR/$COMPARE"    "$OUT_DIR/$COMPARE"
+python3 "$SCRIPT_DIR/vendor-notices.py" "$SRC_DIR" "$OUT_DIR" \
+  --required LICENSE --optional NOTICE
+git -C "$SRC_DIR" rev-parse HEAD > "$OUT_DIR/SOURCE-COMMIT.txt"
 
 info "完成："
 ls -la "$OUT_DIR"
