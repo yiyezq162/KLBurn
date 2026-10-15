@@ -6,8 +6,10 @@
 ## 运行环境
 
 - 源码回归使用 x86_64 Ubuntu 24.04、Bash、Python 3、shellcheck 和 iproute2。
-- Pull Request 使用一次性 GitHub 托管环境。维护者可信分支可使用专用自托管
-  Runner；fork 仓库可设置仓库变量 `CI_RUNNER=github` 选择 GitHub 托管环境。
+- 默认使用一次性 GitHub 托管环境，fork 无需维护者的 Runner。
+  可信分支可设置仓库变量 `CI_RUNNER=self-hosted`，并通过
+  `CI_RUNNER_LABELS` 的 JSON 字符串数组指定自己的专用 Runner 标签。
+  Pull Request 始终使用 GitHub 托管环境，不受该设置影响。
 - 不向不可信 Pull Request 提供私有回归样本、凭据或构建机管理权限。
 - ISO 的 root、chroot、loop/mount 和 KVM 操作在符合条件的独立后端执行，
   不在普通容器 Runner 中执行；普通开发不需要重新注册维护者的 Runner。
@@ -26,6 +28,9 @@
 可信自托管流程只在自己拥有的任务工作区复制样本，退出时清理该次任务的副本，
 不修改原始资料。构建工具使用外部用户自己的后端、离线组件和样本，
 不提供对维护者环境的访问。
+自托管维护者将原始样本的绝对目录保存为仓库 secret `CI_FIXTURE_DIR`；
+源码不包含其路径，Pull Request 不注入该值。缺失配置或样本仍然失败，
+不得将不含真实回放的托管任务结果当成完整回归通过。
 
 ## 日志与 artifact
 

@@ -11,7 +11,7 @@ concurrency:
   cancel-in-progress: false
 jobs:
   source:
-    runs-on: ${{ (github.event_name == 'pull_request' || vars.CI_RUNNER == 'github') && 'ubuntu-24.04' || fromJSON('["self-hosted", "Linux", "X64", "nas-klburn"]') }}
+    runs-on: ${{ (github.event_name == 'pull_request' || vars.CI_RUNNER != 'self-hosted') && 'ubuntu-24.04' || fromJSON(vars.CI_RUNNER_LABELS || '["self-hosted", "Linux", "X64"]') }}
     timeout-minutes: 30
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
@@ -29,16 +29,19 @@ jobs:
           test "$(uname -m)" = x86_64
           test "$(id -u)" != 0
       - name: Run non-root source regression
+        env:
+          CI_FIXTURE_DIR: ${{ github.event_name != 'pull_request' && secrets.CI_FIXTURE_DIR || '' }}
         run: |
           mkdir -p ci-reports
           if [[ "$RUNNER_ENVIRONMENT" == self-hosted ]]; then
-            fixture=/home/runner/.private-fixtures/klburn-hardware-v1
+            fixture="${CI_FIXTURE_DIR:?Configure CI_FIXTURE_DIR for trusted self-hosted regression}"
+            [[ "$fixture" = /* ]]
             test -d "$fixture"
             test ! -e test_out && test ! -L test_out
             mkdir -m 700 test_out
-            printf '%s\n' "$GITHUB_RUN_ID-$GITHUB_RUN_ATTEMPT" > test_out/.nas-ci-fixture-owner
+            printf '%s\n' "$GITHUB_RUN_ID-$GITHUB_RUN_ATTEMPT" > test_out/.ci-fixture-owner
             cleanup_fixture() {
-              if [[ -d test_out && ! -L test_out && "$(cat test_out/.nas-ci-fixture-owner)" == "$GITHUB_RUN_ID-$GITHUB_RUN_ATTEMPT" ]]; then
+              if [[ -d test_out && ! -L test_out && "$(cat test_out/.ci-fixture-owner)" == "$GITHUB_RUN_ID-$GITHUB_RUN_ATTEMPT" ]]; then
                 rm -rf -- "$GITHUB_WORKSPACE/test_out"
               fi
             }
@@ -50,7 +53,7 @@ jobs:
       - name: Record explicit release gaps
         if: always()
         run: |
-          printf '%s\n' '### KLBurn source checks — NOT a release gate' 'Runner: repository-specific nas-ci-klburn. Privileged work belongs in KLBurn-BuildVM, not this Docker container.' 'Root disk-exclusion, full/mem ISO build, firmware audit, real ISO QEMU/disk-stress, offline vendor parity and physical hardware acceptance: NOT_RUN.' 'Do not publish an ISO/tag based only on this workflow.' >> "$GITHUB_STEP_SUMMARY"
+          printf '%s\n' '### KLBurn source checks — NOT a release gate' 'Privileged ISO work requires a separate supported build backend, not this source-check Runner.' 'Root disk-exclusion, full/mem ISO build, firmware audit, real ISO QEMU/disk-stress, offline vendor parity and physical hardware acceptance: NOT_RUN.' 'Do not publish an ISO/tag based only on this workflow.' >> "$GITHUB_STEP_SUMMARY"
       - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
         id: source_primary
         if: always()
