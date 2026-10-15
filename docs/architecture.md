@@ -901,18 +901,17 @@ RTX PRO 6000 上 `nvidia-smi` 一张卡都认不到 —— 而那会被记成 FA
 
 ### 抬头（品牌）
 
-全部集中在 [`../build/config.sh`](../build/config.sh) 顶部的「品牌抬头」一块：
-`COMPANY_NAME` / `REPORT_TITLE` / `PRODUCT_NAME` / `COMPANY_LOGO_FILE`。
-每一项都支持构建期环境变量覆盖（`KLBURN_COMPANY_NAME` 等），
-适合同一份源码出多个抬头的盘：
-
-```bash
-KLBURN_COMPANY_NAME="XX科技有限公司" sudo -E ./build/build-iso.sh
-```
+品牌源为 [`../build/branding.json`](../build/branding.json)，验证器拒绝控制字符、
+不安全控制台名称与任意 logo 路径。`build-iso.sh` 读取经 shell 引号转义的
+常量，并把同一组值传入 chroot；运行时配置再用 Bash `%q` 编码，防止名称中的
+引号、美元符号或反引号变成代码。配置本体与 `BRAND_SHA256` 同时进入 ISO。
+未经源码提交的旧品牌环境变量覆盖被拒绝。
 
 抬头在**构建时**钉进 ISO（`chroot-setup.sh` → `/opt/klburn/klburn.conf` →
 `meta.json` → 报告抬头），**现场运行时绝不询问操作员**。
 报告生成器里没有任何写死的公司名。
+定制构建报告抬头明确带“定制构建”，控制台使用定制 ASCII 名称和 `[CUSTOM]`。
+两版仍保持独立报告标题、原有范围、硬件判据、工具边界与帧高/行宽守卫。
 
 ---
 

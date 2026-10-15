@@ -11,7 +11,7 @@
 # ⚠️ 改完脚本要「先 bump 再构建」。0.3.0 就栽过一次：ISO 构建完之后又改了
 # core.sh/collect.sh 却没动版本号，于是现场那根盘自称 0.3.0、跑的却是修复前的
 # 代码（lshw 卡满 90s、屏幕上冒 Killed），对着仓库怎么看都对不上。
-KLBURN_VERSION="1.10.7"
+KLBURN_VERSION="1.11.0"
 
 # ================================================================
 # 版本（edition）：这张盘是整机全测盘，还是内存专用盘
@@ -43,37 +43,36 @@ esac
 # 这一整块决定"这张盘和它出的报告属于谁"。**在构建时钉死进 ISO**，
 # 现场运行时绝不会询问操作员 —— 一根盘做出来是谁的抬头就是谁的。
 #
-# 换一家公司只要改这几行再重新构建；也可以完全不碰这个文件，
-# 用构建期环境变量覆盖（适合同一份源码出多个抬头的盘）：
-#
-#     KLBURN_COMPANY_NAME="XX科技有限公司" sudo -E ./build/build-iso.sh
+# 此处保留供源码测试使用的中性默认值。真实构建的品牌来源是
+# build/branding.json，经 branding.py 验证并转义后覆盖；定制必须先提交。
+# 不再接受未纳入源码追溯的 KLBURN_* 品牌环境变量覆盖。
 #
 # 这些值经 chroot-setup.sh 写进 /opt/klburn/klburn.conf，再进 meta.json 和报告抬头。
 
 # 报告抬头显示的公司名。可以写中文，report.html 里显示正常。
 # 注意：开机那个 banner 是 Linux 文本控制台，显示不了中文，
 #      所以公司名含中文时 banner 上不显示它（只在报告里出现），这是正常的。
-COMPANY_NAME="${KLBURN_COMPANY_NAME:-广州市鲲林科技有限公司}"
+COMPANY_NAME="KLBurn"
 
 # 报告大标题（客户报告和内部报告共用这一个主标题）。
 # 内存盘换一个标题 —— 一份只测了内存的报告顶着"服务器出厂老化测试报告"
 # 这个抬头，就是在说一件它没做过的事（和单项专测那条红线同一把尺子）。
 if [[ "$KLBURN_EDITION" == "mem" ]]; then
-  REPORT_TITLE="${KLBURN_REPORT_TITLE:-内存专用测试报告}"
+  REPORT_TITLE="内存专用测试报告"
 else
-  REPORT_TITLE="${KLBURN_REPORT_TITLE:-服务器出厂老化测试报告}"
+  REPORT_TITLE="服务器出厂老化测试报告"
 fi
 
 # 产品名：开机 banner、GRUB 菜单项、.disk/info 用它。
 # 只能是 ASCII —— 这三个地方都在文本控制台/引导器里，中文显示不出来。
 if [[ "$KLBURN_EDITION" == "mem" ]]; then
-  PRODUCT_NAME="${KLBURN_PRODUCT_NAME:-KLBurn-MEM}"
+  PRODUCT_NAME="KLBurn-MEM"
 else
-  PRODUCT_NAME="${KLBURN_PRODUCT_NAME:-KLBurn}"
+  PRODUCT_NAME="KLBurn"
 fi
 
-# 可选 logo：把 png 放到 vendor/logo.png，留空则报告不显示 logo
-COMPANY_LOGO_FILE="${KLBURN_LOGO_FILE:-logo.png}"
+# 默认使用文字标识；定制 PNG 由工具保存为已追溯的 build/custom-logo.png。
+COMPANY_LOGO_FILE=""
 
 # ---------- 源 ISO ----------
 UBUNTU_RELEASE="24.04"

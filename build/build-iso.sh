@@ -48,6 +48,10 @@ source "$SCRIPT_DIR/lib/common.sh"
 # shellcheck source=config.sh
 source "$SCRIPT_DIR/config.sh"
 
+# Only validated, shell-quoted assignments from our own encoder are evaluated.
+BRAND_CONSTANTS="$(python3 "$SCRIPT_DIR/branding.py" --edition "$KLBURN_EDITION")"
+eval "$BRAND_CONSTANTS"
+
 require_root "$@"
 require_cmds xorriso mksquashfs unsquashfs rsync curl chroot md5sum numfmt find sed awk
 BUILD_JOBS="${KLBURN_BUILD_JOBS:-$(nproc)}"
@@ -397,9 +401,12 @@ KLBURN_KERNEL="${KLBURN_KERNEL}"
 EOF
 
 # rootfs 覆盖层（去 CRLF 后再拷）
+printf '\n%s\n' "$BRAND_CONSTANTS" >> "$STAGE/config.sh"
+
 # 排除 __pycache__：本机跑过 py_compile / 测试后会留下，没必要进 ISO
 rsync -a --chmod=D755 --exclude='__pycache__' --exclude='*.pyc' \
       "$PROJ_DIR/rootfs/" "$STAGE/overlay/"
+install -m 0644 "$SCRIPT_DIR/branding.json" "$STAGE/overlay/opt/klburn/branding.json"
 while IFS= read -r -d '' f; do
   sed -i 's/\r$//' "$f"
 done < <(find "$STAGE/overlay" -type f \( -name '*.sh' -o -name '*.py' -o -name '*.service' -o -name '*.conf' \) -print0)
@@ -412,6 +419,10 @@ if [[ "$KLBURN_EDITION" == "mem" ]]; then
   fi
 elif [[ -d "$PROJ_DIR/vendor" ]]; then
   rsync -a --exclude='README.md' "$PROJ_DIR/vendor/" "$STAGE/vendor/"
+fi
+if [[ "$COMPANY_LOGO_FILE" == custom-logo.png ]]; then
+  [[ -f "$SCRIPT_DIR/custom-logo.png" ]] || die "品牌配置指定了 logo，但已提交源码中缺少 build/custom-logo.png"
+  install -m 0644 "$SCRIPT_DIR/custom-logo.png" "$STAGE/vendor/custom-logo.png"
 fi
 
 # ---------------------------------------------------------------- PCI / USB ID 库

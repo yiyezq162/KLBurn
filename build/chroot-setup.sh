@@ -301,9 +301,7 @@ say "klburn.service 已设为开机自启（ExecStart=$KLB_MAIN）"
 cat > /opt/klburn/klburn.conf <<EOF
 # 由 build/chroot-setup.sh 在构建时生成，勿手改
 KLBURN_VERSION="${KLBURN_VERSION}"
-COMPANY_NAME="${COMPANY_NAME}"
-REPORT_TITLE="${REPORT_TITLE:-服务器出厂老化测试报告}"
-PRODUCT_NAME="${PRODUCT_NAME:-KLBurn}"
+# 品牌字段在下方以 shell 转义形式追加，不将用户输入插进可执行语法。
 # 这张盘是整机全测盘（full）还是内存专用盘（mem）。运行时脚本和报告生成器
 # 都读它 —— 报告抬头那句"本轮只测了内存"就是按它写的。
 KLBURN_EDITION="${KLBURN_EDITION:-full}"
@@ -484,6 +482,11 @@ if (( raid_tools_found == 0 )); then
 else
   say "阵列卡管理工具共装了 $raid_tools_found 个"
 fi
+
+# Shell quoting must survive later source of klburn.conf (including $ and quotes).
+for brand_key in COMPANY_NAME REPORT_TITLE PRODUCT_NAME BRAND_TAGLINE BRAND_CUSTOM BRAND_SHA256; do
+  printf '%s=%q\n' "$brand_key" "${!brand_key}" >> /opt/klburn/klburn.conf
+done
 
 # ---------------------------------------------------------------- vendor: logo
 if [[ -n "${COMPANY_LOGO_FILE:-}" && -f "$STAGE/vendor/${COMPANY_LOGO_FILE}" ]]; then

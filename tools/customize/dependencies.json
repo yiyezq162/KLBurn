@@ -1,0 +1,14 @@
+{
+  "schema": 1,
+  "policy": "仅提供官方获取入口；下载不等于允许再分发，工具不替用户接受许可。",
+  "components": [
+    {"name": "NVIDIA Linux 驱动", "url": "https://www.nvidia.com/Download/index.aspx", "destination": "vendor/nvidia/", "redistribution": "核对所选版本许可；open 内核模块许可不覆盖全部驱动组件"},
+    {"name": "NVIDIA CUDA Toolkit", "url": "https://developer.nvidia.com/cuda-downloads", "destination": "构建后端工具链", "redistribution": "仅分发对应版本条款明确允许的运行时组件；不默认上传整个 Toolkit"},
+    {"name": "Broadcom StorCLI", "url": "https://www.broadcom.com/support/download-search", "destination": "vendor/storcli/", "redistribution": "未确认公开再分发权利；通过官方入口取得并自行核对适用许可"},
+    {"name": "Intel oneMKL / LINPACK", "url": "https://www.intel.com/content/www/us/en/developer/tools/oneapi/onemkl-download.html", "destination": "vendor/bench/linpack/", "redistribution": "核对所选版本的许可和 redistributables 清单，保留完整归属"},
+    {"name": "Intel Memory Latency Checker", "url": "https://www.intel.com/content/www/us/en/download/736633/intel-memory-latency-checker-intel-mlc.html", "destination": "vendor/bench/mlc/", "redistribution": "redist.txt 与完整适用许可须一起核对；不可用其他版本文档代替"},
+    {"name": "gpu-burn 源码", "url": "https://github.com/wilicc/gpu-burn", "destination": "使用 build/build-gpu-burn.sh 构建", "redistribution": "保留源码许可证，并另行核对所链接的 CUDA 组件"},
+    {"name": "NVIDIA cuda-samples 源码", "url": "https://github.com/NVIDIA/cuda-samples", "destination": "使用 build/build-bench.sh 构建", "redistribution": "保留源码许可，并另行核对所链接的 CUDA 组件"},
+    {"name": "OpenDCDiag 源码", "url": "https://github.com/opendcdiag/opendcdiag", "destination": "使用 build/build-opendcdiag.sh 构建", "redistribution": "保留适用许可证、NOTICE 与所附动态库的归属"}
+  ]
+}

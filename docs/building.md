@@ -25,7 +25,8 @@ macOS 自带 Bash/BSD 工具不作为全套回归环境。已配置专用 NAS �
 
 - 保留完整 Git 历史和 tags，用于按报告版本回查；从 GitHub 下载 ZIP 不含这些。
 - 文本使用 UTF-8 无 BOM、LF（由 `.gitattributes` 固定），入口脚本的执行权限由 Git 保存。
-- `vendor/` 不进版本库，驱动、基准程序和品牌 logo 要单独迁移到 Linux checkout。
+- `vendor/` 不进版本库，驱动和基准程序要单独迁移到 Linux checkout。
+  定制 logo 位于独立定制源码的 `build/custom-logo.png`，与品牌配置一并提交追溯。
   只 clone 源码可能仍能构建，但可选工具缺失会减少盘内功能。清单见
   [vendor/README.md](../vendor/README.md)。
 - `test_out/` 是不入库的客户真机样本；依赖它的回归需在测试机另行恢复。
@@ -177,29 +178,17 @@ KLBURN_MEM_BURN_SECONDS=600 sudo -E ./build/build-iso.sh --edition mem
 
 ## 五、换成别家的抬头
 
-抬头在**构建时**钉进 ISO，现场运行时绝不会问操作员——一根盘做出来是谁的抬头
-就是谁的。报告生成器里没有任何写死的公司名。
+抬头在**构建时**钉进 ISO，现场不询问。1.11.0 起使用
+[`build/branding.json`](../build/branding.json) 集中配置，经验证与 shell 转义后
+写进盘内；配置文件与摘要同时保留，定制配置必须在构建前提交。
 
-改 [`build/config.sh`](../build/config.sh) 顶部那一块：
+默认显示名称为 KLBurn，full 与 mem 各有独立报告标题。中文名称进入报告，
+控制台名称只接受安全 ASCII；定制盘的大字替换为定制产品名称和 `[CUSTOM]`，
+不修改硬件判据、屏幕宽度与帧高守卫。
 
-```bash
-COMPANY_NAME="广州市鲲林科技有限公司"      # 报告抬头
-REPORT_TITLE="服务器出厂老化测试报告"       # 报告大标题
-PRODUCT_NAME="KLBurn"                      # 开机 banner / GRUB 菜单（只能 ASCII）
-COMPANY_LOGO_FILE="logo.png"               # 放 vendor/logo.png，留空则不显示
-```
-
-也可以不碰文件，用构建期环境变量覆盖（适合同一份源码出多个抬头的盘）：
-
-```bash
-KLBURN_COMPANY_NAME="XX科技有限公司" sudo -E ./build/build-iso.sh
-```
-
-> ⚠️ **屏幕上那个 ASCII 大字目前是写死的**（`lib/ui.sh` 的 `_BRAND_ART`，
-> 拼出来就是 "KLBurn"），改 `PRODUCT_NAME` 不会跟着变——它管的是 banner 下面
-> 那行、GRUB 菜单项、`.disk/info`，以及矮屏上退化成一行时的那个名字。
-> 大字下面那句说明（`BRAND_TAGLINE`）同理。**要换成别家的名字，这两处得手工改。**
-> 报告那边不受影响。
+推荐使用 [跨平台定制入口](custom-build.md) 建立独立工作区、提交配置和运行
+双版验收。原先 `KLBURN_COMPANY_NAME` 等未进入 commit 的环境变量覆盖被明确拒绝，
+避免品牌配置与盘内追溯不一致。不要对整棵源码粗暴替换字符串。
 
 ---
 

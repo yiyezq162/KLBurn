@@ -24,6 +24,9 @@
 | **看懂跑出来的报告** | [`docs/reports.md`](docs/reports.md) —— 产出哪些文件、哪份交付、六个范围各长什么样 |
 | **做一根 U 盘** | [`docs/usb-rufus.md`](docs/usb-rufus.md) —— Rufus 写盘 + 建 exFAT 分区 |
 | **出盘 / 发版** | [`docs/building.md`](docs/building.md) —— 构建、换抬头、发布顺序 |
+| **定制名称 / 跨平台构建入口** | [`docs/custom-build.md`](docs/custom-build.md) —— 独立工作区、品牌配置、Linux / SSH 后端及严格验收前提 |
+| **源码与 ISO 的许可范围** | [`docs/third-party.md`](docs/third-party.md) —— MIT 覆盖范围、第三方归属与分发审查边界 |
+| **公开发布与官网维护** | [`docs/publication.md`](docs/publication.md) —— 授权闸门、工具 ZIP、静态下载索引和 Pages 验收 |
 | **用 NAS Runner / 构建 VM** | [`docs/CI.md`](docs/CI.md) —— KLBurn 专用 Runner、源码检查与 ISO 发布边界；不共用其他项目 Runner |
 | **想知道盘里有什么工具** | [`docs/toolbox.md`](docs/toolbox.md) —— 每个工具管什么、缺了会怎样 |
 | **改代码** | [`docs/architecture.md`](docs/architecture.md) —— 模块地图、判定总表、**改代码前必读的不变量清单** |

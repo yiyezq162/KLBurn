@@ -1,0 +1,11 @@
+{
+  "schema": 1,
+  "display_name": "KLBurn",
+  "console_name": "KLBurn",
+  "report_title": "服务器出厂老化测试报告",
+  "mem_report_title": "内存专用测试报告",
+  "tagline": "Server Factory Burn-in Test",
+  "custom": false,
+  "logo": "",
+  "logo_sha256": ""
+}

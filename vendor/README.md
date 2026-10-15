@@ -3,7 +3,7 @@
 这个目录里的东西**不进版本库**（体积大、有授权限制），需要你手动下载后放进来。
 构建脚本会自动检测：文件在就装进 ISO，不在就跳过对应功能（不会报错中断）。
 
-以上自动检测针对 full。1.10.6 起 mem 只取品牌 logo，不复制或安装
+以上自动检测针对 full。1.10.6 起 mem 不复制或安装
 NVIDIA/CUDA、显卡压测、阵列卡管理或性能基准程序；`--edition mem --with-nvidia`
 直接拒绝。full/mem 切换重新解包 rootfs，避免上一版工具残留。
 
@@ -30,7 +30,7 @@ vendor/
 │   ├── linpack/                       #   xlinpack_xeon64（Intel 平台 CPU 算力首选）
 │   ├── mlc/                           #   mlc 或 mlc_avx512
 │   └── opendcdiag/                    #   处理器计算正确性诊断（+ libzstd/libz）
-└── logo.png                           # 可选：报告抬头 logo（PNG，建议高度 100px 内）
+└── README.md                          # 获取与许可说明；定制 logo 不放 vendor
 ```
 
 一览：
@@ -44,7 +44,7 @@ vendor/
 | `bench/` | 性能基准那几项（显卡传输带宽、显卡间互联、CPU 算力、内存带宽）按硬件与工具可用性执行。硬盘带宽不受影响（`fio` 在盘里） |
 | `bench/cpuflops/` | 非 Intel 平台优先使用 `klburn_flops`；Intel 平台优先使用 `linpack/`，缺失时才退回这里。两个都不放才判 SKIP |
 | `bench/opendcdiag/` | 「CPU 计算正确性」判 SKIP（`origin=self`，不进交付报告）。压测照跑，只是抓不到"算完了但算错了"那一类 |
-| `logo.png` | 报告抬头不显示 logo |
+| 定制 logo | 默认使用中性 KLBurn 文字标识；定制 PNG 由独立工作区管理 |
 
 ---
 
@@ -248,16 +248,18 @@ vendor/storcli/storcli64
 
 ---
 
-## 4. logo.png（可选）
+## 4. 定制 logo（可选）
 
-报告抬头显示的公司 logo。PNG 格式，会被 base64 内嵌进报告 HTML，
-所以别放太大的图（建议 < 100KB，高度 100px 以内）。
+1.11.0 起默认使用中性 KLBurn 文字标识，不再自动拾取 vendor 中的旧 logo。
+通过定制工具的 `--logo` 指定 PNG，限 1 MiB，建议高度 100px 以内。
+图片会被 base64 内嵌进 HTML，完整字节和 SHA256 一起进入定制源码追溯。
 
 ```
-vendor/logo.png
+build/custom-logo.png
 ```
 
-同时记得改 `build/config.sh` 里的「品牌抬头」一块（`COMPANY_NAME` 等）。
+仅独立定制工作区保存这份图片。配置位于 `build/branding.json`，不对全仓库
+替换品牌字符串，不自动上传用户品牌；说明见 [定制构建](../docs/custom-build.md)。
 
 ---
 

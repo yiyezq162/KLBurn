@@ -55,7 +55,7 @@ cat > "$RD/meta.json" <<'EOF'
 {
   "klburn_version": "1.0.0",
   "git_commit":     "abc1234-dirty",
-  "company_name":   "广州市鲲林科技有限公司",
+  "company_name":   "示例实验室（虚构）",
   "report_title":   "服务器出厂老化测试报告",
   "product_name":   "KLBurn",
   "base_os":        "Ubuntu Server 24.04.4",

@@ -560,7 +560,7 @@ cat > "$RD/meta.json" <<'EOF'
   "klburn_version": "1.10.0",
   "klburn_edition": "mem",
   "git_commit":     "deadbee",
-  "company_name":   "广州市鲲林科技有限公司",
+  "company_name":   "示例实验室（虚构）",
   "report_title":   "内存专用测试报告",
   "product_name":   "KLBurn-MEM",
   "serial":         "S12345X",

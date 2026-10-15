@@ -54,7 +54,7 @@ mkdir -p "$RD/raw/nic" "$RD/raw/smart-pre" "$RD/raw/smart-post"
 cat > "$RD/meta.json" <<'EOF'
 {
   "klburn_version": "0.1.0",
-  "company_name":   "广州市鲲林科技有限公司",
+  "company_name":   "示例实验室（虚构）",
   "base_os":        "Ubuntu Server 24.04.4",
   "build_date":     "2026-07-30 11:17:00",
   "serial":         "TESTSN0001",
@@ -782,7 +782,7 @@ echo
 echo "=== 抬头提示 ==="
 has "$OUT" "项为告警"      "WARN 项要在抬头点出来"
 has "$OUT" "未能自动校时" "时钟不准的提示（run-dir 里没有 clock_source 字段，按未校时处理）"
-has "$OUT" "广州市鲲林科技有限公司" "公司名"
+has "$OUT" "示例实验室（虚构）" "自定义报告抬头"
 has "$OUT" "报告版本 <b>0.1.0</b>" "客户抬头保留可追溯的报告版本"
 has_no "$OUT" "Ubuntu Server 24.04.4" "客户抬头不披露基础系统"
 has_no "$OUT" "构建于 2026-07-30" "客户抬头不披露内部构建时间"
@@ -1497,7 +1497,7 @@ for sc in cpu mem gpu disk info; do
 import json, sys
 path, scope, budget = sys.argv[1], sys.argv[2], sys.argv[3]
 m = {
-    "klburn_version": "1.9.5", "company_name": "广州市鲲林科技有限公司",
+    "klburn_version": "1.9.5", "company_name": "示例实验室（虚构）",
     "base_os": "Ubuntu Server 24.04.4", "build_date": "2026-08-10 10:00:00",
     "serial": "TESTSN0001", "scope": scope,
     "profile": "INVENTORY" if scope == "info" else "QUICK",
@@ -1680,7 +1680,7 @@ EOF
 printf '' > "$RSM/metrics.jsonl"
 python3 - "$RSM/meta.json" <<'PYEOF'
 import json, sys
-json.dump({"klburn_version":"1.9.7","company_name":"广州市鲲林科技有限公司",
+json.dump({"klburn_version":"1.9.7","company_name":"示例实验室（虚构）",
            "base_os":"Ubuntu Server 24.04.4","build_date":"2026-08-11 10:00:00",
            "serial":"TESTSN0001","scope":"gpu","profile":"QUICK",
            "planned_secs":600,"elapsed_secs":180,

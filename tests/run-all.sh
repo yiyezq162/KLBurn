@@ -24,14 +24,23 @@ SUITES=(
   test-capture
   test-concurrent-burn
   test-batch-tools
+  test-branding
+  test-customize
+  test-tool-packaging
+  test-public-metadata
 )
 
 total_pass=0; total_fail=0; failed_suites=()
 
 for s in "${SUITES[@]}"; do
   printf '\n\033[1;36m===== %s =====\033[0m\n' "$s"
-  out="$(./tests/"$s".sh 2>&1)"
-  rc=$?
+  if [[ -f "tests/$s.py" ]]; then
+    out="$(python3 "tests/$s.py" 2>&1)"
+    rc=$?
+  else
+    out="$(./tests/"$s".sh 2>&1)"
+    rc=$?
+  fi
   if (( rc != 0 )); then
     # 失败时保留具体断言，不能只留下套件总数而丢失故障依据。
     printf '%s\n' "$out"
