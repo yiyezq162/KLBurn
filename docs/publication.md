@@ -30,6 +30,18 @@
 
 这是对应 LINPACK 附带 HPL 2.3 声明中的广告归属条件，不是其他组件的分发许可。
 
+包含当前 shim 启动组件的介绍、官网及 Release 说明还须保留以下原文致谢，
+并随分发保留[完整版权与条件](licenses/shim-15.8.COPYRIGHT)，不得暗示背书：
+
+> This product includes software developed by the OpenSSL Project for use in the OpenSSL Toolkit. (http://www.openssl.org/)
+>
+> This product includes cryptographic software written by Eric Young (eay@cryptsoft.com).
+>
+> This product includes software written by Tim Hudson (tjh@cryptsoft.com).
+
+该来源是 `shim 15.8-0ubuntu1` 的完整版权声明。不能用系统另一个版本的
+OpenSSL 许可证，或 `shim-signed` 包的简短 BSD 声明，替代实际嵌入代码的归属。
+
 ## 三平台工具资产
 
 在与 ISO 相同的干净源码 commit 运行：

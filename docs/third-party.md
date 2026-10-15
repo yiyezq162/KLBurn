@@ -13,6 +13,7 @@ Ubuntu 系统、Linux 内核、固件、字体、运行库和第三方工具保�
 |---|---|
 | Ubuntu、Linux、GNU 工具、memtest86+ 等 | 存在 GPL/LGPL 等组件；需按具体包版本保留许可证，并落实适用的对应源码提供方式。仅链接上游首页不是完整源码交付证明。 |
 | 固件与 CPU 微码 | 许可随具体固件包而异，不能由内核 GPL 推断全部固件适用 GPL。 |
+| UEFI 启动链 shim | 实际 EFI 文件已与 Ubuntu 的 `shim-signed 1.58+15.8-0ubuntu1` 对账，其 Built-Using 指向 `shim 15.8-0ubuntu1`。完整源码版权声明还包含 OpenSSL／SSLeay 等条款，不能仅按签名包的简短 BSD 声明处理。当前源码保留[完整原文](licenses/shim-15.8.COPYRIGHT)及相应致谢；旧私有 ISO 尚未补入这份完整声明，不据此宣称可公开分发。 |
 | OpenBLAS、字体、zlib、zstd | 保留对应许可证、版权及适用的再分发说明。静态或动态链接方式须按实际产物核对。 |
 | NVIDIA 驱动和 CUDA 运行库 | 已从哈希核对一致的 595.84 安装包提取 Driver License Agreement（2025-02-25）。第 1.1(d) 条有条件允许用于开源内核的分发，要求不修改二进制并向接收者提供协议；另有硬件与用途限制。实际 ISO 条件符合性及 CUDA 运行库条款尚未全部核清，不能把 open 内核模块许可套用于全部组件。 |
 | gpu-burn、cuda-samples、OpenDCDiag | 已取得 cuda-samples 固定源码版本的 BSD-3 文本，及 OpenDCDiag 固定版本的 Apache-2.0 与附带 MIT/BSD-3 声明；必须保留全部适用归属。gpu-burn 当前上游为 BSD-2，但现有二进制对应源码 commit 尚需核实。 |

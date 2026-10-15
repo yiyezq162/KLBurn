@@ -250,5 +250,14 @@ KLBurn/
 
 > This product includes software developed at the University of Tennessee, Knoxville, Innovative Computing Laboratory.
 
-此声明不代表上述机构为 KLBurn 背书，也不代表整张 ISO 已完成分发许可审查。
+UEFI 启动组件 shim 所含 OpenSSL／SSLeay 代码的原文致谢：
+
+> This product includes software developed by the OpenSSL Project for use in the OpenSSL Toolkit. (http://www.openssl.org/)
+>
+> This product includes cryptographic software written by Eric Young (eay@cryptsoft.com).
+>
+> This product includes software written by Tim Hudson (tjh@cryptsoft.com).
+
+完整声明见 [shim 15.8 版权原文](docs/licenses/shim-15.8.COPYRIGHT)。
+这些声明不代表相关机构或作者为 KLBurn 背书，也不代表整张 ISO 已完成分发许可审查。
 各组件仍适用自己的许可，见[第三方分发边界](docs/third-party.md)。
