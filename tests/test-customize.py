@@ -9,6 +9,8 @@ import subprocess
 import sys
 import tempfile
 import unittest
+from unittest import mock
+from types import SimpleNamespace
 
 ROOT = Path(__file__).resolve().parents[1]
 spec = importlib.util.spec_from_file_location("builder", ROOT / "tools/customize/klburn-builder.py")
@@ -133,6 +135,20 @@ class CustomizeTests(unittest.TestCase):
         receipt_path.write_text(json.dumps(receipt))
         with self.assertRaises(ValueError):
             builder.verify_collected(path, version, self.original)
+
+    def test_remote_early_failure_preserves_session_log(self):
+        self.workspace.mkdir()
+        def fail(command, **kwargs):
+            kwargs["stdout"].write(b"synthetic early backend failure\n")
+            return subprocess.CompletedProcess(command, 1)
+        with mock.patch.object(builder, "run"), mock.patch.object(builder.subprocess, "run", side_effect=fail):
+            with self.assertRaises(ValueError):
+                builder.build_ssh(SimpleNamespace(ssh="builder@example.invalid"), self.source, self.workspace)
+        log = (self.workspace / "ssh-session.log").read_text()
+        self.assertEqual(log.count("synthetic early backend failure"), 2)
+        receipt = json.loads((self.workspace / "remote-build.json").read_text())
+        self.assertEqual(receipt["session_log"], "ssh-session.log")
+        self.assertEqual(self.git("status", "--porcelain"), "")
 
 
 if __name__ == "__main__":

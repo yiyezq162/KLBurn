@@ -29,6 +29,7 @@ git tag -l --sort=version:refname
   cuda-samples、OpenDCDiag 的许可证、附带声明及 OpenDCDiag 随附库的版权文件。
 - gpu-burn 入盘时保留许可目录，缺少原文则停止打包；硬件判定与两版工具边界不变。
 - 两版 ISO 均附带 KLBurn 自有代码 MIT 原文及第三方许可范围说明。
+- SSH 定制构建解包不继承发送端 UID，并保留预检阶段的会话日志；不放宽 Git 所有权检查。
 - 这不构成整张 ISO 的分发许可结论；厂商组件适用条款、对应源码及完整验收仍须核实。
 
 ## v1.11.0（候选版本，尚未发布）

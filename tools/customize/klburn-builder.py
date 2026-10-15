@@ -197,16 +197,24 @@ def build_ssh(args, source, workspace):
     with tarfile.open(archive, "w") as tar:
         tar.add(source, arcname="source", recursive=True)
     with archive.open("rb") as stream:
-        run(ssh + ["tar -xf - -C " + remote], stdin=stream)
-    receipt = {"remote_workspace": remote, "ssh_target": args.ssh, "cleanup": "manual after verified collection"}
+        # Root on the backend must not recreate the Mac/Windows user's numeric UID.
+        # Keep Git ownership checks enabled; the receiving user owns this workspace.
+        run(ssh + ["tar --no-same-owner -xf - -C " + remote], stdin=stream)
+    receipt = {"remote_workspace": remote, "ssh_target": args.ssh, "session_log": "ssh-session.log",
+               "cleanup": "manual after verified collection"}
     (workspace / "remote-build.json").write_text(json.dumps(receipt, indent=2) + "\n", encoding="utf-8")
     remote_command = "python3 " + remote + "/source/tools/customize/klburn-builder.py --resume " + remote
-    result = subprocess.run(ssh + [remote_command])
+    session_log = workspace / "ssh-session.log"
+    print("SSH 会话日志（包括预检失败）：", session_log, flush=True)
+    with session_log.open("ab") as stream:
+        result = subprocess.run(ssh + [remote_command], stdout=stream, stderr=subprocess.STDOUT)
     # Keep both success and failure logs. No delete or automatic publication.
-    log_copy = subprocess.run(["scp", "-o", "BatchMode=yes", "-o", "StrictHostKeyChecking=yes",
-                               args.ssh + ":" + remote + "/build.log", str(workspace / "build.log")])
+    with session_log.open("ab") as stream:
+        log_copy = subprocess.run(["scp", "-o", "BatchMode=yes", "-o", "StrictHostKeyChecking=yes",
+                                   args.ssh + ":" + remote + "/build.log", str(workspace / "build.log")],
+                                  stdout=stream, stderr=subprocess.STDOUT)
     if result.returncode:
-        raise ValueError("SSH 构建未通过；远端工作区与失败日志保留：" + remote)
+        raise ValueError("SSH 构建未通过；会话日志保留：" + str(session_log) + "；远端工作区：" + remote)
     if log_copy.returncode:
         raise ValueError("构建日志未收集成功；请保留并检查远端工作区：" + remote)
     run(["scp", "-r", "-o", "BatchMode=yes", "-o", "StrictHostKeyChecking=yes",
