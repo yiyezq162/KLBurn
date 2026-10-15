@@ -1,0 +1,58 @@
+{
+  "schema": 1,
+  "scope": "Selected boot-component copyright texts, not a complete ISO license clearance or component inventory",
+  "source_iso": {
+    "file": "ubuntu-24.04.4-live-server-amd64.iso",
+    "sha256": "e907d92eeec9df64163a7e454cbc8d7755e8ddc7ed42f99dbc80c40f1a138433"
+  },
+  "notices": [
+    {
+      "source_package": "casper",
+      "source_version": "1.498",
+      "notice_origin": "casper 1.498 binary package",
+      "file": "casper-1.498.COPYRIGHT",
+      "sha256": "990b454ac7764433d5dd9d78ef2fe435bdccd7272bc8316de7850f50b90a1c65",
+      "source_url": "https://launchpad.net/ubuntu/+source/casper/1.498"
+    },
+    {
+      "source_package": "cifs-utils",
+      "source_version": "2:7.0-2ubuntu0.2",
+      "notice_origin": "cifs-utils 2:7.0-2ubuntu0.2 binary package",
+      "file": "cifs-utils-7.0-2ubuntu0.2.COPYRIGHT",
+      "sha256": "351b350b0cfb133bc61a96592a782ee22800987c2ee6c636b8bb1979b3ed3e53",
+      "source_url": "https://launchpad.net/ubuntu/+source/cifs-utils/2%3A7.0-2ubuntu0.2"
+    },
+    {
+      "source_package": "grub2",
+      "source_version": "2.12-1ubuntu7.3",
+      "notice_origin": "grub-common 2.12-1ubuntu7.3 binary package",
+      "file": "grub2-2.12-1ubuntu7.3.COPYRIGHT",
+      "sha256": "bd3b5f8b4b6f3592bb1b597c6fb4557516db1a3a51a8c0ade5eb1e0dd09a7e1e",
+      "source_url": "https://launchpad.net/ubuntu/+source/grub2/2.12-1ubuntu7.3"
+    },
+    {
+      "source_package": "grub2-signed",
+      "source_version": "1.202.5",
+      "notice_origin": "grub-efi-amd64-signed 1.202.5+2.12-1ubuntu7.3 binary package",
+      "file": "grub2-signed-1.202.5.COPYRIGHT",
+      "sha256": "fc8514704644f793040bff7d527971872c7361682592aeb2c603845b912a9d37",
+      "source_url": "https://launchpad.net/ubuntu/+source/grub2-signed/1.202.5"
+    },
+    {
+      "source_package": "shim-signed",
+      "source_version": "1.58",
+      "notice_origin": "shim-signed 1.58+15.8-0ubuntu1 binary package",
+      "file": "shim-signed-1.58.COPYRIGHT",
+      "sha256": "c9a00de7751e3eb61680e95b5bf776721901e993445d584a9051561613f8bed9",
+      "source_url": "https://launchpad.net/ubuntu/+source/shim-signed/1.58"
+    },
+    {
+      "source_package": "shim",
+      "source_version": "15.8-0ubuntu1",
+      "notice_origin": "shim_15.8-0ubuntu1.debian.tar.xz:debian/copyright",
+      "file": "shim-15.8.COPYRIGHT",
+      "sha256": "278ea11f13eb4623b8d0d574262fc77dd53d77fdcdb6c30030fe049ed260d43d",
+      "source_url": "https://launchpad.net/ubuntu/+source/shim/15.8-0ubuntu1"
+    }
+  ]
+}
