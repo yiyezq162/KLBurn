@@ -27,6 +27,8 @@ class CustomizeTests(unittest.TestCase):
         (self.source / "build").mkdir(parents=True)
         for name in ("branding.json", "branding.py"):
             shutil.copy2(ROOT / "build" / name, self.source / "build" / name)
+        (self.source / "tests").mkdir()
+        shutil.copy2(ROOT / "tests/test-branding.py", self.source / "tests/test-branding.py")
         (self.source / "build/config.sh").write_text('KLBURN_VERSION="1.11.0"\n', encoding="utf-8")
         (self.source / ".gitignore").write_text("vendor/\ntest_out/\n", encoding="utf-8")
         self.git("init", "-q")
@@ -53,6 +55,10 @@ class CustomizeTests(unittest.TestCase):
         self.assertEqual(self.git("rev-parse", "HEAD"), self.original)
         self.assertEqual(self.git("status", "--porcelain"), "")
         self.assertIn("NOT_RUN", result.stdout)
+        # Actual generated source must pass its brand suite, not only CLI preparation.
+        check = subprocess.run([sys.executable, str(target / "tests/test-branding.py")],
+                               capture_output=True, text=True)
+        self.assertEqual(check.returncode, 0, check.stdout + check.stderr)
         return target
 
     def test_default_brand_private_commit(self):

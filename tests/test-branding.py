@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 """Brand input boundaries: actual shell roundtrip, not string matching."""
 import importlib.util
+import hashlib
 import json
 from pathlib import Path
 import shlex
@@ -17,7 +18,30 @@ spec.loader.exec_module(branding)
 
 class BrandingTests(unittest.TestCase):
     def setUp(self):
-        self.data = branding.load_brand(ROOT / "build/branding.json")
+        # Test the official defaults independently of this checkout's selected brand.
+        # A real customized checkout must run the same suite without losing its label.
+        self.data = {
+            "schema": 1, "display_name": "KLBurn", "console_name": "KLBurn",
+            "report_title": "服务器出厂老化测试报告", "mem_report_title": "内存专用测试报告",
+            "tagline": "Server Factory Burn-in Test", "custom": False,
+            "logo": "", "logo_sha256": "",
+        }
+
+    def test_checkout_brand_and_provenance(self):
+        selected = branding.load_brand(ROOT / "build/branding.json")
+        if not selected["custom"]:
+            self.assertEqual(selected, self.data)
+            return
+        provenance = json.loads((ROOT / "build/custom-build.json").read_text(encoding="utf-8"))
+        canonical = json.dumps(selected, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
+        self.assertEqual(provenance["branding_sha256"], hashlib.sha256(canonical.encode()).hexdigest())
+        self.assertIs(provenance["official"], False)
+        self.assertEqual(provenance["publication"], "disabled")
+        for edition in ("full", "mem"):
+            values = branding.constants(selected, edition)
+            self.assertEqual(values["COMPANY_NAME"], selected["display_name"] + "（定制构建）")
+            self.assertEqual(values["BRAND_CUSTOM"], "1")
+            self.assertEqual(values["BRAND_SHA256"], provenance["branding_sha256"])
 
     def load(self, data):
         with tempfile.TemporaryDirectory() as tmp:
