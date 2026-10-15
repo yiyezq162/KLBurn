@@ -63,6 +63,12 @@ python3 tools/customize/klburn-builder.py --check-backend
 ```
 
 预检不代表发布通过。缺少工具会明确停止，不自动安装系统依赖。
+后端若依赖网络代理，请在实际运行工具的环境中配置标准 `http_proxy` /
+`https_proxy`（或大写形式）、`all_proxy`、`no_proxy` 变量。工具仅请求 sudo 保留
+这些已配置的变量名，不把代理值放进命令参数，也不保留其他环境变量。
+sudo 策略不允许保留时会停止，需由后端管理员配置相应权限；不会修改网络或绕过策略。
+后台服务和 SSH 非交互命令不一定继承登录终端的环境，必须分别验证。
+不要把含凭据的代理值提交到源码、品牌配置或公开日志中。
 准备好后使用 `--backend local`，或 `--backend ssh --ssh builder@example-build-host`
 （此主机名是虚构示例，请换成自己的 SSH 配置别名）。SSH 目标必须预先完成
 host key 核验、密钥配置与所需权限；工具不关闭 host key 检查、不接受密码参数。

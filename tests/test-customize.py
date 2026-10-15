@@ -3,6 +3,7 @@
 import json
 import hashlib
 import importlib.util
+import os
 from pathlib import Path
 import shutil
 import subprocess
@@ -155,6 +156,34 @@ class CustomizeTests(unittest.TestCase):
         receipt = json.loads((self.workspace / "remote-build.json").read_text())
         self.assertEqual(receipt["session_log"], "ssh-session.log")
         self.assertEqual(self.git("status", "--porcelain"), "")
+
+    def local_build_command(self, environment):
+        self.workspace.mkdir()
+        (self.source / "vendor").mkdir()
+        (self.source / "vendor/full-vendor.sha256").write_text("synthetic test input\n")
+        (self.source / "test_out").mkdir()
+        # Only test invocation construction; no ISO or environment preflight is mocked as PASS.
+        with mock.patch.dict(os.environ, environment, clear=True), \
+                mock.patch.object(builder, "preflight"), mock.patch.object(builder.os, "chdir"), \
+                mock.patch("builtins.print"), \
+                mock.patch.object(builder.subprocess, "run", return_value=subprocess.CompletedProcess([], 0)) as invoke:
+            builder.build_local(self.source, self.workspace)
+        return invoke.call_args.args[0]
+
+    def test_existing_proxy_names_preserved_without_values_in_command(self):
+        proxy = "http://fixture:example@proxy.example.invalid:3128"
+        command = self.local_build_command({"https_proxy": proxy, "NO_PROXY": "localhost",
+                                            "UNRELATED_SECRET": "synthetic", "HTTP_PROXY": ""})
+        self.assertIn("--preserve-env=https_proxy,NO_PROXY", command)
+        self.assertNotIn(proxy, repr(command))
+        self.assertNotIn("UNRELATED_SECRET", repr(command))
+        self.assertNotIn("-E", command)
+        self.assertEqual(command[-2:], ["./build/release.sh", "--mutate"])
+
+    def test_no_proxy_does_not_preserve_extra_environment(self):
+        command = self.local_build_command({"UNRELATED_SECRET": "synthetic"})
+        self.assertEqual(command[:3], ["sudo", "-n", "env"])
+        self.assertFalse(any(arg.startswith("--preserve-env") for arg in command))
 
 
 if __name__ == "__main__":

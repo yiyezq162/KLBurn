@@ -135,8 +135,16 @@ def build_local(source, workspace):
     if not (source / "test_out").is_dir():
         raise ValueError("缺少私有硬件回归输入。现有严格发布门槛需要真实传感器/电源样本；不会删除或绕过此守卫")
     log = workspace / "build.log"
-    command = ["sudo", "-n", "env", "KLBURN_WORK=" + str(workspace / "work"),
-               "bash", "./build/release.sh", "--mutate"]
+    command = ["sudo", "-n"]
+    # Respect the user's existing network configuration without putting proxy
+    # credentials into argv/logs or preserving unrelated environment variables.
+    proxy_keys = ("http_proxy", "https_proxy", "HTTP_PROXY", "HTTPS_PROXY",
+                  "all_proxy", "ALL_PROXY", "no_proxy", "NO_PROXY")
+    configured = [key for key in proxy_keys if os.environ.get(key)]
+    if configured:
+        command.append("--preserve-env=" + ",".join(configured))
+    command += ["env", "KLBURN_WORK=" + str(workspace / "work"),
+                "bash", "./build/release.sh", "--mutate"]
     with log.open("ab") as stream:
         result = subprocess.run(command, cwd=source, stdout=stream, stderr=subprocess.STDOUT)
     if result.returncode:
