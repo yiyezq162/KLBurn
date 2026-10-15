@@ -31,6 +31,10 @@ macOS 若系统 Python 版本过旧，请安装新版 Python，再用其完整�
 以下名称均为虚构示例。`--ref` 必须选择包含本工具的源码 tag 或 commit，
 不是任意旧版本；执行前应核对所选源码的可信来源。
 
+私有候选 `v1.11.2` 的品牌测试曾将当前配置固定视作官方品牌，导致合法定制
+配置在源码检查阶段停止。修复位于 `e03ed14`，验证定制构建时须选择包含该修复
+的源码提交；旧 tag 不重写，也不能把仅准备成功描述为双版构建通过。
+
 ```sh
 python3 tools/customize/klburn-builder.py \
   --source /path/to/KLBurn --ref <已核对的源码commit> \
@@ -67,6 +71,9 @@ host key 核验、密钥配置与所需权限；工具不关闭 host key 检查�
 
 - `--vendor /path/to/verified-vendor`：完整组件及 `full-vendor.sha256`。
   工具不从维护者 NAS 下载私有工具，也不替用户接受第三方许可。
+  输入目录不要携带仓库跟踪的顶层 `vendor/README.md`（它是 KLBurn 的源码说明，
+  不是离线组件）；旧版说明覆盖新版源码会触发脏源码守卫并停止。
+  各第三方组件自己的 README、许可证和归属文件必须保留，不在此排除范围内。
 - `--fixtures /path/to/private-fixtures`：原有真实传感器与电源回放守卫所需输入。
   至少包含可判传感器与未接交流电的真实观察；不得用虚构输入冒充该验收。
   这些数据仅用于你指定的构建后端，不能上传官方仓库。
