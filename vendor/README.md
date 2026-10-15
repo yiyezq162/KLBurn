@@ -369,7 +369,12 @@ cp x/opt/intel/oneapi/mkl/*/share/mkl/benchmarks/linpack/{xlinpack_xeon64,help.l
 15 个规模，跑一轮要很久。运行时会按内存容量自动生成一份只跑一个规模的
 （上限 40000 阶，四次约一分钟），也可以在 `klburn.conf` 里用 `BENCH_LINPACK_N` 写死。
 
-**Intel Memory Latency Checker**（Intel 官网免费下载）：
+**Intel Memory Latency Checker**（从 Intel 官方获取，须核对适用许可）：
+
+下面是项目曾使用的 3.12 官方地址，不保证仍可下载；本次核查返回 HTTP 403。
+可从 [Intel 官方下载页](https://www.intel.com/content/www/us/en/download/736633/intel-memory-latency-checker-intel-mlc.html)
+确认可获取的版本及其完整协议。不要用第三方镜像、其他版本协议或旧压缩包
+代替当前版本的许可证明，也不要仅为解决下载失败而未经验证升级盘内工具。
 
 ```bash
 curl -LO https://downloadmirror.intel.com/866182/mlc_v3.12.tgz
@@ -380,7 +385,9 @@ tar xzf mlc_v3.12.tgz && cp Linux/mlc Linux/redist.txt vendor/bench/mlc/
 > AVX-512 变成了开关 `-Z`。验收单上写的 `mlc_avx512` 对应的就是它 ——
 > 要严格按那个口径测，在 `klburn.conf` 里写 `BENCH_MLC_AVX512=1`。
 > 默认不加：不是每颗 CPU 都有 AVX-512，加了在没有的平台上直接跑不出结果。
-> 它同目录的 `redist.txt` 明确把 `mlc` 列为 Redistributable。
+> 它同目录的 `redist.txt` 把 `mlc` 列为 Redistributable，但仍须满足其引用的
+> 完整适用协议；这份清单本身不构成无条件公开再分发许可。当前 3.12 的完整
+> 许可依据尚未核清，不能据此公开包含该二进制的 ISO。见[第三方说明](../docs/third-party.md)。
 
 ### 没有"阈值"这回事
 
