@@ -423,7 +423,7 @@ if [[ "$KLBURN_EDITION" == "mem" ]]; then
     install -m 0644 "$PROJ_DIR/vendor/$COMPANY_LOGO_FILE" "$STAGE/vendor/$COMPANY_LOGO_FILE"
   fi
 elif [[ -d "$PROJ_DIR/vendor" ]]; then
-  rsync -a --exclude='README.md' "$PROJ_DIR/vendor/" "$STAGE/vendor/"
+  rsync -a --exclude='/README.md' "$PROJ_DIR/vendor/" "$STAGE/vendor/"
 fi
 if [[ "$COMPANY_LOGO_FILE" == custom-logo.png ]]; then
   [[ -f "$SCRIPT_DIR/custom-logo.png" ]] || die "品牌配置指定了 logo，但已提交源码中缺少 build/custom-logo.png"
