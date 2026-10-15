@@ -23,7 +23,9 @@ def copy_notices(source, destination, required, optional=()):
             raise ValueError("许可原文大小异常：" + name)
         data = path.read_bytes()
         text = data.decode("utf-8")
-        if any(ord(c) < 32 and c not in "\n\r\t" for c in text):
+        # Upstream notice collections can contain literal form-feed page breaks.
+        # Preserve these bytes; reject binary NUL and terminal control sequences.
+        if any(ord(c) < 32 and c not in "\n\r\t\f" for c in text):
             raise ValueError("许可文件不是纯文本：" + name)
         target = destination / name
         if target.is_symlink() or (target.exists() and not target.is_file()):

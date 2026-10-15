@@ -41,6 +41,18 @@ class NoticeTests(unittest.TestCase):
         with self.assertRaises(ValueError):
             notices.copy_notices(self.src, self.out, ["LICENSE"])
 
+    def test_upstream_page_break_preserved(self):
+        data = self.data + b"\fThird-party notice on next page\n"
+        (self.src / "LICENSE.3rdparty").write_bytes(data)
+        notices.copy_notices(self.src, self.out, ["LICENSE.3rdparty"])
+        self.assertEqual((self.out / "LICENSE.3rdparty").read_bytes(), data)
+
+    def test_terminal_control_rejected(self):
+        (self.src / "LICENSE").write_bytes(self.data + b"\x1b[2J")
+        with self.assertRaises(ValueError):
+            notices.copy_notices(self.src, self.out, ["LICENSE"])
+        self.assertFalse(self.out.exists())
+
     def test_traversal_rejected(self):
         for name in ["../LICENSE", "/etc/passwd", "nested/LICENSE"]:
             with self.subTest(name=name), self.assertRaises(ValueError):
