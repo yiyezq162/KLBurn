@@ -1460,6 +1460,12 @@ white-space:normal;overflow-wrap:break-word;color:var(--accent);text-decoration:
 .idx td.how{color:var(--muted);font-size:12px}
 .delta{color:#c1121f;font-weight:700}
 .same{color:var(--muted)}
+@media screen and (max-width:1100px){
+  .toc{position:static}
+}
+@media screen and (max-width:600px){
+  .kv{grid-template-columns:minmax(0,1fr)}
+}
 @media print{
   .toc{display:none}
   .internal-banner{background:#fff;color:#7f1d1d;border:2px solid #7f1d1d}
