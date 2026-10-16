@@ -48,6 +48,13 @@ python3 tools/customize/klburn-builder.py \
 不会覆盖原始源码。新工作区保留上游 commit，提交品牌配置并移除 origin，
 避免误推送。定制版本号带 `-custom.<品牌哈希>`，报告抬头带“定制构建”。
 
+独立定制仓库使用本地 Git 构建身份 `KLBurn Custom Builder` /
+`builder@example.invalid`，用于定制提交及未签名 annotated tag；不会改动原始
+仓库或用户/root 的全局 Git 配置，也不依赖后端预先配置个人邮箱或签名密钥。
+继续旧工作区时同样只设置该工作区的本地构建身份。
+1.11.3 工具在干净后端曾于两版验收完成后因 tag 缺少身份而退出；该失败不能
+称为工具端到端通过，修复自 1.11.4 起提供。
+
 中文显示名称与报告抬头保留在报告中。启动控制台和 GRUB 只能使用安全 ASCII
 名称，这是串口/BMC 显示约束，不是中文数据丢失。logo 可用 `--logo /path/to/logo.png`
 提供，限 1 MiB；仅进入自己的定制源码，绝不自动发布。

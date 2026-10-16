@@ -70,6 +70,28 @@ class CustomizeTests(unittest.TestCase):
         self.assertIn("-custom.", (target / "build/config.sh").read_text())
         self.assertEqual(json.loads((target / "build/custom-build.json").read_text())["upstream_commit"], self.original)
 
+    def test_tag_without_backend_global_identity(self):
+        isolated_home = self.base / "isolated-home"
+        isolated_home.mkdir()
+        environment = {key: value for key, value in os.environ.items()
+                       if not key.startswith(("GIT_", "EMAIL"))}
+        environment.update(GIT_CONFIG_NOSYSTEM="1",
+                           GIT_CONFIG_GLOBAL=str(isolated_home / "absent-global-config"),
+                           GIT_CONFIG_COUNT="1", GIT_CONFIG_KEY_0="user.useConfigOnly",
+                           GIT_CONFIG_VALUE_0="true")
+        with mock.patch.dict(os.environ, environment, clear=True):
+            target = self.assert_success(self.command())
+            tag = subprocess.run(["git", "-c", "safe.directory=" + str(target),
+                                  "tag", "-a", "private-fixture", "-m", "synthetic acceptance"],
+                                 cwd=target, capture_output=True, text=True)
+            self.assertEqual(tag.returncode, 0, tag.stdout + tag.stderr)
+            self.assertEqual(self.git("cat-file", "-t", "private-fixture", cwd=target), "tag")
+            self.assertEqual(self.git("rev-parse", "private-fixture^{}", cwd=target),
+                             self.git("rev-parse", "HEAD", cwd=target))
+        self.assertEqual(list(isolated_home.iterdir()), [])
+        self.assertEqual(subprocess.run(["git", "config", "--local", "--get", "user.email"],
+                                       cwd=self.source, capture_output=True).returncode, 1)
+
     def test_chinese_space_and_injection_as_data(self):
         name = '示例 实验室 $(exit 9) <script> "'
         target = self.assert_success(self.command("--name", name, "--console-name", "Example Lab"))

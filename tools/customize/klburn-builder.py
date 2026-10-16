@@ -41,6 +41,14 @@ def copy_inputs(source, destination):
     shutil.copytree(source, destination, dirs_exist_ok=True)
 
 
+def configure_custom_identity(source):
+    # The release tag is created under sudo, where the caller's global Git
+    # identity may not exist. Keep this identity in the generated repo only.
+    run(["git", "config", "--local", "user.name", "KLBurn Custom Builder"], source)
+    run(["git", "config", "--local", "user.email", "builder@example.invalid"], source)
+    run(["git", "config", "--local", "tag.gpgSign", "false"], source)
+
+
 def prepare(args):
     workspace = args.workspace.expanduser().resolve()
     if workspace.exists():
@@ -89,6 +97,7 @@ def prepare(args):
     provenance = {"upstream_commit": commit, "version": version, "branding_sha256": digest,
                   "official": False, "publication": "disabled"}
     (source / "build/custom-build.json").write_text(json.dumps(provenance, indent=2) + "\n", encoding="utf-8")
+    configure_custom_identity(source)
     run(["git", "add", "build"], source)
     run(["git", "-c", "user.name=KLBurn Custom Builder", "-c", "user.email=builder@example.invalid",
          "-c", "commit.gpgsign=false", "commit", "-m", "build: private custom branding " + digest[:12]], source)
@@ -130,6 +139,7 @@ def preflight():
 def build_local(source, workspace):
     os.chdir(workspace)
     preflight()
+    configure_custom_identity(source)
     if not (source / "vendor/full-vendor.sha256").is_file():
         raise ValueError("缺少经过核对的离线组件清单 vendor/full-vendor.sha256；不生成缺件 ISO")
     if not (source / "test_out").is_dir():
