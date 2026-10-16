@@ -9,6 +9,7 @@ import shutil
 import subprocess
 import sys
 import tempfile
+import tarfile
 import unittest
 from unittest import mock
 from types import SimpleNamespace
@@ -167,7 +168,10 @@ class CustomizeTests(unittest.TestCase):
 
     def test_remote_early_failure_preserves_session_log(self):
         self.workspace.mkdir()
+        real_run = subprocess.run
         def fail(command, **kwargs):
+            if command[0] not in ("ssh", "scp"):
+                return real_run(command, **kwargs)
             kwargs["stdout"].write(b"synthetic early backend failure\n")
             return subprocess.CompletedProcess(command, 1)
         with mock.patch.object(builder, "run"), mock.patch.object(builder.subprocess, "run", side_effect=fail):
@@ -177,6 +181,71 @@ class CustomizeTests(unittest.TestCase):
         self.assertEqual(log.count("synthetic early backend failure"), 2)
         receipt = json.loads((self.workspace / "remote-build.json").read_text())
         self.assertEqual(receipt["session_log"], "ssh-session.log")
+        self.assertEqual(self.git("status", "--porcelain"), "")
+
+    @unittest.skipUnless(os.name == "posix", "receiver integration requires POSIX execution")
+    def test_ssh_git_modes_survive_sender_permission_loss(self):
+        entry = self.source / "可执行 入口.sh"
+        entry.write_text("#!/bin/sh\nprintf 'RECEIVER_ENTRY_RAN\\n'\n")
+        entry.chmod(0o755)
+        ordinary = self.source / "ordinary.sh"
+        ordinary.write_text("data, deliberately not executable\n")
+        ordinary.chmod(0o644)
+        remote_tool = self.source / "tools/customize/klburn-builder.py"
+        remote_tool.parent.mkdir(parents=True)
+        remote_tool.write_text(
+            "import pathlib,subprocess,sys\n"
+            "root=pathlib.Path(sys.argv[2])/'source'\n"
+            "entry=root/'可执行 入口.sh'\n"
+            "assert subprocess.check_output([str(entry)])==b'RECEIVER_ENTRY_RAN\\n'\n"
+            "assert not subprocess.check_output(['git','-C',str(root),'status','--porcelain'])\n"
+            "entry.chmod(0o644)\n"
+            "assert subprocess.check_output(['git','-C',str(root),'status','--porcelain'])\n"
+            "entry.chmod(0o755)\n"
+            "print('POSIX_RECEIVER_AND_MODE_GUARD_OK')\n", encoding="utf-8")
+        self.git("config", "core.filemode", "true")
+        self.git("add", ".")
+        self.git("-c", "user.name=Fixture", "-c", "user.email=fixture@example.invalid",
+                 "-c", "commit.gpgsign=false", "commit", "-qm", "executable transport fixture")
+        # A Windows sender can report clean while its filesystem loses executable bits.
+        self.git("config", "core.filemode", "false")
+        for name in self.git("ls-files", "-z").split("\0"):
+            if name: (self.source / name).chmod(0o644)
+        ordinary.chmod(0o666)
+        self.assertEqual(self.git("status", "--porcelain"), "")
+        self.workspace.mkdir()
+        receiver = tempfile.TemporaryDirectory(prefix="klburn-custom-", dir="/var/tmp")
+        self.addCleanup(receiver.cleanup)
+        remote = Path(receiver.name)
+        observed = {}
+        real_run = subprocess.run
+        class ReceiverReached(Exception):
+            pass
+        def network_boundary(command, **kwargs):
+            if command[0] != "ssh":
+                return real_run(command, **kwargs)
+            self.assertIn("builder@example.invalid", command)
+            if command[-1].startswith("mkdir -m 700 -- "):
+                return subprocess.CompletedProcess(command, 0)
+            if command[-1].startswith("tar --no-same-owner "):
+                with tarfile.open(self.workspace / "source.tar") as archive:
+                    observed["entry_mode"] = archive.getmember("source/可执行 入口.sh").mode
+                    observed["ordinary_mode"] = archive.getmember("source/ordinary.sh").mode
+                return real_run(["bash", "-c", command[-1]], timeout=30, **kwargs)
+            observed["receiver_returncode"] = real_run(
+                ["bash", "-c", command[-1]], timeout=30, **kwargs).returncode
+            raise ReceiverReached()
+        with mock.patch.object(builder.uuid, "uuid4", return_value=SimpleNamespace(
+                hex=remote.name.removeprefix("klburn-custom-"))), \
+                mock.patch.object(builder.subprocess, "run", side_effect=network_boundary):
+            with self.assertRaises(ReceiverReached):
+                builder.build_ssh(SimpleNamespace(ssh="builder@example.invalid"), self.source, self.workspace)
+        log = (self.workspace / "ssh-session.log").read_text()
+        self.assertEqual(observed["entry_mode"], 0o755)
+        self.assertEqual(observed["ordinary_mode"], 0o644)
+        self.assertEqual(observed["receiver_returncode"], 0, log)
+        self.assertIn("POSIX_RECEIVER_AND_MODE_GUARD_OK", log)
+        self.assertEqual(self.git("config", "--local", "core.filemode"), "false")
         self.assertEqual(self.git("status", "--porcelain"), "")
 
     def local_build_command(self, environment):

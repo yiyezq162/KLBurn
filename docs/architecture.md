@@ -914,6 +914,12 @@ RTX PRO 6000 上 `nvidia-smi` 一张卡都认不到 —— 而那会被记成 FA
 定制构建报告抬头明确带“定制构建”，控制台使用定制 ASCII 名称和 `[CUSTOM]`。
 两版仍保持独立报告标题、原有范围、硬件判据、工具边界与帧高/行宽守卫。
 
+SSH 定制源码的普通文件权限以 Git 索引为准，不能用 Windows 等发送端文件系统
+的执行位代替。1.11.8 的接收端仅在独立定制仓库启用 `core.filemode`，让执行位
+篡改仍可被干净源码检查发现；不改调用者的全局配置。权限丢失回归通过真实 tar、
+POSIX 脚本执行与 Git 状态检查验证，网络边界被截获，不当作 Windows 或真实 SSH
+后端验收。两条变异分别撤销权限保留与接收端检查，不能只靠查找源码字符串。
+
 ---
 
 ## 十、扩展点：加一项新检查
@@ -1921,6 +1927,7 @@ check_fans() {
 | `test-concurrent-burn.sh` | CPU/内存/GPU 是真并发不是排队、并发期间只能有一个采样器、cleanup 要连孙进程一起收 | `factory-test.sh`、`lib/ui.sh`、`lib/gpu.sh`、`lib/stress.sh` |
 | `test-batch-tools.sh` | 仓库侧工具：**批次汇总的整机结论必须和盘里同一个口径**（一条判定都没有 != 通过）、对比工具只报差异不判合格也不碰性能数字、**GRUB 追加 memtest 菜单项之后第一条必须还是我们的测试项**（`set default=0` 指的就是它，插错位置 = 插上盘开机跑的是内存测试） | `tools/*.py`、`build/lib/patch-grub.py` |
 | `test-disk-exclusion.sh` | U 盘反查排除（Ventoy 同构设备链）。**需要 root** | `lib/storage.sh` |
+| `test-customize.py` | 独立定制提交与品牌输入、成对产物下载校验、失败日志保留；SSH 传输在 POSIX 接收端实际执行 Git 可执行文件，并确认执行位篡改会使源码变脏。网络边界模拟，不代表 Windows 或真实 SSH 后端运行 | `tools/customize/klburn-builder.py` |
 
 上面这些都在 `run-all.sh` 里。下面两条**不在**，要单独跑：
 

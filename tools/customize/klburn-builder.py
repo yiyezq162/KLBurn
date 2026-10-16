@@ -83,7 +83,7 @@ def prepare(args):
     else:
         data["logo"] = ""
         data["logo_sha256"] = ""
-    brand_path.write_text(json.dumps(data, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+    brand_path.write_text(json.dumps(data, ensure_ascii=False, indent=2) + "\n", encoding="utf-8", newline="\n")
     module.load_brand(brand_path)
     digest = module.constants(data, "full")["BRAND_SHA256"]
     config = source / "build/config.sh"
@@ -96,7 +96,7 @@ def prepare(args):
     config.write_text(content, encoding="utf-8", newline="\n")
     provenance = {"upstream_commit": commit, "version": version, "branding_sha256": digest,
                   "official": False, "publication": "disabled"}
-    (source / "build/custom-build.json").write_text(json.dumps(provenance, indent=2) + "\n", encoding="utf-8")
+    (source / "build/custom-build.json").write_text(json.dumps(provenance, indent=2) + "\n", encoding="utf-8", newline="\n")
     configure_custom_identity(source)
     run(["git", "add", "build"], source)
     run(["git", "-c", "user.name=KLBurn Custom Builder", "-c", "user.email=builder@example.invalid",
@@ -210,10 +210,29 @@ def build_ssh(args, source, workspace):
     remote = "/var/tmp/klburn-custom-" + uuid.uuid4().hex
     ssh = ["ssh", "-o", "BatchMode=yes", "-o", "StrictHostKeyChecking=yes", args.ssh]
     # No credentials, key enrollment, network changes or VM provisioning.
-    run(ssh + ["mkdir -m 700 -- " + remote])
     archive = workspace / "source.tar"
+    # NTFS and permissive Git settings can lose executable bits while still
+    # reporting a clean checkout. Transfer committed modes, not sender OS modes.
+    tracked_modes = {}
+    for record in subprocess.check_output(["git", "ls-files", "--stage", "-z"], cwd=source).split(b"\0"):
+        if not record:
+            continue
+        header, name = record.split(b"\t", 1)
+        mode, _, stage = header.split()
+        if stage != b"0" or mode not in (b"100644", b"100755"):
+            raise ValueError("SSH 构建仅接受已提交的普通源码文件，不接受冲突、链接或子模块")
+        tracked_modes["source/" + name.decode("utf-8")] = int(mode, 8) & 0o777
+
+    def committed_permissions(member):
+        if member.name in tracked_modes:
+            if not member.isfile():
+                raise ValueError("源码文件类型与 Git 记录不一致")
+            member.mode = tracked_modes[member.name]
+        return member
+
     with tarfile.open(archive, "w") as tar:
-        tar.add(source, arcname="source", recursive=True)
+        tar.add(source, arcname="source", recursive=True, filter=committed_permissions)
+    run(ssh + ["mkdir -m 700 -- " + remote])
     with archive.open("rb") as stream:
         # Root on the backend must not recreate the Mac/Windows user's numeric UID.
         # Keep Git ownership checks enabled; the receiving user owns this workspace.
@@ -221,7 +240,8 @@ def build_ssh(args, source, workspace):
     receipt = {"remote_workspace": remote, "ssh_target": args.ssh, "session_log": "ssh-session.log",
                "cleanup": "manual after verified collection"}
     (workspace / "remote-build.json").write_text(json.dumps(receipt, indent=2) + "\n", encoding="utf-8")
-    remote_command = "python3 " + remote + "/source/tools/customize/klburn-builder.py --resume " + remote
+    remote_command = ("git -C " + remote + "/source config --local core.filemode true && python3 "
+                      + remote + "/source/tools/customize/klburn-builder.py --resume " + remote)
     session_log = workspace / "ssh-session.log"
     print("SSH 会话日志（包括预检失败）：", session_log, flush=True)
     with session_log.open("ab") as stream:

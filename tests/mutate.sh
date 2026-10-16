@@ -52,6 +52,8 @@ RT="rootfs/opt/klburn"
 # 让函数兼职报告文件名的话就得先跑一次再回滚，那才是真正危险的设计。
 S=$'\x1f'
 MUTATIONS=(
+"ssh-source-exec-mode${S}SSH 归档丢掉 Git 执行位，发送端干净但接收端无法启动${S}test-customize${S}tools/customize/klburn-builder.py${S}mut_ssh_source_exec_mode"
+"ssh-receiver-mode-check${S}接收端继承 filemode=false，执行位篡改无法触发脏源码守卫${S}test-customize${S}tools/customize/klburn-builder.py${S}mut_ssh_receiver_mode_check"
 "package-notice-wrong-version${S}用另一版本版权文本填补缺失声明（基础包精确版本绑定失效）${S}test-package-notices${S}build/package-notices.py${S}mut_package_notice_wrong_version"
 "package-notice-host-link${S}版权绝对链接借用宿主机文件而不是目标 ISO 根目录${S}test-package-notices${S}build/package-notices.py${S}mut_package_notice_host_link"
 "package-notice-hook-missing${S}移除最终打包前版权检查调用（有函数却从不执行）${S}test-package-notices${S}build/build-iso.sh${S}mut_package_notice_hook_missing"
@@ -271,6 +273,18 @@ delete_line() {
 # 各条变异（函数名要和上面清单里的对上）
 # 每个函数只负责改文件，成功回 0、失败把原因打到 stdout
 # ================================================================
+mut_ssh_source_exec_mode() {
+  replace_line tools/customize/klburn-builder.py \
+    '            member.mode = tracked_modes[member.name]' \
+    '            member.mode = 0o644'
+}
+
+mut_ssh_receiver_mode_check() {
+  replace_line tools/customize/klburn-builder.py \
+    '    remote_command = ("git -C " + remote + "/source config --local core.filemode true && python3 "' \
+    '    remote_command = ("python3 "'
+}
+
 mut_package_notice_wrong_version() {
   replace_line build/package-notices.py \
     'if name not in texts or texts[name][0]["binary_version"] != version:' \
