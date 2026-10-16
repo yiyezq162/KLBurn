@@ -184,7 +184,7 @@ fio 的目标盘要过五道排除。Ventoy 场景下 udev 被禁、`lsblk` 完�
 源码可在 macOS、Windows 或 Linux 编辑；现有 amd64 ISO 的构建与完整测试在
 **x86_64 Ubuntu 24.04** 执行。Mac mini M4 可通过 SSH 使用局域网 Linux 构建机，
 Windows 可使用 WSL。迁移、依赖与发布顺序见 [构建文档](docs/building.md)。
-仓库尚未配置 CI。
+源码检查已配置 [CI](docs/CI.md)；ISO 构建与发行验收仍在符合条件的独立后端执行。
 
 ### 构建 ISO（以下在 Linux 执行）
 
