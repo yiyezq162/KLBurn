@@ -1,11 +1,14 @@
 #!/usr/bin/env bash
+# 公开夹具身份为虚构数据：FICT 前缀表示示例标识；FACE 前缀是保留 8 位十六进制形状的虚构序列号。
+# 示例 MAC 使用 02:00:00:00:00:xx 本地管理地址；缺失/无效占位符与重复值守卫保持原样。
+# 真实传感器/电源回放仍从私有 test_out/ 读取，不将虚构身份当作真机验收。
 #
 # 内存容量核对 / 电源检查 / 网卡连通性 这三块判读逻辑的回归测试。
 # 不需要任何硬件，随时可跑：
 #
 #     ./tests/test-hw-checks.sh
 #
-# 样本全部取自真机（2x Intel Xeon Gold 6530 那台）的实际输出，
+# 样本保留真机（2x Intel Xeon Gold 6530）输出的字段形状，公开身份标识已替换为虚构数据；
 # 包括那台机器上真实存在的两种异常：
 #   - DMI 报装机 64GB，系统只认到 31GB
 #   - 4 个电源里 PSU2/PSU4 没接交流输入（Vin 读不到值 / 读到 0V）
@@ -206,7 +209,7 @@ System Power Supply
 	Location: PSU1
 	Name: CRPS2700D2
 	Manufacturer: Great Wall
-	Serial Number: 33000285DHB06810
+	Serial Number: FICT000000000003
 	Max Power Capacity: 0 W
 	Status: Present, OK
 EOF
@@ -356,7 +359,7 @@ DMI_NOT_PRESENT='Handle 0x1, DMI type 39, 22 bytes
 System Power Supply
 	Location: PSU1
 	Name: CRPS2700D2
-	Serial Number: SN0001
+	Serial Number: FICT04
 	Max Power Capacity: 2700 W
 	Status: Present, OK
 
@@ -364,7 +367,7 @@ Handle 0x2, DMI type 39, 22 bytes
 System Power Supply
 	Location: PSU2
 	Name: CRPS2700D2
-	Serial Number: SN0002
+	Serial Number: FICT05
 	Max Power Capacity: 2700 W
 	Status: Not Present'
 psu_case "$DMI_NOT_PRESENT" "$SENS_BOTH_HOT"
@@ -471,7 +474,7 @@ DMI_3REAL_1GHOST='Handle 0x1, DMI type 39, 22 bytes
 System Power Supply
 	Location: PSU1
 	Name: CRPS2700D2
-	Serial Number: SN0001
+	Serial Number: FICT04
 	Max Power Capacity: 2700 W
 	Status: Present, OK
 
@@ -479,7 +482,7 @@ Handle 0x2, DMI type 39, 22 bytes
 System Power Supply
 	Location: PSU2
 	Name: CRPS2700D2
-	Serial Number: SN0002
+	Serial Number: FICT05
 	Max Power Capacity: 2700 W
 	Status: Present, OK
 
@@ -487,7 +490,7 @@ Handle 0x3, DMI type 39, 22 bytes
 System Power Supply
 	Location: PSU3
 	Name: To Be Filled By O.E.M.
-	Serial Number: 2P070175056
+	Serial Number: FICT0000006
 	Max Power Capacity: 2700 W
 	Status: Present, OK
 
@@ -2241,10 +2244,10 @@ KLB_LIB="$LIB"    # core.sh 里写死 /opt/klburn/lib，测试环境里没有那
 cat > "$TMP/lsblk-ventoy.json" <<'EOF'
 {"blockdevices":[
  {"name":"sda","path":"/dev/sda","type":"disk","size":32000000000,"model":"Ventoy USB",
-  "serial":"VT001","rota":false,"tran":"usb","rm":false,"hotplug":false,"pttype":"gpt",
+  "serial":"FICT1","rota":false,"tran":"usb","rm":false,"hotplug":false,"pttype":"gpt",
   "children":[{"name":"sda1","type":"part","mountpoints":[null]}]},
  {"name":"vda","path":"/dev/vda","type":"disk","size":2000000000000,"model":"REAL DISK",
-  "serial":"RD001","rota":true,"tran":"sata","rm":false,"hotplug":false,"pttype":null,
+  "serial":"FICT2","rota":true,"tran":"sata","rm":false,"hotplug":false,"pttype":null,
   "children":[]}
 ]}
 EOF
@@ -3566,7 +3569,7 @@ echo
 echo "=== BMC 的 USB 虚拟网口不参与判定（1.9.8）==="
 #
 # ⚠️ 1.9.7 现场那台 7542：
-#      enxbe3af2b6059f  driver rndis_host  bus-info usb-0000:48:00.3-1.1
+#      enx020000000003  driver rndis_host  bus-info usb-0000:48:00.3-1.1
 #      Link detected: yes   IPv4 169.254.3.1/24   Gateway: -   -> NO_GATEWAY
 #    那是主板上 BMC 通过 USB 暴露给系统的带内管理通道，那头没有 DHCP 服务器，
 #    **永远拿不到网关** —— 于是每一台带 BMC 的机器都会被我们自己刷一条

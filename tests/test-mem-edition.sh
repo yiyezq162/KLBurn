@@ -1,4 +1,7 @@
 #!/usr/bin/env bash
+# 公开夹具身份为虚构数据：FICT 前缀表示示例标识；FACE 前缀是保留 8 位十六进制形状的虚构序列号。
+# 示例 MAC 使用 02:00:00:00:00:xx 本地管理地址；缺失/无效占位符与重复值守卫保持原样。
+# 真实传感器/电源回放仍从私有 test_out/ 读取，不将虚构身份当作真机验收。
 #
 # 内存专用盘（KLBURN_EDITION=mem）的回归测试。不需要任何硬件：
 #
@@ -73,8 +76,8 @@ Memory Device
 	Type: DDR5
 	Speed: 5600 MT/s
 	Manufacturer: Hynix
-	Serial Number: 3A2F91C7
-	Asset Tag: CPU0_DIMM_A1_AssetTag (date:22/51)
+	Serial Number: FACE000C
+	Asset Tag: FICT_DIMM_A1_AssetTag (date:22/51)
 	Part Number: HMCG88AEBRA123N-XX
 	Rank: 2
 	Configured Memory Speed: 4800 MT/s
@@ -126,7 +129,7 @@ echo "=== 序列号核对：查假条子 ==="
 # 槽位和序列号必须成对取，不能各取一列再拼：缺序列号的那条会整行不出，
 # 两列行数对不上就错位了 —— 表现是"报告说 A1 槽的条子是假的"，指着一条好内存。
 check "槽位和序列号成对取（含缺序列号的那条）" \
-      "CPU0_DIMM_A1|3A2F91C7
+      "CPU0_DIMM_A1|FACE000C
 CPU0_DIMM_B1|Not Specified" \
       "$(mem_sn_pairs "$TMP/dmidecode-memory.txt")"
 check "占位符不算读到了序列号" "1" \
@@ -393,13 +396,13 @@ Handle 0x0001, DMI type 1, 27 bytes
 System Information
 	Manufacturer: Supermicro
 	Product Name: SYS-2049U
-	Serial Number: S12345X
+	Serial Number: FICT011
 
 Handle 0x0002, DMI type 2, 15 bytes
 Base Board Information
 	Manufacturer: Supermicro
 	Product Name: X13DEI-T
-	Serial Number: WM24AS012345
+	Serial Number: FICT00000013
 
 Handle 0x0000, DMI type 0, 26 bytes
 BIOS Information
@@ -409,7 +412,7 @@ BIOS Information
 EOF
 
 check "主板型号"     "X13DEI-T"     "$(dmi_sys_field "$TMP/dmidecode-system.txt" "Base Board Information" "Product Name")"
-check "主板序列号"   "WM24AS012345" "$(dmi_sys_field "$TMP/dmidecode-system.txt" "Base Board Information" "Serial Number")"
+check "主板序列号"   "FICT00000013" "$(dmi_sys_field "$TMP/dmidecode-system.txt" "Base Board Information" "Serial Number")"
 check "整机型号"     "SYS-2049U"    "$(dmi_sys_field "$TMP/dmidecode-system.txt" "System Information" "Product Name")"
 check "BIOS 版本"    "2.4"          "$(dmi_sys_field "$TMP/dmidecode-system.txt" "BIOS Information" "Version")"
 # 段名相同字段名的串台：System 和 Base Board 都有 Product Name，不能取错段
@@ -496,7 +499,7 @@ check "一条内存一行（表头 + 2 行）" "3" "$(count_lines "$TMP/out.csv"
 has "$TMP/out.csv" "序列号"           "表头有序列号那一列"
 has "$TMP/out.csv" "生产日期"         "表头有生产日期那一列"
 has "$TMP/out.csv" "2022-W51"         "生产日期真的解出来了（不是空列）"
-has "$TMP/out.csv" "3A2F91C7"         "第一条内存的序列号在里面"
+has "$TMP/out.csv" "FACE000C"         "第一条内存的序列号在里面"
 has "$TMP/out.csv" "X13DEI-T"         "主板型号在里面"
 has "$TMP/out.csv" "CPU0_DIMM_B1"     "第二条内存的槽位在里面"
 has_no "$TMP/out.csv" "CPU0_DIMM_A2"  "空槽不写进 CSV"
@@ -563,7 +566,7 @@ cat > "$RD/meta.json" <<'EOF'
   "company_name":   "示例实验室（虚构）",
   "report_title":   "内存专用测试报告",
   "product_name":   "KLBurn-MEM",
-  "serial":         "S12345X",
+  "serial":         "FICT011",
   "machine_tag":    "20260812_143022_64GB_2x-Intel-Xeon-Gold-6430_MEMSP",
   "planned_secs":   150,
   "elapsed_secs":   153,
@@ -607,7 +610,7 @@ check "生成器不把报告路径打到屏幕上" "0" \
       "$(grep -c '/' "$TMP/gen.out" || true)"
 
 has "$R" "内存专用测试报告"  "报告标题"
-has "$R" "3A2F91C7"          "内存序列号进了报告（这张盘的存在理由）"
+has "$R" "FACE000C"          "内存序列号进了报告（这张盘的存在理由）"
 has "$R" "HMCG88AEBRA123N-XX" "内存型号进了报告"
 has "$R" "CPU0_DIMM_A1"      "槽位进了报告"
 has "$R" "4800 MT/s"         "运行频率进了报告"

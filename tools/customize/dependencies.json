@@ -1,6 +1,6 @@
 {
   "schema": 1,
-  "policy": "仅提供官方获取入口；下载不等于允许再分发，工具不替用户接受许可。",
+  "policy": "仅提供官方获取入口；下载不等于允许再分发。调用者须先阅读并接受适用条款，再提供离线组件并启动构建。既有 NVIDIA 安装步骤使用 --accept-license 非交互参数；这不证明调用者有公开再分发权利，工具不自动下载或接受新的下载协议。",
   "components": [
     {"name": "NVIDIA Linux 驱动", "url": "https://www.nvidia.com/Download/index.aspx", "destination": "vendor/nvidia/", "redistribution": "核对所选版本许可；open 内核模块许可不覆盖全部驱动组件"},
     {"name": "NVIDIA CUDA Toolkit", "url": "https://developer.nvidia.com/cuda-downloads", "destination": "构建后端工具链", "redistribution": "仅分发对应版本条款明确允许的运行时组件；不默认上传整个 Toolkit"},

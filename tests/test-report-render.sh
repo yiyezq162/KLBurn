@@ -1,4 +1,7 @@
 #!/usr/bin/env bash
+# 公开夹具身份为虚构数据：FICT 前缀表示示例标识；FACE 前缀是保留 8 位十六进制形状的虚构序列号。
+# 示例 MAC 使用 02:00:00:00:00:xx 本地管理地址；缺失/无效占位符与重复值守卫保持原样。
+# 真实传感器/电源回放仍从私有 test_out/ 读取，不将虚构身份当作真机验收。
 #
 # 报告生成器的渲染回归测试。造一个假的 run-dir 跑一遍 generate_report.py，
 # 然后对产出的 HTML 做断言。不需要硬件，只要有 python3：
@@ -118,7 +121,7 @@ Handle 0x0002, DMI type 2, 15 bytes
 Base Board Information
 	Manufacturer: N/A
 	Product Name: 60EA32X
-	Serial Number: 24003732DHB00451
+	Serial Number: FICT000000000016
 
 Handle 0x0000, DMI type 0, 26 bytes
 BIOS Information
@@ -165,7 +168,7 @@ System Power Supply
 	Location: PSU1
 	Name: CRPS2700D2
 	Manufacturer: Great Wall
-	Serial Number: 33000285DHB06810
+	Serial Number: FICT000000000003
 	Max Power Capacity: 2700 W
 	Status: Present, OK
 
@@ -174,7 +177,7 @@ System Power Supply
 	Location: PSU2
 	Name: CRPS2700D2
 	Manufacturer: Great Wall
-	Serial Number: 33000285DHB06807
+	Serial Number: FICT000000000017
 	Max Power Capacity: 2700 W
 	Status: Present, Critical
 EOF
@@ -201,13 +204,13 @@ EOF
 cat > "$RD/raw/lsblk.json" <<'EOF'
 { "blockdevices": [
   {"name":"sda","path":"/dev/sda","size":1000204886016,"type":"disk","tran":"sata",
-   "rota":true,"rm":false,"hotplug":false,"model":"ST1000NM000A-2J3","serial":"WS20SNM6"}
+   "rota":true,"rm":false,"hotplug":false,"model":"ST1000NM000A-2J3","serial":"FICT0007"}
 ]}
 EOF
 
 # 归一化的 SMART 里照样有 power_on_hours —— 断言它不会被渲染出去
 cat > "$RD/raw/smart-pre/sda.norm.json" <<'EOF'
-{"model":"ST1000NM000A-2J3100","serial":"WS20SNM6","firmware":"TN03",
+{"model":"ST1000NM000A-2J3100","serial":"FICT0007","firmware":"TN03",
  "capacity_bytes":1000204886016,"power_on_hours":1512,"power_cycles":325,
  "temperature_c":29,"smart_passed":true}
 EOF
@@ -285,33 +288,33 @@ Ping      : -
 Result    : NO_LINK
 EOF
 
-# BMC 通过 USB 塞进系统的虚拟网口（1.9.7 现场那台 7542 上的 enxbe3af2b6059f）。
+# BMC 通过 USB 塞进系统的虚拟网口（1.9.7 现场那台 7542 上的 enx020000000003）。
 # 它那头没有 DHCP 服务器，永远拿不到网关，1.9.7 之前每台带 BMC 的机器
 # 都会被它刷一条「网卡连通性 WARN」。照列不照判。
-cat > "$RD/raw/nic/enxbe3af2b6059f-driver.txt" <<'EOF'
+cat > "$RD/raw/nic/enx020000000003-driver.txt" <<'EOF'
 driver: rndis_host
 firmware-version: RNDIS device
 bus-info: usb-0000:48:00.3-1.1
 EOF
-cat > "$RD/raw/nic/enxbe3af2b6059f-ethtool.txt" <<'EOF'
-Settings for enxbe3af2b6059f:
+cat > "$RD/raw/nic/enx020000000003-ethtool.txt" <<'EOF'
+Settings for enx020000000003:
 	Speed: Unknown!
 	Duplex: Half
 	Link detected: yes
 EOF
 cat > "$RD/raw/nic-summary.txt" <<'EOF'
 ===== ens9f0 =====
-MAC        : e8:61:1a:4e:10:40
+MAC        : 02:00:00:00:00:01
 OperState  : up
 Virtual    : no
 
 ===== ens9f1 =====
-MAC        : e8:61:1a:4e:10:41
+MAC        : 02:00:00:00:00:02
 OperState  : up
 Virtual    : no
 
-===== enxbe3af2b6059f =====
-MAC        : be:3a:f2:b6:05:9f
+===== enx020000000003 =====
+MAC        : 02:00:00:00:00:03
 OperState  : up
 Virtual    : yes
 
@@ -339,11 +342,11 @@ cp "$RD/results.jsonl" "$RDPD/results.jsonl" 2>/dev/null || true
 cat > "$RDPD/raw/lsblk.json" <<'EOF'
 {"blockdevices":[
  {"name":"sda","path":"/dev/sda","size":7681501126656,"type":"disk","rota":false,
-  "tran":"sas","model":"AVAGO MR9361-8i","serial":"00d1e2f3","rm":false,"hotplug":false}
+  "tran":"sas","model":"AVAGO MR9361-8i","serial":"FACE000E","rm":false,"hotplug":false}
 ]}
 EOF
 # 逻辑盘自己（阵列卡的 VD，通常读不到有意义的 SMART）
-printf '{"model":"AVAGO MR9361-8i","serial":"00d1e2f3","smart_passed":null}\n' \
+printf '{"model":"AVAGO MR9361-8i","serial":"FACE000E","smart_passed":null}\n' \
   > "$RDPD/raw/smart-pre/sda.norm.json"
 cp "$RDPD/raw/smart-pre/sda.norm.json" "$RDPD/raw/smart-post/sda.norm.json"
 # 卡后面两块真盘，透传读到的
@@ -377,7 +380,7 @@ echo
 echo "=== JBOD/直通：同一块盘不许在清单里出现两次 ==="
 #
 # 1.7.8 现场实测：阵列卡切到 JBOD 模式，一块 FORESEE 128GB SSD
-# （序列号 K48060R002933）在报告里出现了两行 —— 一行是 /dev/sda，
+# （序列号 FICT000000015）在报告里出现了两行 —— 一行是 /dev/sda，
 # 另一行是"阵列卡 PD0"，其实是同一块盘。客户看到的是"这台机器有两块盘"。
 #
 # 直通模式下物理盘**既有 /dev 节点、又能被阵列卡逐块读到**，两条采集路径
@@ -390,26 +393,26 @@ cp "$RD/results.jsonl" "$RDJB/results.jsonl" 2>/dev/null || true
 cat > "$RDJB/raw/lsblk.json" <<'EOF'
 {"blockdevices":[
  {"name":"sda","path":"/dev/sda","size":128035676160,"type":"disk","rota":false,
-  "tran":null,"model":"FORESEE 128GB SSD","serial":"K48060R002933",
+  "tran":null,"model":"FORESEE 128GB SSD","serial":"FICT000000015",
   "rm":false,"hotplug":false}
 ]}
 EOF
 # 直通盘：/dev 节点和阵列卡透传读到的是同一块，序列号一模一样
 cat > "$RDJB/raw/smart-pre/sda.norm.json" <<'EOF'
-{"model":"FORESEE 128GB SSD","serial":"K48060R002933","firmware":"V4.6",
+{"model":"FORESEE 128GB SSD","serial":"FICT000000015","firmware":"V4.6",
  "capacity_bytes":128035676160,"rotation_rate":0,"temperature_c":42,
  "smart_passed":true,"realloc_sectors":0,"pending_sectors":0,
  "uncorrectable":0,"crc_errors":0}
 EOF
 cp "$RDJB/raw/smart-pre/sda.norm.json" "$RDJB/raw/smart-post/sda.norm.json"
 # 阵列卡那条路读到的同一块盘，序列号带补齐空格（真实样本就是这样）
-sed 's/"K48060R002933"/"K48060R002933   "/' "$RDJB/raw/smart-pre/sda.norm.json" \
+sed 's/"FICT000000015"/"FICT000000015   "/' "$RDJB/raw/smart-pre/sda.norm.json" \
   > "$RDJB/raw/smart-pre/sda-pd0.norm.json"
 cp "$RDJB/raw/smart-pre/sda-pd0.norm.json" "$RDJB/raw/smart-post/sda-pd0.norm.json"
 OUTJB="$TMP/report-jbod.html"
 if python3 "$GEN" --run-dir "$RDJB" --out "$OUTJB" >/dev/null 2>"$TMP/errjb"; then
   check "同一块盘只出现一行（序列号出现次数）" "1" \
-        "$(grep -o 'K48060R002933' "$OUTJB" | grep -c . || true)"
+        "$(grep -o 'FICT000000015' "$OUTJB" | grep -c . || true)"
   has_no "$OUTJB" "阵列卡 PD0"   "直通盘不再重复列成阵列卡后端盘"
   has "$OUTJB" "阵列卡直通"      "但要说清楚这块盘是挂在阵列卡后面的"
   has "$OUTJB" "/dev/sda"        "盘本身还在清单里"
@@ -477,7 +480,7 @@ has_no "$OUT" "通电时间"        "不参与判定，留在工程数据里"
 has_no "$OUT" "通电次数"        "同上"
 has_no "$OUT" "Power_On_Hours"  "SMART 原文不再嵌进报告"
 has_no "$OUT" "Total_LBAs_Written" "同上"
-has    "$OUT" "WS20SNM6"        "硬盘序列号照常要有"
+has    "$OUT" "FICT0007"        "硬盘序列号照常要有"
 has    "$OUT" "SMART健康"       "健康状态照常要有"
 
 echo
@@ -497,7 +500,7 @@ has_no "$OUT" "硬盘单独测试"       "时长表下面那句注解跟着走"
 has_no "$OUT" "CPU / 内存 / 硬盘全部压测阶段" "曲线那句注解也不能再提硬盘"
 # 藏的是"压测"，不是"硬盘"——盘的清单、序列号、SMART 健康照常要有
 has    "$OUT" "1.4 硬盘"    "硬盘清单本身照常在"
-has    "$OUT" "WS20SNM6"    "序列号照常在"
+has    "$OUT" "FICT0007"    "序列号照常在"
 has    "$OUT" "SMART健康"   "健康状态照常在（这是清单字段，不是压测结论）"
 
 echo
@@ -673,7 +676,7 @@ System Power Supply
 	Location: PSU2
 	Name: CRPS1300
 	Manufacturer: Great Wall
-	Serial Number: 3300033230124689
+	Serial Number: FICT000000000018
 	Max Power Capacity: 0 W
 	Status: Present, OK
 EOF
@@ -772,7 +775,7 @@ has    "$OUT" "状态异常卡数"      "但那一行本身还在，信息不许
 
 echo
 echo "=== BMC 的 USB 虚拟网口：照列不照判（1.9.8）==="
-has "$OUT" "enxbe3af2b6059f" "虚拟网口照样列进清单（现场看得到这个口，不列像是漏采）"
+has "$OUT" "enx020000000003" "虚拟网口照样列进清单（现场看得到这个口，不列像是漏采）"
 has "$OUT" "不参与判定（本机管理控制器提供的虚拟网口）" "但连通性那一格要写明不参与判定"
 has "$OUT" "不计入网口数量、也不参与任何判定" "表下面要解释这是什么口"
 # 成对断言：真网口那两个不许被这条豁免误伤
@@ -1520,13 +1523,13 @@ EOF
     # 都没有（真实存在的情况：某些盘不上报这些属性），所以这里单独造一块。
     # 顺便把寿命类字段也塞进去 —— 下面有一组断言钉着它们**不许**被印出来。
     cat > "$RS/raw/smart-pre/sda.norm.json" <<'EOF'
-{"model":"ST1000NM000A-2J3100","serial":"WS20SNM6","firmware":"TN03",
+{"model":"ST1000NM000A-2J3100","serial":"FICT0007","firmware":"TN03",
  "realloc_sectors":0,"pending_sectors":0,"uncorrectable":0,"crc_errors":0,
  "power_on_hours":1512,"power_cycles":325,"percentage_used":3,
  "temperature_c":29,"smart_passed":true}
 EOF
     cat > "$RS/raw/smart-post/sda.norm.json" <<'EOF'
-{"model":"ST1000NM000A-2J3100","serial":"WS20SNM6","firmware":"TN03",
+{"model":"ST1000NM000A-2J3100","serial":"FICT0007","firmware":"TN03",
  "realloc_sectors":0,"pending_sectors":0,"uncorrectable":0,"crc_errors":0,
  "power_on_hours":1512,"power_cycles":325,"percentage_used":3,
  "temperature_c":31,"smart_passed":true}

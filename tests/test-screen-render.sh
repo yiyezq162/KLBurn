@@ -1,4 +1,7 @@
 #!/usr/bin/env bash
+# 公开夹具身份为虚构数据：FICT 前缀表示示例标识；FACE 前缀是保留 8 位十六进制形状的虚构序列号。
+# 示例 MAC 使用 02:00:00:00:00:xx 本地管理地址；缺失/无效占位符与重复值守卫保持原样。
+# 真实传感器/电源回放仍从私有 test_out/ 读取，不将虚构身份当作真机验收。
 #
 # 现场界面（配置核对面板 + 压测仪表盘）的渲染回归测试。
 #
@@ -278,9 +281,8 @@ Handle 0x0100, DMI type 1, 27 bytes
 System Information
 	Manufacturer: Dell Inc.
 	Product Name: PowerEdge R750
-	Serial Number: ABC1234
-	UUID: 4c4c4544-0042-4310
-
+	Serial Number: FICT019
+	UUID: 00000000-0000-4000
 Handle 0x0000, DMI type 0, 26 bytes
 BIOS Information
 	Vendor: Dell Inc.
@@ -290,7 +292,7 @@ BIOS Information
 Handle 0x0200, DMI type 2, 15 bytes
 Base Board Information
 	Manufacturer: Dell Inc.
-	Asset Tag: KL-2026-0042
+	Asset Tag: FICT-2026-0042
 EOF
 
 cat > "$RAW_DIR/lscpu.txt" <<'EOF'
@@ -346,9 +348,9 @@ DISK_EXCLUDED=("/dev/sda|446.6GB|DELLBOSS VD|has a mounted partition")
 check "SYSTEM 段认出厂商/型号/序列号" "1" \
       "$(cfg_system_body "$RAW_DIR" | grep -c 'Dell Inc\..*PowerEdge R750' || true)"
 check "SYSTEM 段认出 BIOS 版本和日期" "1" \
-      "$(cfg_system_body "$RAW_DIR" | grep -c 'ABC1234.*2.10.2 (03/11/2025)' || true)"
+      "$(cfg_system_body "$RAW_DIR" | grep -c 'FICT019.*2.10.2 (03/11/2025)' || true)"
 check "SYSTEM 段带上资产标签" "1" \
-      "$(cfg_system_body "$RAW_DIR" | grep -c 'KL-2026-0042' || true)"
+      "$(cfg_system_body "$RAW_DIR" | grep -c 'FICT-2026-0042' || true)"
 check "CPU 段：路数 x 型号 + 每颗核数/线程数" "1" \
       "$(cfg_cpu_body "$RAW_DIR" | grep -c '2 x Intel(R) Xeon(R) Gold 6430.*32C/64T' || true)"
 check "CPU 段：微码和 NUMA 也要有（现场核对配置时要看）" "1" \

@@ -1,4 +1,7 @@
 #!/usr/bin/env bash
+# 公开夹具身份为虚构数据：FICT 前缀表示示例标识；FACE 前缀是保留 8 位十六进制形状的虚构序列号。
+# 示例 MAC 使用 02:00:00:00:00:xx 本地管理地址；缺失/无效占位符与重复值守卫保持原样。
+# 真实传感器/电源回放仍从私有 test_out/ 读取，不将虚构身份当作真机验收。
 #
 # 内部工程报告（raw/INTERNAL_*.html）的渲染回归测试。
 #
@@ -153,7 +156,7 @@ Memory Device
 	Configured Memory Speed: 4800 MT/s
 	Manufacturer: Samsung
 	Part Number: M321R4GA3BB6
-	Serial Number: 11AA22BB
+	Serial Number: FACE0009
 
 Handle 0x0011, DMI type 17, 92 bytes
 Memory Device
@@ -164,7 +167,7 @@ Memory Device
 	Configured Memory Speed: 4800 MT/s
 	Manufacturer: Hynix
 	Part Number: HMCG88MEBRA
-	Serial Number: 33CC44DD
+	Serial Number: FACE000A
 
 Handle 0x0012, DMI type 17, 92 bytes
 Memory Device
@@ -181,19 +184,19 @@ printf 'MemTotal:       66584576 kB\n' > "$RD/raw/meminfo.txt"
 
 # 硬盘：sda 通电 21000 小时，nvme0n1 磨损 23% + 异常掉电 300 次 + 压测后新增待处理扇区
 cat > "$RD/raw/smart-pre/sda.norm.json" <<'EOF'
-{"model":"ST4000NM0035","serial":"WS20SNM6","firmware":"TN04","capacity_bytes":4000787030016,
+{"model":"ST4000NM0035","serial":"FICT0007","firmware":"TN04","capacity_bytes":4000787030016,
  "power_on_hours":21000,"power_cycles":412,"temperature_c":38,"smart_passed":true,
  "realloc_sectors":0,"pending_sectors":0,"uncorrectable":0,"crc_errors":0,
  "media_errors":null,"critical_warning":null,"percentage_used":null,"unsafe_shutdowns":null}
 EOF
 cat > "$RD/raw/smart-post/sda.norm.json" <<'EOF'
-{"model":"ST4000NM0035","serial":"WS20SNM6","firmware":"TN04","capacity_bytes":4000787030016,
+{"model":"ST4000NM0035","serial":"FICT0007","firmware":"TN04","capacity_bytes":4000787030016,
  "power_on_hours":21000,"power_cycles":412,"temperature_c":47,"smart_passed":true,
  "realloc_sectors":0,"pending_sectors":8,"uncorrectable":0,"crc_errors":0,
  "media_errors":null,"critical_warning":null,"percentage_used":null,"unsafe_shutdowns":null}
 EOF
 cat > "$RD/raw/smart-pre/nvme0n1.norm.json" <<'EOF'
-{"model":"SAMSUNG MZQL21T9HCJR","serial":"S64GNE0T","firmware":"GDC5302Q","capacity_bytes":1920383410176,
+{"model":"SAMSUNG MZQL21T9HCJR","serial":"FICT0008","firmware":"GDC5302Q","capacity_bytes":1920383410176,
  "power_on_hours":9000,"power_cycles":88,"temperature_c":41,"smart_passed":true,
  "realloc_sectors":null,"pending_sectors":null,"uncorrectable":null,"crc_errors":null,
  "media_errors":0,"critical_warning":0,"percentage_used":23,"unsafe_shutdowns":300}
