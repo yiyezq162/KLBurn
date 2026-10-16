@@ -1996,8 +1996,11 @@ sudo ./tests/e2e-qemu.sh --stage full --disk-stress --workdir /home/li/e2e-ds   
 **按时间盲发按键不可接受 —— 按错方向就是真擦盘**。
 
 解法是**轮询 `usb.img`**：虚拟机写进 exFAT 的 `klburn.log`，在宿主机看来就是
-镜像里的一段字节，跑着的时候直接 `grep -a` 就能看到（实测延迟 3 秒以内；
-U 盘那块**没有** `cache=unsafe`，flush 是真会落盘的）。五个锚点：
+镜像里的一段字节。使用 `tests/lib/e2e-log-wait.sh` 的 `image_has` 按 1MiB
+分块查找，并保留块尾以识别跨块锚点；额外诊断也应复用这个有界读取器。
+**不要直接用 `grep -a` 按行扫描 GB 级原始镜像**：大段无换行的零字节可能使其
+分配 GB 级内存，即使只读，也会挤占正在验收的 QEMU 并触发 OOM。
+U 盘那块**没有** `cache=unsafe`，flush 是真会落盘的。五个锚点：
 
 | 锚点（`klburn.log` 里的字串） | 意思 | 接着做什么 |
 |---|---|---|
