@@ -9,10 +9,28 @@
 - 默认使用一次性 GitHub 托管环境，fork 无需维护者的 Runner。
   可信分支可设置仓库变量 `CI_RUNNER=self-hosted`，并通过
   `CI_RUNNER_LABELS` 的 JSON 字符串数组指定自己的专用 Runner 标签。
-  Pull Request 始终使用 GitHub 托管环境，不受该设置影响。
+  基础工作流将 Pull Request 分到 GitHub 托管环境，不受上述变量影响；
+  这不限制 Pull Request 修改 YAML，安全边界见下节。
 - 不向不可信 Pull Request 提供私有回归样本、凭据或构建机管理权限。
 - ISO 的 root、chroot、loop/mount 和 KVM 操作在符合条件的独立后端执行，
   不在普通容器 Runner 中执行；普通开发不需要重新注册维护者的 Runner。
+
+## 公开仓库与自托管 Runner
+
+工作流默认把 Pull Request 分到 GitHub 托管环境，是调度约定，不是服务器端隔离。
+Pull Request 可以修改工作流内容；仅检查基础分支 YAML、把 token 权限设成只读，
+或不注入 secrets，都不能证明自托管主机及其网络不受影响。
+
+本项目的公开流程不以这类 YAML 约定作为自托管安全放行条件。公开前应由所有者
+确认退役此仓库直接绑定的自托管 Runner 注册，或提供可核验的服务器端可信工作流
+隔离。个人账户下的仓库级 Runner 不应被默认视为已有这类隔离。
+`CI_RUNNER=self-hosted` 的使用前提是私有、受控环境或已经证明有效的隔离边界，
+不是给公开 fork 绕过 GitHub 托管环境的入口。
+
+退役某个仓库的注册不等于删除构建虚拟机。不得为此盲目删除 Runner、停止 NAS
+共享服务、改动其他项目或重新注册执行器；应先核对准确归属并取得相应操作授权。
+独立构建机中的完整回归和私有样本仍需保留。公开托管任务缺样本时照实失败，
+不能通过公开客户原始数据、删除回放守卫或把缺失覆盖记为 PASS 来换取绿灯。
 
 ## 真实回放样本与测试分母
 
