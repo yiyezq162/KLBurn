@@ -725,5 +725,17 @@ if [[ -s "$CUSTOUT" ]]; then
 fi
 
 echo
+echo "=== 内部 PDF 原始文件索引的实际排版（1.11.5）==="
+if python3 -c 'import weasyprint' >/dev/null 2>&1; then
+  if python3 "$ROOT/tests/check-internal-index-layout.py" "$GEN" "$TMP"; then
+    ok "PDF 长索引完整保留且不越列，强制旧 nowrap 的反例被抓住"
+  else
+    bad "PDF 原始文件索引越列、内容缺失或反例守卫失效"
+  fi
+else
+  printf '  \033[33m--\033[0m   NOT_RUN：缺少 Python weasyprint，未执行内部 PDF 排版检查\n'
+fi
+
+echo
 printf '通过 %d 项，失败 %d 项\n' "$PASS" "$FAIL"
 exit $(( FAIL > 0 ? 1 : 0 ))

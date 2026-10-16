@@ -1455,7 +1455,7 @@ border-left-width:4px;border-radius:5px;margin-bottom:7px;background:var(--panel
 .dense th,.dense td{padding:4px 8px}
 .idx td{vertical-align:top}
 .idx td.f a{display:block;font-family:Consolas,Monaco,monospace;font-size:11.5px;
-white-space:nowrap;color:var(--accent);text-decoration:none}
+white-space:normal;overflow-wrap:break-word;color:var(--accent);text-decoration:none}
 .idx td.f a:hover{text-decoration:underline}
 .idx td.how{color:var(--muted);font-size:12px}
 .delta{color:#c1121f;font-weight:700}
