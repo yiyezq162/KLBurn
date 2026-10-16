@@ -499,6 +499,12 @@ fi
 rm -rf "$STAGE"
 log "chroot 定制完成"
 
+# Minimal live layers omit some installed packages' copyright files. Restore
+# only exact pinned-base notice texts, then reject any remaining missing notice.
+# Do this after all apt/purge operations and before packing the final rootfs.
+python3 "$SCRIPT_DIR/package-notices.py" "$ROOTFS_DIR" \
+  "$PROJ_DIR/docs/licenses/base-packages" --boot-iso-sha256 "$SRC_ISO_SHA256"
+
 # ---------------------------------------------------------------- 内核唯一性自检
 # 和上面"合并后必须有 /lib/modules"那条并列，但守的是另一头：
 # 那条防"一个内核都没有"，这条防"有两个、而且可能留错了那个"。

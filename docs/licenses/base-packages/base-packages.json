@@ -1,0 +1,178 @@
+{
+  "schema": 1,
+  "scope": "Exact copyright texts for installed packages whose standard notice paths were absent or broken in the minimal live layers; not a legal clearance",
+  "source_iso": {
+    "file": "ubuntu-24.04.4-live-server-amd64.iso",
+    "sha256": "e907d92eeec9df64163a7e454cbc8d7755e8ddc7ed42f99dbc80c40f1a138433"
+  },
+  "notices": [
+    {
+      "binary_package": "casper",
+      "binary_version": "1.498",
+      "file": "casper.COPYRIGHT",
+      "sha256": "990b454ac7764433d5dd9d78ef2fe435bdccd7272bc8316de7850f50b90a1c65",
+      "bytes": 2501,
+      "origin": {
+        "squashfs": "ubuntu-server-minimal.ubuntu-server.installer.squashfs",
+        "path": "usr/share/doc/casper/copyright"
+      },
+      "version_evidence": "Exact binary version listed in source ISO dpkg status or casper manifests"
+    },
+    {
+      "binary_package": "cifs-utils",
+      "binary_version": "2:7.0-2ubuntu0.2",
+      "file": "cifs-utils.COPYRIGHT",
+      "sha256": "351b350b0cfb133bc61a96592a782ee22800987c2ee6c636b8bb1979b3ed3e53",
+      "bytes": 2620,
+      "origin": {
+        "squashfs": "ubuntu-server-minimal.ubuntu-server.installer.squashfs",
+        "path": "usr/share/doc/cifs-utils/copyright"
+      },
+      "version_evidence": "Exact binary version listed in source ISO dpkg status or casper manifests"
+    },
+    {
+      "binary_package": "firmware-sof-signed",
+      "binary_version": "2023.12.1-1ubuntu1.10",
+      "file": "firmware-sof-signed.COPYRIGHT",
+      "sha256": "f769db7d9007c9e2c6aaa4076fc6604e771c88c685c2fda4045e0d0ab11ffc06",
+      "bytes": 109946,
+      "origin": {
+        "squashfs": "ubuntu-server-minimal.ubuntu-server.installer.squashfs",
+        "path": "usr/share/doc/firmware-sof-signed/copyright"
+      },
+      "version_evidence": "Exact binary version listed in source ISO dpkg status or casper manifests"
+    },
+    {
+      "binary_package": "keyutils",
+      "binary_version": "1.6.3-3build1",
+      "file": "keyutils.COPYRIGHT",
+      "sha256": "c62fe37d22203046611112bc10a9e03a39a7f73bec1b061e7c615326166d9ff5",
+      "bytes": 2104,
+      "origin": {
+        "squashfs": "ubuntu-server-minimal.ubuntu-server.installer.squashfs",
+        "path": "usr/share/doc/keyutils/copyright"
+      },
+      "version_evidence": "Exact binary version listed in source ISO dpkg status or casper manifests"
+    },
+    {
+      "binary_package": "libtalloc2",
+      "binary_version": "2.4.2-1build2",
+      "file": "libtalloc2.COPYRIGHT",
+      "sha256": "74278a94ee0b90f2098c57b25f09652554ab9a47ca9c3cec3f56dff2adad3d2a",
+      "bytes": 16534,
+      "origin": {
+        "squashfs": "ubuntu-server-minimal.ubuntu-server.installer.squashfs",
+        "path": "usr/share/doc/libtalloc2/copyright"
+      },
+      "version_evidence": "Exact binary version listed in source ISO dpkg status or casper manifests"
+    },
+    {
+      "binary_package": "libwbclient0",
+      "binary_version": "2:4.19.5+dfsg-4ubuntu9.4",
+      "file": "libwbclient0.COPYRIGHT",
+      "sha256": "d65613995ca465deaa6eef48e38f3182d17679083fa12955a9cd9495147063d2",
+      "bytes": 21144,
+      "origin": {
+        "squashfs": "ubuntu-server-minimal.ubuntu-server.installer.squashfs",
+        "path": "usr/share/doc/libwbclient0/copyright"
+      },
+      "version_evidence": "Exact binary version listed in source ISO dpkg status or casper manifests"
+    },
+    {
+      "binary_package": "libwrap0",
+      "binary_version": "7.6.q-33",
+      "file": "libwrap0.COPYRIGHT",
+      "sha256": "3433ea51eb4b9272c97d159c5ae5e0d3f592bbf9fc946dac813e1594aa6fa16f",
+      "bytes": 4285,
+      "origin": {
+        "squashfs": "ubuntu-server-minimal.ubuntu-server.installer.squashfs",
+        "path": "usr/share/doc/libwrap0/copyright"
+      },
+      "version_evidence": "Exact binary version listed in source ISO dpkg status or casper manifests"
+    },
+    {
+      "binary_package": "localechooser-data",
+      "binary_version": "2.89ubuntu6",
+      "file": "localechooser-data.COPYRIGHT",
+      "sha256": "5edbc94a51b5ecb0c15ecc07620b2aa5812d067d8f0369a2d3594a49cc750b0e",
+      "bytes": 854,
+      "origin": {
+        "squashfs": "ubuntu-server-minimal.ubuntu-server.installer.squashfs",
+        "path": "usr/share/doc/localechooser-data/copyright"
+      },
+      "version_evidence": "Exact binary version listed in source ISO dpkg status or casper manifests"
+    },
+    {
+      "binary_package": "ncurses-term",
+      "binary_version": "6.4+20240113-1ubuntu2",
+      "file": "ncurses-term.COPYRIGHT",
+      "sha256": "7c9d2c8dbee48b6f4bbbffb1f370cc5858de11cc4f5a70c5c622c274917e1c65",
+      "bytes": 4670,
+      "origin": {
+        "squashfs": "ubuntu-server-minimal.ubuntu-server.installer.squashfs",
+        "path": "usr/share/doc/ncurses-term/copyright"
+      },
+      "version_evidence": "Exact binary version listed in source ISO dpkg status or casper manifests"
+    },
+    {
+      "binary_package": "openssh-server",
+      "binary_version": "1:9.6p1-3ubuntu13.14",
+      "file": "openssh-server.COPYRIGHT",
+      "sha256": "b6be93136b065505bf4fa315914a8c31c2a07865e7b5152dc1cbca324d86c860",
+      "bytes": 10941,
+      "origin": {
+        "squashfs": "ubuntu-server-minimal.squashfs",
+        "path": "usr/share/doc/openssh-client/copyright"
+      },
+      "version_evidence": "Exact binary version listed in source ISO dpkg status or casper manifests"
+    },
+    {
+      "binary_package": "openssh-sftp-server",
+      "binary_version": "1:9.6p1-3ubuntu13.14",
+      "file": "openssh-sftp-server.COPYRIGHT",
+      "sha256": "b6be93136b065505bf4fa315914a8c31c2a07865e7b5152dc1cbca324d86c860",
+      "bytes": 10941,
+      "origin": {
+        "squashfs": "ubuntu-server-minimal.squashfs",
+        "path": "usr/share/doc/openssh-client/copyright"
+      },
+      "version_evidence": "Exact binary version listed in source ISO dpkg status or casper manifests"
+    },
+    {
+      "binary_package": "openssl",
+      "binary_version": "3.0.13-0ubuntu3.7",
+      "file": "openssl.COPYRIGHT",
+      "sha256": "6a7da622fe0637a334d2a8fc470852d2ffb77d9a2b2f930f854e32a41ad6ef35",
+      "bytes": 2543,
+      "origin": {
+        "squashfs": "ubuntu-server-minimal.squashfs",
+        "path": "usr/share/doc/libssl3t64/copyright"
+      },
+      "version_evidence": "Exact binary version listed in source ISO dpkg status or casper manifests"
+    },
+    {
+      "binary_package": "ssh-import-id",
+      "binary_version": "5.11-0ubuntu2.24.04.1",
+      "file": "ssh-import-id.COPYRIGHT",
+      "sha256": "d989aad832a1dbca62250c1c322c5ac6e1d301682dbbf17e7bd0aa92e01ccb06",
+      "bytes": 1095,
+      "origin": {
+        "squashfs": "ubuntu-server-minimal.ubuntu-server.installer.squashfs",
+        "path": "usr/share/doc/ssh-import-id/copyright"
+      },
+      "version_evidence": "Exact binary version listed in source ISO dpkg status or casper manifests"
+    },
+    {
+      "binary_package": "user-setup",
+      "binary_version": "1.95ubuntu1",
+      "file": "user-setup.COPYRIGHT",
+      "sha256": "5a77d7c2d2b52be748ea82063fbdb53f1188ce3eb207ab4c68f6efab0daaeb68",
+      "bytes": 481,
+      "origin": {
+        "squashfs": "ubuntu-server-minimal.ubuntu-server.installer.squashfs",
+        "path": "usr/share/doc/user-setup/copyright"
+      },
+      "version_evidence": "Exact binary version listed in source ISO dpkg status or casper manifests"
+    }
+  ]
+}

@@ -52,6 +52,9 @@ RT="rootfs/opt/klburn"
 # 让函数兼职报告文件名的话就得先跑一次再回滚，那才是真正危险的设计。
 S=$'\x1f'
 MUTATIONS=(
+"package-notice-wrong-version${S}用另一版本版权文本填补缺失声明（基础包精确版本绑定失效）${S}test-package-notices${S}build/package-notices.py${S}mut_package_notice_wrong_version"
+"package-notice-host-link${S}版权绝对链接借用宿主机文件而不是目标 ISO 根目录${S}test-package-notices${S}build/package-notices.py${S}mut_package_notice_host_link"
+"package-notice-hook-missing${S}移除最终打包前版权检查调用（有函数却从不执行）${S}test-package-notices${S}build/build-iso.sh${S}mut_package_notice_hook_missing"
 "mem-report-early-success${S}未等到内存报告就宣称完成（固定计时曾提前关机导致报告丢失）${S}test-e2e-log-wait${S}tests/lib/e2e-log-wait.sh${S}mut_mem_report_early_success"
 "mem-report-stale-anchor${S}允许启动前已有的报告完成字节冒充本轮完成${S}test-e2e-log-wait${S}tests/lib/e2e-log-wait.sh${S}mut_mem_report_stale_anchor"
 "verdict-grep${S}整机结论换回 grep 匹配 JSON 文本（§11-1 的 JSON 版：格式一变就每台机器都判 PASS）${S}test-hw-checks${S}$RT/factory-test.sh${S}mut_verdict_grep"
@@ -268,6 +271,22 @@ delete_line() {
 # 各条变异（函数名要和上面清单里的对上）
 # 每个函数只负责改文件，成功回 0、失败把原因打到 stdout
 # ================================================================
+mut_package_notice_wrong_version() {
+  replace_line build/package-notices.py \
+    'if name not in texts or texts[name][0]["binary_version"] != version:' \
+    '            if name not in texts:'
+}
+
+mut_package_notice_host_link() {
+  replace_line build/package-notices.py \
+    '    pending = normalize(name.split("/"))' \
+    '    return (root / name).resolve(strict=True)'
+}
+
+mut_package_notice_hook_missing() {
+  delete_line build/build-iso.sh 'python3 "$SCRIPT_DIR/package-notices.py"'
+}
+
 
 mut_mem_report_early_success() {
   replace_line tests/lib/e2e-log-wait.sh "if wait_for_log 'Report PDF written'" '  if true; then'
