@@ -19,7 +19,7 @@ async function render() {
     const data = await response.json();
     if (data.schema !== 1 || !Array.isArray(data.releases)) throw new Error('版本数据格式无效');
     if (!data.publication_ready || !data.releases.length) {
-      document.getElementById('release-status').textContent = '公开发布审查尚未完成；这里不提供未经核验的下载。'; return;
+      document.getElementById('release-status').textContent = '源码已公开；ISO 与工具 ZIP 暂未公开，完成分发条件核验后再提供下载。'; return;
     }
     const latest = data.releases[0];
     document.getElementById('release-status').textContent = `${latest.version} · ${latest.prerelease ? '预发布版，请先验证适用性' : '稳定版'} · ${latest.date}`;

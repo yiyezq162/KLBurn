@@ -3,9 +3,14 @@ on:
   workflow_dispatch:
     inputs:
       confirmation:
-        description: '仅在所有公开审查完成且项目所有者明确同意后输入 PUBLISH'
+        description: '仅在网站内容审核完成且项目所有者明确同意后输入 PUBLISH；不授权发布 ISO'
         required: true
         type: string
+      source_only:
+        description: '仅发布源码介绍网站，必须没有任何 ISO/工具发布元数据'
+        required: true
+        default: true
+        type: boolean
 permissions:
   contents: read
 concurrency:
@@ -27,7 +32,14 @@ jobs:
         with:
           persist-credentials: false
       - name: Require verified static release data
-        run: python3 tools/update-site-release.py --check site/releases.json
+        env:
+          SOURCE_ONLY: ${{ inputs.source_only }}
+        run: |
+          if [[ "$SOURCE_ONLY" == true ]]; then
+            python3 -c 'import json; from pathlib import Path; data=json.loads(Path("site/releases.json").read_text()); assert data == {"schema": 1, "publication_ready": False, "releases": []}, "Source-only site must not contain release assets"'
+          else
+            python3 tools/update-site-release.py --check site/releases.json
+          fi
       - uses: actions/configure-pages@983d7736d9b0ae728b81ab479565c72886d7745b
       - uses: actions/upload-pages-artifact@56afc609e74202658d3ffba0e8f6dda462b719fa
         with:

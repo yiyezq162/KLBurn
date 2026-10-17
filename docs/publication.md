@@ -97,6 +97,12 @@ python3 tools/update-site-release.py \
 2. 仓库确实为公开，仓库变量 `KLBURN_PUBLICATION_ENABLED` 为 `true`。
 3. 手动输入确认值 `PUBLISH`，静态索引检查通过。
 
+源码与官网可以先于 ISO 公开。此时手动选择 `source_only=true`，网站索引必须严格为
+`{"schema":1,"publication_ready":false,"releases":[]}`，不提供候选 ISO 或工具 ZIP 下载。
+这条路径只批准介绍性网站，不代表第三方分发条件已满足。提供下载时选择
+`source_only=false`，仍执行原有完整双版／三平台发布元数据检查，不得用空索引绕过。
+尚未放行的 Release 保持草稿；改变仓库可见性前也须检查历史 Release 的状态。
+
 它只上传 `site/`，不上传源码工作区、out、vendor 或私有收据。使用 GitHub Pages
 默认地址，不配置自定义域名或自有服务器。启用前应配置 GitHub Pages 的 Actions
 来源，并检查 `github-pages` 环境的审批设置。
