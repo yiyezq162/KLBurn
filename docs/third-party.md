@@ -17,8 +17,9 @@ Ubuntu 系统、Linux 内核、固件、字体、运行库和第三方工具保�
 | OpenBLAS、字体、zlib、zstd | 保留对应许可证、版权及适用的再分发说明。静态或动态链接方式须按实际产物核对。 |
 | NVIDIA 驱动和 CUDA 运行库 | 已从哈希核对一致的 595.84 安装包提取 Driver License Agreement（2025-02-25）。第 1.1(d) 条有条件允许用于开源内核的分发，要求不修改二进制并向接收者提供协议；另有硬件与用途限制。实际 ISO 条件符合性及 CUDA 运行库条款尚未全部核清，不能把 open 内核模块许可套用于全部组件。 |
 | gpu-burn、cuda-samples、OpenDCDiag | 已取得 cuda-samples 固定源码版本的 BSD-3 文本，及 OpenDCDiag 固定版本的 Apache-2.0 与附带 MIT/BSD-3 声明；必须保留全部适用归属。当前私有候选的 gpu-burn 来源记录为 `0d19c94dcb2e9b6858b7586a4c327674cd67113b`，保留 BSD-2 原文及实际 CUDA 工具链 EULA；来源记录不替代静态链接组件的分发审查，也不能证明其他旧二进制的来源。 |
-| Intel LINPACK、MLC | 免费下载不等于无条件再分发；`redist.txt` 也不能替代其所引用的完整许可协议。 |
-| Broadcom StorCLI 及其他厂商管理工具 | 须获得适用版本的分发依据；不能因为内部测试盘已有二进制就直接向公众发布。 |
+| Intel LINPACK | 已阅读 oneMKL 2025.3 配套的 Intel Simplified Software License（October 2022）；文本 SHA256 `c182e56595e59c88a2561ca442f7cb088cab5575a3f1c9fdebc09688d0748bd2` 与 1.11.8 构建输入清单一致。主许可明确有条件允许原样二进制再分发，须保留条款、归属及不背书要求；实际二进制与嵌入第三方组件条件仍须分别核对，不将其笼统视为禁止分发。 |
+| Intel MLC 3.12 | `redist.txt` 列出 `mlc`；官方 v2022.04.27 协议有条件允许 Redistributables 随产品分发。精确 3.12 协议绑定、实际用途及下游条件尚未全部确认；不能以 `redist.txt` 或其他版本的下载页替代这些证据。 |
+| Broadcom StorCLI 007.2705.0000.0000 | 2026-10-18 核对 [Broadcom 官方下载元数据](https://docs.broadcom.com/api/document/download/1232743397)：编号 `1232743397` 指向同版本 ZIP，`eula_type` 为 `Shareable License`，对应标题为 `Download Agreement - Public Use License`。主体条款有条件允许复制和二进制分发，要求保留声明、不修改等；开源部分仍遵守各自许可。不能再笼统称为没有主体授权依据，但实际文件对应、静态 glibc 的源码／重新链接材料等义务尚未闭合，不据此宣布现有 ISO 可直接公开。其他厂商工具需独立核查。 |
 
 审查发现现有 MLC 离线目录中一个以许可协议 PDF 命名的文件实际为旧版压缩包，
 因此该文件不能作为当前版本的许可证明。保留原始证据，不将其改名冒充有效许可。
