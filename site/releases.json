@@ -1,5 +1,45 @@
 {
   "schema": 1,
-  "publication_ready": false,
-  "releases": []
+  "publication_ready": true,
+  "releases": [
+    {
+      "version": "1.11.8",
+      "commit": "ce79cbe242469ae0a9a925558c3b5fda8a929849",
+      "date": "2026-10-17",
+      "prerelease": true,
+      "url": "https://github.com/yiyezq162/KLBurn/releases/tag/v1.11.8",
+      "assets": {
+        "full": {
+          "file": "KLBurn-1.11.8-20261016.iso",
+          "bytes": 1569105920,
+          "sha256": "ca3d049c4c4886afad8a560d394736d2ab254ea977782e3007fa25fff4e2c744",
+          "url": "https://github.com/yiyezq162/KLBurn/releases/download/v1.11.8/KLBurn-1.11.8-20261016.iso"
+        },
+        "mem": {
+          "file": "KLBurn-MEM-1.11.8-20261016.iso",
+          "bytes": 800507904,
+          "sha256": "76ad1633d1be32453652f82601da6e4e27e882313cf94b2bd487f7b1e07ce9d7",
+          "url": "https://github.com/yiyezq162/KLBurn/releases/download/v1.11.8/KLBurn-MEM-1.11.8-20261016.iso"
+        },
+        "Windows": {
+          "file": "KLBurn-Builder-Windows-1.11.8.zip",
+          "bytes": 14482,
+          "sha256": "e4d95e0545fe9f7d48c54334eb8cf48d24eed7f44ebb659cd47a0bfa40ebf7b7",
+          "url": "https://github.com/yiyezq162/KLBurn/releases/download/v1.11.8/KLBurn-Builder-Windows-1.11.8.zip"
+        },
+        "macOS": {
+          "file": "KLBurn-Builder-macOS-1.11.8.zip",
+          "bytes": 14497,
+          "sha256": "a7210d1ebddda84ee39c173ccdd1a63d95fe7e50eded78f60cbeb7eff15e8797",
+          "url": "https://github.com/yiyezq162/KLBurn/releases/download/v1.11.8/KLBurn-Builder-macOS-1.11.8.zip"
+        },
+        "Linux": {
+          "file": "KLBurn-Builder-Linux-1.11.8.zip",
+          "bytes": 14500,
+          "sha256": "ae73734014648b4fcda503a4000f1d22d13cb9a2a29f698471cb42d3ae7265a0",
+          "url": "https://github.com/yiyezq162/KLBurn/releases/download/v1.11.8/KLBurn-Builder-Linux-1.11.8.zip"
+        }
+      }
+    }
+  ]
 }

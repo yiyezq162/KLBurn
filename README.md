@@ -20,13 +20,14 @@
 
 | 版本 | 适合 | 开机后 | 下载 |
 |---|---|---|---|
-| **整机测试版**（full） | 出厂验收、整机老化 | 选范围、选时长；不按键默认全量 + 30 分钟 | 暂未公开 |
-| **内存专用版**（mem） | 一批内存逐台过筛、查假条子 | 什么都不用选，约 3 分钟出结果 | 暂未公开 |
+| **整机测试版**（full） | 出厂验收、整机老化 | 选范围、选时长；不按键默认全量 + 30 分钟 | [**ISO** · 1.5 GB](https://github.com/yiyezq162/KLBurn/releases/download/v1.11.8/KLBurn-1.11.8-20261016.iso) |
+| **内存专用版**（mem） | 一批内存逐台过筛、查假条子 | 什么都不用选，约 3 分钟出结果 | [**ISO** · 763 MB](https://github.com/yiyezq162/KLBurn/releases/download/v1.11.8/KLBurn-MEM-1.11.8-20261016.iso) |
+
+当前版本 **1.11.8（预发布）**。校验值见 [`SHA256SUMS-1.11.8.txt`](https://github.com/yiyezq162/KLBurn/releases/download/v1.11.8/SHA256SUMS-1.11.8.txt)，
+三平台定制构建工具和历史版本见 [Releases](https://github.com/yiyezq162/KLBurn/releases)。
 
 > [!NOTE]
-> **目前只公开源码和官网，ISO 暂不提供下载。** 第三方组件的分发条件核验完成后，
-> 下载会出现在 [Releases](https://github.com/yiyezq162/KLBurn/releases) 和[官网](https://yiyezq162.github.io/KLBurn/#download)。
-> 现在可以[从源码构建](#从源码构建)。
+> 预发布版已通过源码回归和 QEMU 验收，**但还没有经过真机硬件验收**。用于正式出货验收前，请先在自己的机器上试跑。
 
 两种盘出自同一份源码、同一个版本号，每次成对发布。
 
