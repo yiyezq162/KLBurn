@@ -33,7 +33,9 @@ jobs:
           CI_FIXTURE_DIR: ${{ github.event_name != 'pull_request' && secrets.CI_FIXTURE_DIR || '' }}
         run: |
           mkdir -p ci-reports
+          test_args=(--public)
           if [[ "$RUNNER_ENVIRONMENT" == self-hosted ]]; then
+            test_args=()
             fixture="${CI_FIXTURE_DIR:?Configure CI_FIXTURE_DIR for trusted self-hosted regression}"
             [[ "$fixture" = /* ]]
             test -d "$fixture"
@@ -49,11 +51,13 @@ jobs:
             cp -a "$fixture/." test_out/
           fi
           set -o pipefail
-          ./tests/run-all.sh 2>&1 | tee ci-reports/source-checks.log
+          ./tests/run-all.sh "${test_args[@]}" 2>&1 | tee ci-reports/source-checks.log
       - name: Record explicit release gaps
         if: always()
         run: |
           printf '%s\n' '### KLBurn source checks — NOT a release gate' 'Privileged ISO work requires a separate supported build backend, not this source-check Runner.' 'Root disk-exclusion, full/mem ISO build, firmware audit, real ISO QEMU/disk-stress, offline vendor parity and physical hardware acceptance: NOT_RUN.' 'Do not publish an ISO/tag based only on this workflow.' >> "$GITHUB_STEP_SUMMARY"
+          if [[ "$RUNNER_ENVIRONMENT" != self-hosted ]]; then
+            printf '%s\n' 'Public source scope only. Private hardware replay: NOT_RUN; two coverage guards and sample-dependent assertions are not counted as PASS.' >> "$GITHUB_STEP_SUMMARY"
       - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
         id: source_primary
         if: always()

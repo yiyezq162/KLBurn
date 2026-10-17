@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 #
-# 跑全部回归测试。都不需要真实服务器硬件，在 WSL 里随时可跑：
+# 完整回归需要本地有权使用的真机回放样本；在 x86_64 Ubuntu 24.04 执行：
 #
 #     ./tests/run-all.sh
 #
@@ -11,7 +11,18 @@
 #
 set -uo pipefail
 
+scope=full
+case "${1:-}" in
+  "") [[ $# == 0 ]] || exit 2 ;;
+  --public) [[ $# == 1 ]] || exit 2; scope=public ;;
+  *) printf '用法：%s [--public]\n' "$0" >&2; exit 2 ;;
+esac
+
 cd "$(dirname "${BASH_SOURCE[0]}")/.." || exit 1
+printf '测试范围：%s\n' "$scope"
+if [[ "$scope" == public ]]; then
+  printf 'NOT_RUN：私有真机传感器/电源回放；两项覆盖守卫及样本断言不计入 PASS。\n'
+fi
 
 SUITES=(
   lint
@@ -31,6 +42,7 @@ SUITES=(
   test-customize
   test-tool-packaging
   test-public-metadata
+  test-ci-scopes
 )
 
 total_pass=0; total_fail=0; failed_suites=()
@@ -41,7 +53,9 @@ for s in "${SUITES[@]}"; do
     out="$(python3 "tests/$s.py" 2>&1)"
     rc=$?
   else
-    out="$(./tests/"$s".sh 2>&1)"
+    args=()
+    [[ "$scope" == public && "$s" == test-hw-checks ]] && args=(--public)
+    out="$(./tests/"$s".sh "${args[@]}" 2>&1)"
     rc=$?
   fi
   if (( rc != 0 )); then
@@ -72,4 +86,8 @@ if (( ${#failed_suites[@]} )); then
   printf '\033[1;31m失败的测试：%s\033[0m\n' "${failed_suites[*]}"
   exit 1
 fi
-printf '\033[1;32m全部通过\033[0m\n'
+if [[ "$scope" == public ]]; then
+  printf '\033[1;32m公开源码范围通过；私有回放 NOT_RUN，不是完整发行验收\033[0m\n'
+else
+  printf '\033[1;32m全部通过\033[0m\n'
+fi
