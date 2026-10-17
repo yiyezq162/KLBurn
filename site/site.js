@@ -26,7 +26,7 @@ function asset(target, item, label, release) {
 }
 async function render() {
   try {
-    const response = await fetch('releases.json'); if (!response.ok) throw new Error('版本数据读取失败');
+    const response = await fetch('releases.json', { cache: 'no-cache' }); if (!response.ok) throw new Error('版本数据读取失败');
     const data = await response.json();
     if (data.schema !== 1 || !Array.isArray(data.releases)) throw new Error('版本数据格式无效');
     if (!data.publication_ready || !data.releases.length) {
