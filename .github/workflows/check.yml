@@ -58,6 +58,7 @@ jobs:
           printf '%s\n' '### KLBurn source checks — NOT a release gate' 'Privileged ISO work requires a separate supported build backend, not this source-check Runner.' 'Root disk-exclusion, full/mem ISO build, firmware audit, real ISO QEMU/disk-stress, offline vendor parity and physical hardware acceptance: NOT_RUN.' 'Do not publish an ISO/tag based only on this workflow.' >> "$GITHUB_STEP_SUMMARY"
           if [[ "$RUNNER_ENVIRONMENT" != self-hosted ]]; then
             printf '%s\n' 'Public source scope only. Private hardware replay: NOT_RUN; two coverage guards and sample-dependent assertions are not counted as PASS.' >> "$GITHUB_STEP_SUMMARY"
+          fi
       - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
         id: source_primary
         if: always()
