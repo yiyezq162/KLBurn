@@ -20,7 +20,7 @@ WSL 只是 Windows 下的一种 Linux 环境，不是项目必须使用的平台
   现有 ISO 是 amd64；构建、完整回归、变异测试和 QEMU 验收交给 x86_64 Ubuntu。
 - Linux 可以是物理机、局域网虚拟机或 Windows 的 WSL。普通 Ubuntu 无需 WSL。
 - 先检查当前主机、SSH 连接、权限和工具；不要假定已装 WSL、已有缓存或剩余空间。
-  已有源码 CI 和专用 `nas-ci-klburn`，标签 `self-hosted, Linux, X64, nas-klburn`；先读 `docs/CI.md`。ISO 专用后端是 NAS `KLBurn-BuildVM`，不是 Docker Runner；普通开发不重注册，不在 NAS 宿主机/普通 Runner 内执行挂载、loop 或 KVM 构建。
+  源码 CI 当前使用 GitHub 托管环境；旧 `nas-ci-klburn` 仓库 Runner 注册已注销，不自动重注册；先读 `docs/CI.md`。ISO 专用后端是 NAS `KLBurn-BuildVM`，不是 Docker Runner；普通开发不在 NAS 宿主机/普通 Runner 内执行挂载、loop 或 KVM 构建。
 - 下文 Bash 命令都在 Linux 执行。Mac 可通过已配置的 SSH 连接执行，复杂操作先写成
   Linux 端临时脚本。Windows 只有在使用 WSL 时才需要 PowerShell → WSL 包装。
 - 文本用 UTF-8 无 BOM、LF；`.gitattributes` 已固定换行。入口脚本的执行权限由 Git 保存。
