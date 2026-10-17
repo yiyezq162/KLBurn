@@ -1,269 +1,202 @@
-# KLBurn —— 服务器出厂老化测试 U 盘
+<div align="center">
 
-[官网](https://yiyezq162.github.io/KLBurn/) · [源码](https://github.com/yiyezq162/KLBurn)
+# KLBurn
 
-**当前公开范围：源码与介绍性官网。ISO 和工具 ZIP 暂未公开，旧版及 1.11.8 Release 保持草稿；源码公开不代表镜像分发条件已全部满足。**
+**服务器出厂老化测试启动盘**
 
-插上 U 盘，开机，走开。跑完拔盘，U 盘里多出一份**中文验收报告**（HTML + PDF），
-连同全部原始数据。**不装系统、不联网、不依赖任何服务端。**
+插上 U 盘，开机，走开。跑完拔盘，U 盘里就有一份中文验收报告。
+
+[官网](https://yiyezq162.github.io/KLBurn/) · [下载](#下载) · [快速上手](#快速上手) · [文档](#文档) · [更新日志](CHANGELOG.md)
+
+![License](https://img.shields.io/badge/license-MIT-126044)
+![Platform](https://img.shields.io/badge/target-x86__64%20server-126044)
+![Base](https://img.shields.io/badge/base-Ubuntu%2024.04.4-126044)
+
+</div>
+
+---
+
+## 下载
+
+| 版本 | 适合 | 开机后 | 下载 |
+|---|---|---|---|
+| **整机测试版**（full） | 出厂验收、整机老化 | 选范围、选时长；不按键默认全量 + 30 分钟 | 暂未公开 |
+| **内存专用版**（mem） | 一批内存逐台过筛、查假条子 | 什么都不用选，约 3 分钟出结果 | 暂未公开 |
+
+> [!NOTE]
+> **目前只公开源码和官网，ISO 暂不提供下载。** 第三方组件的分发条件核验完成后，
+> 下载会出现在 [Releases](https://github.com/yiyezq162/KLBurn/releases) 和[官网](https://yiyezq162.github.io/KLBurn/#download)。
+> 现在可以[从源码构建](#从源码构建)。
+
+两种盘出自同一份源码、同一个版本号，每次成对发布。
+
+---
+
+## 快速上手
+
+**1. 校验镜像**：下载 ISO 后比对 SHA256。full 和 mem 的校验值不一样，别混用。
+
+**2. 制作 U 盘**（Windows + [Rufus](https://rufus.ie/zh/)，详见 [U 盘制作](docs/usb-rufus.md)）
+
+- 分区类型 GPT，目标系统 UEFI。点「开始」后**必须选「以 DD 映像模式写入」**
+- 写完后 Windows 提示格式化，**点取消**
+- 在剩余空间新建一个 **exFAT** 分区，卷标写 **`KLBURN`**（全大写）。报告就存在这里
+
+> [!WARNING]
+> 写盘会清空整根 U 盘，先确认盘里没有要留的东西，并核对磁盘容量。
+
+**3. 开机测试**：BIOS 启动菜单选 U 盘（一般按 `F11` / `F12` / `F7` / `Esc`）。
 
 ```
-插盘 → 开机 → 选范围（60秒倒计时）→ 选时长（30秒倒计时）→ 走开
-        两个菜单不按都用默认：全量测试 + 标准 30 分钟
-                      ↓
-   U 盘里多出一个文件夹：报告 + 全部原始数据 ← PASS / FAIL 大字
+插盘 → 开机 → 选范围（60 秒倒计时）→ 选时长（30 秒倒计时）→ 走开
+              两个菜单都不按，就默认「全量测试 + 标准 30 分钟」
 ```
 
-基于 Ubuntu Server 24.04.4 LTS 重打包。接了网线会顺手做联网校时和网口连通性测试，
-**纯属加分项，不接网线不影响任何判定。**
+**4. 拿报告**：屏幕上出现 PASS / FAIL 大字后拔盘。把 U 盘插回电脑，
+打开 `KLBURN` 分区里本轮的文件夹，**`<目录名>.html` / `.pdf` 就是交给客户的报告**。
+
+现场每一屏的样子和出错时的排查，见[现场操作](docs/operating.md)。
+
+---
+
+## 测试范围（整机版）
+
+开机第一个菜单问的是**测什么**：
+
+| 键 | 范围 | 报告目录后缀 | 什么时候用 |
+|:-:|---|---|---|
+| **1** | **全量测试**（默认） | `_Full` | **出厂验收就用这个** |
+| 2 | CPU 单独测试 | `_CPU` | 换过 CPU，或怀疑算力、算错 |
+| 3 | 内存单独测试 | `_MEM` | 换过内存条，或查 ECC |
+| 4 | 显卡单独测试 | `_GPU` | 只验显卡 |
+| 5 | 硬盘单独测试 | `_DISK` | 只压盘，时长全给硬盘 |
+| 6 | 仅导出报告 | `_INFO` | 只要一份配置清单，几分钟出结果 |
+
+硬件清单、配置核对和网卡检测每个范围都跑。范围外的项目整项不跑，
+报告里也没有它们的结论行。
+
+> [!IMPORTANT]
+> 单项测试的报告**不能当整机验收依据**。报告抬头写着本轮范围，「仅导出报告」不显示 PASS 大字。
+
+## 它测什么
+
+| 阶段 | 内容 | 怎么判 |
+|---|---|---|
+| ① 硬件采集 | 整机 / CPU / 逐条内存 / 硬盘（含阵列卡后的物理盘）/ 网卡 / 显卡 / 电源 / BMC | 有什么列什么 |
+| ② 配置核对 | 同规格部件的型号和固件、内存容量、PCIe 降级、序列号 | 不一致判 WARN |
+| ③ 性能基准 | CPU 浮点、内存带宽、硬盘读写、显卡带宽和互联 | **只报数，不判合格** |
+| ④ 专项验证 | CPU 计算正确性、SMART 自检、网卡自检、显卡厂商诊断 | 部件自己报错才判 FAIL |
+| ⑤ 压力测试 | CPU / 内存 / 显卡并发跑满时长，硬盘单独跑 | 出错、超温、掉卡判 FAIL |
+| ⑥ 测后复查 | ECC、热节流、PCIe AER、内核日志、BMC 事件、SMART 增量 | 按压测前后差值判 |
+
+每一项 PASS / WARN / SKIP / FAIL 的判定条件见
+[`architecture.md` §6](docs/architecture.md#六判定规则总表)。
+
+## 产出什么
+
+| 文件 | 用途 |
+|---|---|
+| `<目录名>.html` + `.pdf` | ✅ 交给客户。自包含的中文报告，双击就能看 |
+| `meta.json`、`results.jsonl`、`*.csv`、`klburn.log`、`SHA256SUMS` | 内部留档 |
+| `raw\`（含 `INTERNAL_*.html` 工程报告） | 内部复盘、追溯 |
+
+内存专用版还额外输出一份「一条内存一行」的 CSV。多台的 CSV 拼在一起按序列号排序，
+有问题的那批会排到一起。详见[报告说明](docs/reports.md)。
+
+## 内存专用版
+
+整机盘太重的时候用它，比如买到一批可疑内存，要一台一台过。
+
+- 读出每条内存的槽位、厂商、型号、**序列号**、频率、生产周次，再压测一遍，并查 ECC 和内核日志
+- 硬盘、阵列卡、显卡、电源、BMC 都不碰，网卡只用来校时
+- **只有内存坏才判 FAIL**
+- 查假条子：**同一台机器上序列号重复**判 FAIL；**SPD 逐字节相同**说明是克隆条子
+
+详见[内存专用版说明](docs/mem-edition.md)。
+
+<details>
+<summary><b>设计原则：和「随便跑个 stress」有什么不同</b></summary>
+
+<br>
+
+- **四态判定，不把「没有」说成「坏了」**：没装显卡、没接网线判 SKIP，不影响结论；
+  装了但认不到才判 FAIL。一条判定都没有时，报告直接写明「本报告无效」。
+- **性能只报数，不设阈值**：验收标准由做验收的人来定，代码里没有任何「参考值」。
+- **测试环境自己的问题不算到机器头上**：比如压测进程被 OOM 杀掉判 WARN，
+  驱动不支持新卡判 SKIP，好机器不会被判坏。
+- **阵列卡后面的物理盘也要查到**：自动识别阵列卡，逐块透传读 SMART。
+- **日志判读只看数字**：不靠关键字匹配，正常日志里的 `errors: 0` 不会被误判成失败。
+- **U 盘自己绝不会被写坏**：fio 目标盘要经过五道排除，Ventoy 场景按设备号反查。
+- **破坏性写入要确认两次**：先原样输入 `yes`，最终警告页上再按 `y`。
+- **报告落盘有四层回退**：卷标 → 同盘 exFAT → 其他可移动 exFAT → dm 设备。
+- **屏幕是给人看的**：整屏刷新的仪表盘，方便拍照发群。
+- **每条守卫都有变异测试**：故意注入故障，确认守卫真的会报红。
+
+</details>
+
+---
+
+## 文档
+
+| 想做什么 | 看这份 |
+|---|---|
+| 做一根 U 盘 | [U 盘制作（Rufus + exFAT）](docs/usb-rufus.md) |
+| 站在服务器前操作 | [现场操作](docs/operating.md) |
+| 看懂报告 | [报告说明](docs/reports.md) |
+| 只查内存 | [内存专用版](docs/mem-edition.md) |
+| 第一次上真机 | [真机首跑清单](docs/first-run-checklist.md) |
+| 查旧报告对应的版本 | [更新日志](CHANGELOG.md) |
+| 盘里有哪些工具 | [工具清单](docs/toolbox.md) |
+| 构建与发版 | [构建文档](docs/building.md) |
+| 换名称 / 报告抬头 | [定制构建](docs/custom-build.md) |
+| 改代码 | [架构与不变量](docs/architecture.md) · [报告文案规范](docs/report-policy.md) |
+| CI 与公开发布 | [CI](docs/CI.md) · [公开发布](docs/publication.md) |
+
+## 从源码构建
+
+源码在 macOS、Windows、Linux 上都能编辑，**ISO 必须在 x86_64 Ubuntu 24.04 上构建**
+（Apple Silicon 的 Mac 请通过 SSH 连一台 Linux 构建机）。
+
+```bash
+sudo apt-get install -y xorriso squashfs-tools rsync curl ca-certificates \
+                        gdisk fdisk file zstd python3 jq dosfstools mtools
+sudo KLBURN_WORK="$HOME/klburn-build" ./build/build-iso.sh               # 整机版，首次下载约 3.2 GB 源 ISO
+sudo KLBURN_WORK="$HOME/klburn-build" ./build/build-iso.sh --edition mem # 内存专用版
+./tests/run-all.sh                                                       # 源码回归
+```
+
+产物在 `out/`。构建目录要放在 Linux 本地文件系统上，WSL 的 `/mnt/c` 会被拒绝。
+完整说明见[构建文档](docs/building.md)；想换成自己的名称和报告抬头，见[定制构建](docs/custom-build.md)。
+
+<details>
+<summary><b>项目结构</b></summary>
+
+```
+KLBurn/
+├── build/            构建脚本、版本与包列表（config.sh）
+├── rootfs/opt/klburn 盘内程序：factory-test.sh（整机）、memtest.sh（内存）、lib/、report/
+├── tools/            仓库侧工具（批量汇总、报告对比、定制构建），不进盘
+├── tests/            源码回归、变异测试、QEMU 验收
+├── docs/             文档
+├── site/             官网（GitHub Pages）
+└── vendor/           离线包，不进 Git（见 vendor/README.md）
+```
+
+</details>
 
 ---
 
 ## 许可证与联系
 
-**KLBurn 自有原创代码与文档采用 [MIT 许可证](LICENSE)；MIT 不覆盖整个 ISO。**
-发行镜像包含第三方软件、驱动、固件、字体和运行库，各组件适用其各自许可证。
-本项目不改变这些许可证授予的权利或规定的义务，也不代表相关厂商或暗示获得其认证、背书。
+KLBurn 自有的原创代码和文档采用 [MIT 许可证](LICENSE)，**MIT 不覆盖整张 ISO**。
+镜像里的第三方软件、驱动、固件、字体和运行库各自适用其许可证；本项目不改变这些许可证的权利与义务，
+也不代表相关厂商，不暗示获得其认证或背书。第三方归属与分发条件见[第三方许可说明](docs/third-party.md)。
 
-第三方归属、分发条件及对应源码提供要求见[第三方许可说明](docs/third-party.md)。
-软件验收通过不等于第三方许可审查通过；在相关条件落实前，不将候选镜像视为已获公开分发放行。
+问题反馈请提 [Issue](https://github.com/yiyezq162/KLBurn/issues)。版权、许可证或归属问题请发邮件到
+**[yiyezq162@gmail.com](mailto:yiyezq162@gmail.com)**，并写明涉及的版本、文件和权利依据。
+我们核实后，会按适用许可补充声明、修正分发或下架。
 
-联系邮箱：**[yiyezq162@gmail.com](mailto:yiyezq162@gmail.com)**。
-如发现版权、许可证或归属问题，请提供涉及的版本、文件及权利依据；我们将核实，
-并按适用许可采取补充声明、修正分发或下架等措施。此联系与处理机制不替代再分发授权。
-
----
-
-## 先看这里：你是哪种读者
-
-| 你要干的事 | 看这份 |
-|---|---|
-| **只想查一批内存好不好** | [`docs/mem-edition.md`](docs/mem-edition.md) —— **内存专用盘**：开机不问、三分钟、出逐条内存的 SN / 型号 |
-| **拿着盘站在服务器前面** | [`docs/operating.md`](docs/operating.md) —— 每一屏长什么样、怎么选、出问题怎么办 |
-| **看懂跑出来的报告** | [`docs/reports.md`](docs/reports.md) —— 产出哪些文件、哪份交付、六个范围各长什么样 |
-| **做一根 U 盘** | [`docs/usb-rufus.md`](docs/usb-rufus.md) —— Rufus 写盘 + 建 exFAT 分区 |
-| **出盘 / 发版** | [`docs/building.md`](docs/building.md) —— 构建、换抬头、发布顺序 |
-| **定制名称 / 跨平台构建入口** | [`docs/custom-build.md`](docs/custom-build.md) —— 独立工作区、品牌配置、Linux / SSH 后端及严格验收前提 |
-| **源码与 ISO 的许可范围** | [`docs/third-party.md`](docs/third-party.md) —— MIT 覆盖范围、第三方归属与分发审查边界 |
-| **公开发布与官网维护** | [`docs/publication.md`](docs/publication.md) —— 授权闸门、工具 ZIP、静态下载索引和 Pages 验收 |
-| **用 NAS Runner / 构建 VM** | [`docs/CI.md`](docs/CI.md) —— KLBurn 专用 Runner、源码检查与 ISO 发布边界；不共用其他项目 Runner |
-| **想知道盘里有什么工具** | [`docs/toolbox.md`](docs/toolbox.md) —— 每个工具管什么、缺了会怎样 |
-| **改代码** | [`docs/architecture.md`](docs/architecture.md) —— 模块地图、判定总表、**改代码前必读的不变量清单** |
-| **写报告文案** | [`docs/report-policy.md`](docs/report-policy.md) —— 哪些东西绝不能给客户看 |
-| **第一次拿真机跑** | [`docs/first-run-checklist.md`](docs/first-run-checklist.md) —— QEMU 盖不到的那些 |
-| **手里有份旧报告，想知道那张盘当时会干什么** | [`CHANGELOG.md`](CHANGELOG.md)（报告里写着版本号） |
-
----
-
-## 六个入口：整机全测，还是只测一个部件
-
-开机第一个菜单问的是**测什么**：
-
-| 键 | 范围 | 报告目录后缀 | 用在哪 |
-|---|---|---|---|
-| **1** | **全量测试**（默认） | `_Full` | **出厂验收就用它** |
-| 2 | CPU 单独测试 | `_CPU` | 换过 CPU、或怀疑算力 / 算错 |
-| 3 | 内存单独测试 | `_MEM` | 换过内存条、或查 ECC |
-| 4 | 显卡单独测试 | `_GPU` | 只验显卡，不陪跑一整轮 |
-| 5 | 硬盘单独测试 | `_DISK` | 只压盘，**时长全给硬盘** |
-| 6 | 仅导出报告 | `_INFO` | 只要一份配置清单，几分钟出结果 |
-
-不管选哪个，**硬件清单、配置核对、网卡三项都照跑**。范围以外的项目
-**整项不做，报告里也不会出现对应的结论行**。
-
-> ⚠️ **单项专测的报告不能当整机验收依据。** 报告抬头第一行就写着本轮范围，
-> 结论下面还有一句"哪些部件这一轮没测"；"仅导出报告"那一档**不会出现 PASS 大字**。
-> 批次汇总里这些机器写成 `PASS(CPU)` 这种形状，排序筛选时和 `PASS` 不是同一个值。
-
----
-
-## 还有第二种盘：内存专用盘
-
-买到一批有问题的内存、要一台一台过的时候，整机盘太重了。
-同一份源码出第二种盘（`--edition mem`）：
-
-```
-插盘 → 开机 →（什么都不用选）→ 约 3 分钟 → 拔盘
-```
-
-只做两件事：**把每一条内存的槽位 / 厂商 / 型号 / 序列号 / 频率读出来**，
-**验一遍这几条内存现在还能不能用**（压测 + ECC 计数 + 内核日志）。
-硬盘、阵列卡、显卡、电源、BMC、PCIe **完全不碰**，网卡只用来联网校时。
-
-判定口径也不一样：**只有内存坏才 FAIL** —— 坏网卡、坏阵列卡不影响这份结论。
-外加两条**查假条子**的：**同一台机器上两条内存的序列号撞在一起就判 FAIL**
-（序列号写在条子自己的芯片里、厂商唯一分配，正品撞不到一起），报告里那几行整行标红；
-以及**直接读内存条的 SPD 芯片**，两条的出厂记录逐字节相同就是整片被克隆。
-这种条子压测往往是能跑过的，光靠压测抓不住。
-
-报告里还有生产日期（年/周）、Rank、ECC 位宽、颗粒厂商 —— 这些 DMI 里一直都有，
-只是以前没人渲染。同一批正品的生产周次会挨得很近，拼凑翻新的会散得到处都是。
-
-除了 HTML/PDF 报告，还出一份**一条内存一行**的 CSV，多台机器首尾相接就是一张
-总表，按序列号一排序，有问题的那批立刻聚到一起。
-
-详见 [`docs/mem-edition.md`](docs/mem-edition.md)。
-
----
-
-## 它测什么
-
-| 阶段 | 干什么 | 出什么结论 |
-|---|---|---|
-| **① 硬件信息采集** | 整机 / CPU / 内存逐条 / 硬盘（含阵列卡后面的物理盘）/ 网卡 / 显卡 / 电源 / BMC | 硬件清单，"有啥列啥，没有的标未安装" |
-| **② 配置一致性核对** | 同规格部件型号与固件是否一致、内存容量对不对、PCIe 链路有没有降级、序列号对不对得上、平台关键设置 | 不一致判 **WARN**（配置问题，不是硬件坏了） |
-| **③ 性能基准** | CPU 浮点算力、内存带宽、硬盘顺序读写、显卡传输 / 显存带宽 / 卡间互联 | **只报数，不判合格**（见下 ②） |
-| **④ 部件专项验证** | 让部件自己查一遍：处理器计算正确性（SDC）、硬盘 SMART 自检、网卡自检、显卡厂商诊断 | 部件自己说坏了才判 FAIL |
-| **⑤ 压力测试** | CPU / 内存 / 显卡**并发**跑满全部选定时长；硬盘单独跑（要现场确认） | 有失败项 / 超温 / 掉卡判 FAIL |
-| **⑥ 测后复查** | ECC 计数、热节流、PCIe AER、内核日志、BMC 事件、SMART 坏道增长、部件传感器——**全部按压测前后差值判** | 压测把问题逼出来了才判 FAIL |
-
-**⑥ 才是出厂测试真正的价值**：压测本身跑完不出错不代表机器没问题，要看它把什么逼出来了。
-
-完整的判定口径（每一项 PASS / WARN / SKIP / FAIL 各是什么条件）在
-[`architecture.md` §6](docs/architecture.md#六判定规则总表)。
-
----
-
-## 产出什么
-
-| 产物 | 去哪儿 |
-|---|---|
-| **`<目录名>.html` + `.pdf`** | ✅ **随机器交付**，自包含中文报告，双击就能看 |
-| `meta.json` / `results.jsonl` / `*.csv` / `klburn.log` / `SHA256SUMS` | ❌ 内部留档 |
-| `raw\` 整个目录（含 `INTERNAL_*.html` 工程报告） | ❌ 内部，复盘和日后追溯用 |
-| `out/KLBurn-*.iso` | ❌ 内部，出盘用 |
-
-细节见 [`docs/reports.md`](docs/reports.md)。
-
----
-
-## 几个不太一样的地方
-
-这些是踩了现场的坑之后才长成现在这样的，也是这个项目和"随便跑个 stress"的区别。
-
-**① 四态判定，绝不把"没有"说成"坏了"**
-PASS / FAIL / SKIP / WARN 四态。没装阵列卡、没装显卡、没接网线一律 SKIP，
-不影响整机结论；**有卡但认不到**才是 FAIL。整机结论只看有没有 FAIL——
-但**一条判定都没有也不算通过**：那说明这轮压根没跑成，报告会明确写
-「本次测试未产生任何判定结果，本报告无效」，而不是打一个绿色 PASS。
-
-**② 性能数字只报不判，代码里没有任何"阈值 / 参考值"**
-这张盘插上就跑、无人值守，现场没有人、也没有地方去填"这台机器该达到多少"。
-凭空写一个数进来，等于我们替客户定了一个他没定过的标准。
-**谁做验收，谁拿自己的标准去对我们报出来的实测值。**
-
-**③ 测试环境自己的问题，绝不算到客户机器头上**
-内存压测被 OOM 打死 → 判 WARN 并写明"这是测试环境的容量限制，不是内存故障"。
-驱动版本不支持客户的新卡 → 判 SKIP 说"驱动与显卡不匹配"，而不是把好卡说成故障。
-**把好机器拦在出货前，比漏判更糟。**
-
-**④ 阵列卡后面的盘也要真查到**
-RAID 模式下 `/dev/sdX` 是逻辑盘，物理盘根本不在 `/dev` 下——直接读 SMART 读到的
-是逻辑盘、没有任何属性。这意味着"测前测后 SMART 对比"在带阵列卡的机器上会**整项
-空跑**：报告写着 PASS，实际一块物理盘都没查过。现在会自动认出阵列卡逐块透传读取。
-
-**⑤ 日志判读一律抠数字，不做关键字匹配**
-`stressapptest` / `stress-ng` / `gpu_burn` 正常跑完的日志里本来就带
-`errors: 0`、`failed: 0` 这些字样。早期版本用 `grep -q` 判定，
-结果是**每一台好机器都被判 FAIL**。
-
-**⑥ U 盘自己绝不会被写穿**
-fio 的目标盘要过五道排除。Ventoy 场景下 udev 被禁、`lsblk` 完全看不见它的 dm 设备，
-所以反查走的是 `/sys/dev/block/<主:次>` 设备号，不依赖任何 `/dev` 下的名字。
-`tests/test-disk-exclusion.sh` 用 loop + dm-linear 搭出同构设备链专门锁这条路径。
-
-**⑦ 破坏性写入要连过两关**
-原样打出 `yes` 回车（打错、直接回车、120 秒超时一律跳过）→ 最终警告面板再列一遍
-要被擦除的盘，按 `y` 才真的开始。**选了"硬盘单独测试"也照样要过这两关。**
-
-**⑧ 报告落盘有四层回退**
-卷标 → 同一根 U 盘的 exFAT 分区 → 任意可移动盘的 exFAT → dm 映射设备。
-四层都找不到才落 `/tmp`，并在屏幕上打黄色大框警告。
-
-**⑨ 屏幕是给人看的，不是滚动的日志**
-每一块整屏页面开头都是绿色 ASCII 大字标题 + 当前页名——现场那块屏经常被拍照发群里。
-青色框线分区、绿黄红按温度、黄色标出"会被擦掉的盘"。
-**颜色只加在边框层，绝不进内容串**（列宽靠 `printf` 补齐，它数的是字符个数，
-颜色码混进去整屏重绘立刻错位）。核心断言只有一条：
-**把颜色码去掉之后，必须和不上色时一字不差。**
-
-**⑩ 源码回归与变异测试，不替代真实硬件验收**
-
-```bash
-./tests/run-all.sh      # 完整源码回归，包含 shellcheck；计数以本轮输出为准
-./tests/mutate.sh       # 在隔离副本注入故障，守卫必须跑红；计数与耗时以本轮为准
-```
-
-「一个从没红过的测试等于没写」——所以每条守卫都有一条变异专门验证它真的会红。
-
----
-
-## 开发与构建
-
-源码可在 macOS、Windows 或 Linux 编辑；现有 amd64 ISO 的构建与完整测试在
-**x86_64 Ubuntu 24.04** 执行。Mac mini M4 可通过 SSH 使用局域网 Linux 构建机，
-Windows 可使用 WSL。迁移、依赖与发布顺序见 [构建文档](docs/building.md)。
-源码检查已配置 [CI](docs/CI.md)；ISO 构建与发行验收仍在符合条件的独立后端执行。
-
-### 构建 ISO（以下在 Linux 执行）
-
-```bash
-sudo apt-get install -y xorriso squashfs-tools rsync curl ca-certificates \
-                        gdisk fdisk file zstd python3 jq dosfstools mtools
-sudo KLBURN_WORK="$HOME/klburn-build" ./build/build-iso.sh  # 首次下载约 3.2GB 源 ISO
-# 产物在 out/，用 Rufus 写盘（DD 模式），再建一个卷标 KLBURN 的 exFAT 分区
-```
-
-构建目录默认 `~/klburn-build`，应在 Linux 本地文件系统，避免网络或宿主机共享目录。
-WSL 下 `/mnt/c` 等路径会被脚本拒绝。产物在构建机 checkout 的 `out/`。
-完整说明见 [`docs/building.md`](docs/building.md)。
-
----
-
-## 项目结构
-
-```
-KLBurn/
-├── README.md                    本文件（入口索引）
-├── CHANGELOG.md                 每个版本改了什么（拿旧报告回查那张盘的行为）
-├── docs/
-│   ├── operating.md             现场怎么用（六个入口、每一屏、排查）
-│   ├── reports.md           ★   输出的文档：产出什么、哪份交付、六个范围各长什么样
-│   ├── building.md              构建与发布（含发布顺序）
-│   ├── toolbox.md               盘里封了哪些工具、各管什么、缺了会怎样
-│   ├── architecture.md      ★   开发文档（模块地图、判定总表、不变量清单）
-│   ├── report-policy.md     ★   报告文案规范（哪些东西不能给客户看）
-│   ├── first-run-checklist.md   拿到真机时照着过（QEMU 盖不到的那些）
-│   └── usb-rufus.md             Rufus 写盘 + 建 exFAT 分区详细步骤
-├── build/
-│   ├── config.sh            ★   抬头、版本、包列表、层裁剪规则
-│   ├── build-iso.sh             一键构建
-│   ├── build-{gpu-burn,bench,cpuflops,opendcdiag}.sh   编各个可选件
-│   ├── src/klburn-flops.c       CPU 浮点算力程序（链 OpenBLAS，全平台通用）
-│   ├── chroot-setup.sh          chroot 内执行的定制
-│   └── lib/                     日志/挂载管理、grub.cfg 改写
-├── rootfs/                      原样覆盖进 ISO 根文件系统
-│   ├── etc/                     开机自启、tty 免密、屏蔽 nouveau
-│   └── opt/klburn/
-│       ├── factory-test.sh  ★   测试主流程
-│       ├── lib/                 core / ui / storage / collect / conformance / bench /
-│       │                        validate / network / stress / gpu / verify
-│       └── report/
-│           ├── generate_report.py    ★ 交付报告
-│           └── generate_internal.py  ★ 内部工程报告
-├── tools/                       仓库侧 Python 工具，**不进盘**
-│   ├── klburn-summary.py        一批机器一张 CSV（非全量的写成 PASS(CPU) 这种形状）
-│   └── klburn-diff.py           两份 run-dir 逐项对比（只报差异不判合格）
-├── tests/                       源码回归、变异、构建后检查和 QEMU 验收
-│   ├── run-all.sh               一次跑完源码回归（计数以本轮输出为准）
-│   ├── mutate.sh            ★   变异测试（跑在源码副本里、默认并行，真工作区只读）
-│   ├── check-firmware.sh    ★   固件 + vendor 依赖库对账（要一个已构建的 rootfs）
-│   └── e2e-qemu.sh          ★   把 ISO 在 QEMU 里真开机跑一遍（要 root）
-├── vendor/                      离线包（不进版本库，见 vendor/README.md）
-└── out/                         构建产物 ISO
-```
-
-## 第三方归属
+### 第三方归属
 
 整机版使用的 Intel LINPACK 附带 HPL 归属声明：
 
@@ -277,6 +210,4 @@ UEFI 启动组件 shim 所含 OpenSSL／SSLeay 代码的原文致谢：
 >
 > This product includes software written by Tim Hudson (tjh@cryptsoft.com).
 
-完整声明见 [shim 15.8 版权原文](docs/licenses/shim-15.8.COPYRIGHT)。
-这些声明不代表相关机构或作者为 KLBurn 背书，也不代表整张 ISO 已完成分发许可审查。
-各组件仍适用自己的许可，见[第三方分发边界](docs/third-party.md)。
+完整声明见 [shim 15.8 版权原文](docs/licenses/shim-15.8.COPYRIGHT)。这些声明不代表相关机构或作者为 KLBurn 背书。

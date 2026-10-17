@@ -3,46 +3,237 @@
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
-  <meta name="description" content="KLBurn 服务器老化测试启动盘：整机测试与内存专项，中文报告，开源源码与跨平台定制构建入口。">
-  <title>KLBurn · 服务器硬件测试启动盘</title>
+  <meta name="description" content="KLBurn 服务器出厂老化测试启动盘：插上 U 盘开机即测，自动生成中文验收报告。整机测试版与内存专用版，开源。">
+  <meta name="color-scheme" content="light dark">
+  <meta name="theme-color" content="#126044">
+  <title>KLBurn · 服务器出厂老化测试启动盘</title>
   <link rel="icon" href="favicon.svg" type="image/svg+xml">
   <link rel="stylesheet" href="style.css">
   <script src="site.js" defer></script>
 </head>
 <body>
   <a class="skip" href="#main">跳到正文</a>
-  <header class="wrap"><a class="wordmark" href="#main" aria-label="KLBurn 首页">KLBurn<span aria-hidden="true">_</span></a>
-    <nav aria-label="主导航"><a href="#downloads">下载</a><a href="#customize">定制构建</a><a href="#guide">使用说明</a><a href="https://github.com/yiyezq162/KLBurn">GitHub ↗</a></nav>
+
+  <header class="topbar">
+    <div class="wrap topbar-inner">
+      <a class="wordmark" href="#top" aria-label="KLBurn 首页"><img src="favicon.svg" alt="" width="26" height="26">KLBurn</a>
+      <nav aria-label="主导航">
+        <a href="#download">下载</a>
+        <a href="#start">快速上手</a>
+        <a href="#tests">测试内容</a>
+        <a href="#docs">文档</a>
+        <a class="nav-gh" href="https://github.com/yiyezq162/KLBurn">GitHub <span aria-hidden="true">↗</span></a>
+      </nav>
+    </div>
   </header>
+
   <main id="main">
-    <section class="hero wrap">
-      <h1>把硬件测试，<br>装进一根 U 盘。</h1>
-      <div class="intro"><p>整机老化与内存专项，两种启动镜像。<br>测试完成后，生成可留存的中文报告。</p><a class="button" href="#downloads">选择启动镜像 <span aria-hidden="true">↓</span></a>
-        <p class="small">基于 Ubuntu 24.04 · x86_64 服务器 · 无需安装到系统盘</p></div>
-    </section>
-    <section class="wrap section" id="downloads" aria-labelledby="download-heading">
-      <div class="section-heading"><h2 id="download-heading">选择适合这次任务的版本</h2><p id="release-status" role="status">正在读取随网站发布的版本数据…</p></div>
-      <div class="editions">
-        <article><span class="number">01 / FULL</span><h3>整机测试版</h3><p>CPU、内存、显卡、硬盘专项与整机测试。开机选择范围和时长，按实际参与的项目生成结论。</p><ul><li>六种测试范围，避免把专项结果当作整机验收</li><li>性能数字如实报告，不设虚构的合格门槛</li><li>中文 HTML / PDF 与内部原始记录</li></ul><div id="full-download" class="asset"><p class="unavailable">尚无完成公开审查的新版本下载。</p></div></article>
-        <article><span class="number">02 / MEMORY</span><h3>内存专用版</h3><p>开机自动运行，默认约三分钟。读取内存明细，进行短时压测与 ECC 复查，仅针对内存给出结论。</p><ul><li>不进行硬盘、阵列卡、显卡或 BMC 检测</li><li>序列号重复等可疑内存信息单独核查</li><li>中文 HTML / PDF 与逐条内存 CSV</li></ul><div id="mem-download" class="asset"><p class="unavailable">尚无完成公开审查的新版本下载。</p></div></article>
+    <section class="hero" id="top">
+      <div class="wrap hero-grid">
+        <div class="hero-copy">
+          <p class="eyebrow">开源 · 服务器出厂老化测试启动盘</p>
+          <h1>插上 U 盘，开机，<br>走开。</h1>
+          <p class="lead">跑完拔盘，U 盘里就有一份中文验收报告（HTML + PDF）和全部原始数据。不用装系统，也不依赖任何服务端。</p>
+          <div class="actions">
+            <a class="btn btn-primary" href="#download">下载启动镜像</a>
+            <a class="btn btn-ghost" href="#start">快速上手</a>
+          </div>
+          <ul class="facts" aria-label="基本信息">
+            <li>基于 Ubuntu 24.04.4</li>
+            <li>x86_64 服务器</li>
+            <li>UEFI / Legacy</li>
+            <li>MIT 源码</li>
+          </ul>
+        </div>
+        <figure class="terminal" aria-label="开机后的第一个菜单：选择测试范围">
+          <div class="terminal-bar" aria-hidden="true"><span></span><span></span><span></span><b>KLBurn · tty1</b></div>
+<pre><span class="t-dim">+=====================================================+</span>
+<span class="t-dim">|</span>  <span class="t-hi">SELECT TEST SCOPE</span>                                  <span class="t-dim">|</span>
+<span class="t-dim">+=====================================================+</span>
+  [0]  SHELL           root command line
+  <span class="t-sel">[1]  FULL BURN-IN    everything, one session (default)</span>
+  [2]  CPU ONLY        stress + computation validation
+  [3]  MEMORY ONLY     stress + ECC re-check
+  [4]  GPU ONLY        stress + vendor diagnostics
+  [5]  DISK ONLY       still asks before writing
+  [6]  INVENTORY ONLY  collect + cross-check only
+
+  Press 0-6, ENTER to accept.  <span class="t-warn">Auto-select in 34s</span><span class="cursor" aria-hidden="true"></span></pre>
+          <figcaption>开机第一屏：选测试范围，60 秒不按就默认全量。</figcaption>
+        </figure>
       </div>
-      <p class="boundary">QEMU 验证不等于真机硬件验收。短时内存压测也不等于长期稳定性证明。缺少工具或硬件能力时，报告会如实注明未测项目。</p>
     </section>
-    <section class="band" id="customize"><div class="wrap custom-grid"><div><span class="number">BUILD YOUR OWN</span><h2>你的名称。<br>同一套测试原则。</h2><p>在独立工作区设置中文显示名称、报告抬头与可选 PNG 标识。原始源码不变，定制产物明确标记，不会自动上传到官方仓库。</p></div><div><h3>跨平台入口，明确的构建后端</h3><p>Windows、macOS 和 Linux 使用轻量命令行入口。实际 ISO 构建始终在 x86_64 Ubuntu 24.04 完成，可选择 Linux 本机或自行配置的 SSH 构建机。</p><div id="tool-downloads" class="tool-links"><p>工具下载随通过验收的新版本一同发布。</p></div><p class="small">需要 Python 3.10+、Git；SSH 后端还需要 OpenSSH。Apple Silicon 使用远端后端。WSL 需自行安装并满足 KVM 等要求。</p><a class="text-link" href="https://github.com/yiyezq162/KLBurn/blob/main/docs/custom-build.md">查看定制与环境要求 ↗</a></div></div></section>
-    <section class="wrap section" id="guide"><div class="section-heading"><h2>从下载到报告</h2><p>先备份，再写盘。只运行你打算测试的项目。</p></div><ol class="steps"><li><h3>核对 SHA256</h3><p>下载对应版本的 ISO，比对文件哈希。不要混用不同版本或 full / mem 的校验值。</p></li><li><h3>制作启动 U 盘</h3><p>Rufus 使用 DD 映像模式。写盘会覆盖整根 U 盘，先备份已有报告；按文档准备报告分区。</p></li><li><h3>启动并确认范围</h3><p>full 选择范围和时长；mem 自动开始。破坏性硬盘写入有单独确认，不要跳过风险提示。</p></li><li><h3>保存并阅读报告</h3><p>查看结论、范围和未测项。保留版本信息，以便复现；不要公开含序列号的客户原始报告。</p></li></ol><div class="guide-links"><a href="https://github.com/yiyezq162/KLBurn/blob/main/docs/usb-rufus.md">制作 U 盘</a><a href="https://github.com/yiyezq162/KLBurn/blob/main/docs/operating.md">现场操作</a><a href="https://github.com/yiyezq162/KLBurn/blob/main/docs/mem-edition.md">内存版说明</a><a href="https://github.com/yiyezq162/KLBurn/blob/main/docs/reports.md">读懂报告</a></div></section>
-    <section class="wrap section history" id="history"><div><h2>版本与可追溯性</h2><p>稳定版与预发布版明确区分。每次正式交付的 full / mem 使用同一源码 commit 和 annotated tag。</p><div class="guide-links"><a href="https://github.com/yiyezq162/KLBurn/blob/main/CHANGELOG.md">完整更新日志 ↗</a><a href="https://github.com/yiyezq162/KLBurn/releases">历史发布版本 ↗</a></div><p class="small">历史版本以 GitHub 发布记录为准，较早版本不含定制构建工具。</p></div><div id="release-history"><p>公开版本索引尚未发布。不会将旧预发布版自动升级为稳定版。</p></div></section>
-    <section class="wrap section license">
-      <h2>开源，不抹掉软件的来处。</h2>
-      <p>KLBurn 自有原创代码采用 MIT。ISO 中的 Ubuntu、内核、固件、字体、库和第三方工具仍遵守各自许可证；整张 ISO 并非统一采用 MIT。</p>
-      <p>联系：<a href="mailto:yiyezq162@gmail.com">yiyezq162@gmail.com</a>。版权或许可反馈请注明版本、文件及权利依据，我们将核实并按适用许可处理。</p>
-      <p lang="en">This product includes software developed at the University of Tennessee, Knoxville, Innovative Computing Laboratory.</p>
-      <p lang="en">This product includes software developed by the OpenSSL Project for use in the OpenSSL Toolkit. (http://www.openssl.org/)</p>
-      <p lang="en">This product includes cryptographic software written by Eric Young (eay@cryptsoft.com).</p>
-      <p lang="en">This product includes software written by Tim Hudson (tjh@cryptsoft.com).</p>
-      <p class="small">以上为 HPL 及 shim 所含代码的必要归属声明，不代表相关机构或作者为 KLBurn 背书。</p>
-      <div class="guide-links"><a href="https://github.com/yiyezq162/KLBurn">源码</a><a href="https://github.com/yiyezq162/KLBurn/blob/main/LICENSE">MIT 许可证</a><a href="https://github.com/yiyezq162/KLBurn/blob/main/docs/third-party.md">第三方归属与分发说明</a><a href="https://github.com/yiyezq162/KLBurn/blob/main/docs/licenses/shim-15.8.COPYRIGHT">shim 完整版权原文</a><a href="https://github.com/yiyezq162/KLBurn/issues">问题反馈</a></div>
+
+    <section class="section" id="download" aria-labelledby="download-title">
+      <div class="wrap">
+        <div class="section-head">
+          <p class="kicker">下载</p>
+          <h2 id="download-title">两种盘，按任务挑一张</h2>
+          <p>两种盘出自同一份源码、同一个版本号，每次成对发布。</p>
+        </div>
+        <div class="status" role="status"><span class="dot" aria-hidden="true"></span><p id="release-status">正在读取版本数据…</p></div>
+        <div class="editions">
+          <article class="edition">
+            <div class="edition-head"><span class="tag">FULL</span><h3>整机测试版</h3></div>
+            <p class="edition-sub">出厂验收、整机老化</p>
+            <ul class="checks">
+              <li>开机选范围（全量 / CPU / 内存 / 显卡 / 硬盘 / 仅清单）和时长</li>
+              <li>采集 → 核对 → 基准 → 专项验证 → 压测 → 测后复查</li>
+              <li>不按任何键，默认「全量 + 标准 30 分钟」</li>
+            </ul>
+            <div id="full-download" class="asset"><p class="muted">暂未公开下载，可<a href="https://github.com/yiyezq162/KLBurn/blob/main/docs/building.md">从源码构建</a>。</p></div>
+          </article>
+          <article class="edition">
+            <div class="edition-head"><span class="tag">MEM</span><h3>内存专用版</h3></div>
+            <p class="edition-sub">一批内存逐台过筛、查假条子</p>
+            <ul class="checks">
+              <li>什么都不用选，约 3 分钟出结果</li>
+              <li>逐条读出槽位、型号、序列号、生产周次，压测并查 ECC</li>
+              <li>序列号重复、SPD 被克隆都会标出；只有内存坏才判 FAIL</li>
+            </ul>
+            <div id="mem-download" class="asset"><p class="muted">暂未公开下载，可<a href="https://github.com/yiyezq162/KLBurn/blob/main/docs/building.md">从源码构建</a>。</p></div>
+          </article>
+        </div>
+        <div class="more-downloads">
+          <div>
+            <h3>定制构建工具</h3>
+            <p class="muted">换成自己的名称、报告抬头和标识。Windows / macOS / Linux 提供命令行入口，ISO 在 x86_64 Ubuntu 24.04 上构建（本机或 SSH 构建机）。</p>
+            <div id="tool-downloads" class="pills"><p class="muted">工具包随通过验收的版本一起发布。</p></div>
+            <a class="text-link" href="https://github.com/yiyezq162/KLBurn/blob/main/docs/custom-build.md">定制与环境要求 ↗</a>
+          </div>
+          <div>
+            <h3>历史版本</h3>
+            <div id="release-history"><p class="muted">公开版本索引还没有内容。</p></div>
+            <a class="text-link" href="https://github.com/yiyezq162/KLBurn/releases">GitHub Releases ↗</a>
+            <a class="text-link" href="https://github.com/yiyezq162/KLBurn/blob/main/CHANGELOG.md">更新日志 ↗</a>
+          </div>
+        </div>
+      </div>
+    </section>
+
+    <section class="section alt" id="start" aria-labelledby="start-title">
+      <div class="wrap">
+        <div class="section-head">
+          <p class="kicker">快速上手</p>
+          <h2 id="start-title">从下载到报告，四步</h2>
+          <p>需要一根 16 GB 左右的 U 盘和一台 Windows 电脑（用来写盘、看报告）。</p>
+        </div>
+        <ol class="steps">
+          <li>
+            <h3>校验镜像</h3>
+            <p>下载 ISO 后比对 SHA256。full 和 mem 的校验值不一样，别混用。</p>
+          </li>
+          <li>
+            <h3>制作 U 盘</h3>
+            <p>用 <a href="https://rufus.ie/zh/">Rufus</a> 写盘，分区类型选 GPT。点「开始」后<strong>必须选「DD 映像模式」</strong>；写完 Windows 提示格式化时点取消。</p>
+          </li>
+          <li>
+            <h3>建报告分区</h3>
+            <p>在 U 盘剩余空间新建一个 <strong>exFAT</strong> 分区，卷标写 <code>KLBURN</code>（全大写），报告就存在这里。</p>
+          </li>
+          <li>
+            <h3>开机，等报告</h3>
+            <p>BIOS 启动菜单选 U 盘，选好范围和时长后就可以离开。出现 PASS / FAIL 大字后拔盘，打开 <code>.html</code> 或 <code>.pdf</code> 报告。</p>
+          </li>
+        </ol>
+        <p class="warn"><strong>注意：</strong>写盘会清空整根 U 盘。硬盘压测会擦除被测服务器的数据盘，所以要确认两次，默认跳过。</p>
+        <div class="link-row">
+          <a href="https://github.com/yiyezq162/KLBurn/blob/main/docs/usb-rufus.md">U 盘制作详细步骤</a>
+          <a href="https://github.com/yiyezq162/KLBurn/blob/main/docs/operating.md">现场每一屏怎么操作</a>
+          <a href="https://github.com/yiyezq162/KLBurn/blob/main/docs/reports.md">读懂报告</a>
+        </div>
+      </div>
+    </section>
+
+    <section class="section" id="tests" aria-labelledby="tests-title">
+      <div class="wrap">
+        <div class="section-head">
+          <p class="kicker">测试内容</p>
+          <h2 id="tests-title">六个阶段，压测之后还要复查</h2>
+          <p>压测跑完不报错，不等于机器没问题，关键要看压测把什么问题逼了出来。</p>
+        </div>
+        <ol class="phases">
+          <li><b>采集</b><span>整机、CPU、逐条内存、硬盘（含阵列卡后的物理盘）、网卡、显卡、电源、BMC</span></li>
+          <li><b>核对</b><span>同规格部件的型号与固件、内存容量、PCIe 降级、序列号。配置不一致判 WARN</span></li>
+          <li><b>基准</b><span>CPU 浮点、内存带宽、硬盘读写、显卡带宽与互联。只报数，不判合格</span></li>
+          <li><b>专项</b><span>CPU 计算正确性、SMART 自检、网卡自检、显卡厂商诊断</span></li>
+          <li><b>压测</b><span>CPU / 内存 / 显卡并发跑满时长，硬盘单独跑</span></li>
+          <li><b>复查</b><span>ECC、热节流、PCIe AER、内核日志、BMC 事件、SMART 增量，都按压测前后的差值判</span></li>
+        </ol>
+
+        <h3 class="sub-title">整机版的六个范围</h3>
+        <div class="scopes">
+          <div class="scope main"><kbd>1</kbd><div><b>全量测试</b><span>出厂验收用这个 · <code>_Full</code></span></div></div>
+          <div class="scope"><kbd>2</kbd><div><b>CPU</b><span>换过 CPU、怀疑算错 · <code>_CPU</code></span></div></div>
+          <div class="scope"><kbd>3</kbd><div><b>内存</b><span>换过内存、查 ECC · <code>_MEM</code></span></div></div>
+          <div class="scope"><kbd>4</kbd><div><b>显卡</b><span>只验显卡 · <code>_GPU</code></span></div></div>
+          <div class="scope"><kbd>5</kbd><div><b>硬盘</b><span>时长全给硬盘 · <code>_DISK</code></span></div></div>
+          <div class="scope"><kbd>6</kbd><div><b>仅导出报告</b><span>几分钟出配置清单 · <code>_INFO</code></span></div></div>
+        </div>
+        <p class="note">单项范围的报告不能当整机验收依据，报告抬头会写明本轮范围。</p>
+      </div>
+    </section>
+
+    <section class="section alt" aria-labelledby="principles-title">
+      <div class="wrap">
+        <div class="section-head">
+          <p class="kicker">判定原则</p>
+          <h2 id="principles-title">宁可说「没测」，也不乱判</h2>
+        </div>
+        <div class="cards">
+          <article><h3>四态判定</h3><p>PASS / WARN / SKIP / FAIL。没装显卡、没接网线判 SKIP，装了却认不到才判 FAIL。一条判定都没有时，报告会写明本报告无效。</p></article>
+          <article><h3>性能只报不判</h3><p>代码里没有任何「参考值」。由做验收的人，用自己的标准去对实测数据。</p></article>
+          <article><h3>不冤枉好机器</h3><p>测试环境自己的问题（比如 OOM、驱动不支持新卡）判 WARN 或 SKIP，并写明原因。</p></article>
+          <article><h3>阵列卡后面也查</h3><p>自动识别 RAID 卡，逐块透传读物理盘的 SMART，避免「报告写 PASS，一块盘都没查」。</p></article>
+          <article><h3>不会写坏启动盘</h3><p>硬盘压测的目标盘要经过五道排除，Ventoy 场景按设备号反查；破坏性写入要确认两次。</p></article>
+          <article><h3>报告一定落盘</h3><p>报告分区有四层回退查找，都找不到时屏幕上会给黄色大框警告，不会悄悄丢报告。</p></article>
+        </div>
+      </div>
+    </section>
+
+    <section class="section" id="docs" aria-labelledby="docs-title">
+      <div class="wrap">
+        <div class="section-head">
+          <p class="kicker">文档</p>
+          <h2 id="docs-title">按你要做的事找</h2>
+        </div>
+        <div class="docs">
+          <a href="https://github.com/yiyezq162/KLBurn/blob/main/docs/usb-rufus.md"><b>做一根 U 盘</b><span>Rufus 写盘 + exFAT 分区</span></a>
+          <a href="https://github.com/yiyezq162/KLBurn/blob/main/docs/operating.md"><b>现场操作</b><span>每一屏长什么样、出问题怎么办</span></a>
+          <a href="https://github.com/yiyezq162/KLBurn/blob/main/docs/reports.md"><b>读懂报告</b><span>产出哪些文件、哪份交付</span></a>
+          <a href="https://github.com/yiyezq162/KLBurn/blob/main/docs/mem-edition.md"><b>内存专用版</b><span>三分钟过一台、查假条子</span></a>
+          <a href="https://github.com/yiyezq162/KLBurn/blob/main/docs/first-run-checklist.md"><b>真机首跑清单</b><span>QEMU 覆盖不到的检查项</span></a>
+          <a href="https://github.com/yiyezq162/KLBurn/blob/main/docs/building.md"><b>从源码构建</b><span>x86_64 Ubuntu 24.04</span></a>
+          <a href="https://github.com/yiyezq162/KLBurn/blob/main/docs/toolbox.md"><b>工具清单</b><span>盘里有什么、缺了会怎样</span></a>
+          <a href="https://github.com/yiyezq162/KLBurn/blob/main/docs/architecture.md"><b>架构与不变量</b><span>改代码前必读</span></a>
+        </div>
+      </div>
+    </section>
+
+    <section class="section alt license" aria-labelledby="license-title">
+      <div class="wrap license-grid">
+        <div>
+          <h2 id="license-title">许可与归属</h2>
+          <p>KLBurn 自有的原创代码采用 <a href="https://github.com/yiyezq162/KLBurn/blob/main/LICENSE">MIT</a>。ISO 里的 Ubuntu、内核、固件、字体、运行库和第三方工具仍适用各自的许可证，整张 ISO 并不统一采用 MIT。见<a href="https://github.com/yiyezq162/KLBurn/blob/main/docs/third-party.md">第三方归属与分发说明</a>。</p>
+          <p>问题反馈请提 <a href="https://github.com/yiyezq162/KLBurn/issues">Issue</a>。版权或许可问题请发邮件到 <a href="mailto:yiyezq162@gmail.com">yiyezq162@gmail.com</a>，并写明版本、文件和权利依据。我们核实后会按适用许可处理。</p>
+        </div>
+        <div class="attribution">
+          <p lang="en">This product includes software developed at the University of Tennessee, Knoxville, Innovative Computing Laboratory.</p>
+          <p lang="en">This product includes software developed by the OpenSSL Project for use in the OpenSSL Toolkit. (http://www.openssl.org/)</p>
+          <p lang="en">This product includes cryptographic software written by Eric Young (eay@cryptsoft.com).</p>
+          <p lang="en">This product includes software written by Tim Hudson (tjh@cryptsoft.com).</p>
+          <p class="muted small">以上是 HPL 和 shim 所含代码的必要归属声明，不代表相关机构或作者为 KLBurn 背书。<a href="https://github.com/yiyezq162/KLBurn/blob/main/docs/licenses/shim-15.8.COPYRIGHT">shim 完整版权原文</a></p>
+        </div>
+      </div>
     </section>
   </main>
-  <footer class="wrap"><span class="wordmark">KLBurn<span aria-hidden="true">_</span></span><p>测试有边界，结论有依据。</p><a href="#main">返回顶部 ↑</a></footer>
+
+  <footer class="footer">
+    <div class="wrap footer-inner">
+      <span class="wordmark"><img src="favicon.svg" alt="" width="22" height="22">KLBurn</span>
+      <p>测试有边界，结论有依据。</p>
+      <a href="#top">返回顶部 ↑</a>
+    </div>
+  </footer>
 </body>
 </html>
