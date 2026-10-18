@@ -26,6 +26,20 @@ def run(script, inputs=''):
 
 
 class DiskConsoleTests(unittest.TestCase):
+    def test_terminal_nonblocking_input_does_not_leak_to_parent(self):
+        for terminal_rc in (0, 1, 124):
+            with self.subTest(terminal_rc=terminal_rc):
+                result = run(f'''
+timeout() {{
+  python3 -c 'import fcntl,os; fcntl.fcntl(0,fcntl.F_SETFL,fcntl.fcntl(0,fcntl.F_GETFL)|os.O_NONBLOCK)'
+  return {terminal_rc}
+}}
+setterm() {{ :; }}
+disk_confirm_console 2 || true
+python3 -c 'import fcntl,os; assert not fcntl.fcntl(0,fcntl.F_GETFL)&os.O_NONBLOCK'
+''')
+                self.assertEqual(result.returncode, 0, result.stderr)
+
     def test_both_languages_and_early_write_warning(self):
         result = run('KLB_DISK_CJK=1; confirm_disk_write 2', 'y\nyes\n')
         self.assertEqual(result.returncode, 0, result.stderr)

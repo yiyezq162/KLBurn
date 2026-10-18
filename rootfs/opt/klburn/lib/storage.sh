@@ -405,7 +405,10 @@ disk_confirm_console() {
   # 总超时是两道原有倒计时外加启动余量，异常退出不能留下无人值守的终端。
   HOME="$session" LC_ALL=C.UTF-8 timeout --foreground --kill-after=5s "$(( timeout + 75 ))" \
     fbterm --font-names='WenQuanYi Micro Hei Mono' --font-size=16 \
-    -- /bin/bash /opt/klburn/disk-confirm-console.sh "$session" "$timeout" || terminal_rc=$?
+    -- /bin/bash /opt/klburn/disk-confirm-console.sh "$session" "$timeout" \
+    < /proc/self/fd/0 || terminal_rc=$?
+  # 重新打开 stdin 创建独立的 open file description；dup/子 shell 仍会共享状态。
+  # FbTerm 对 dup(stdin) 设置 O_NONBLOCK 且不恢复，不能让它污染主流程收尾菜单。
   # FbTerm 1.7 的 Screen 析构会发送 ESC[9;10]，重新启用十分钟熄屏。
   # 无论确认成功、拒绝还是终端异常，都恢复主流程原有的不熄屏策略。
   setterm -blank 0 -powersave off 2>/dev/null || true

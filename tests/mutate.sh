@@ -53,6 +53,7 @@ RT="rootfs/opt/klburn"
 S=$'\x1f'
 MUTATIONS=(
 "disk-console-restores-blanking${S}中文终端退出后不恢复原有禁用熄屏策略${S}test-disk-console${S}$RT/lib/storage.sh${S}mut_disk_console_restores_blanking"
+"disk-console-input-isolation${S}中文终端污染父进程标准输入状态${S}test-disk-console${S}$RT/lib/storage.sh${S}mut_disk_console_input_isolation"
 "disk-console-no-receipt${S}终端正常退出就授权而不检查两次确认凭据${S}test-disk-console${S}$RT/lib/storage.sh${S}mut_disk_console_no_receipt"
 "disk-console-abnormal-exit${S}终端异常退出后仍接收授权${S}test-disk-console${S}$RT/lib/storage.sh${S}mut_disk_console_abnormal_exit"
 "ssh-source-exec-mode${S}SSH 归档丢掉 Git 执行位，发送端干净但接收端无法启动${S}test-customize${S}tools/customize/klburn-builder.py${S}mut_ssh_source_exec_mode"
@@ -1240,6 +1241,10 @@ mut_psu_bench_wiring_warn() {
 # 连反悔的余地都没有；而且和第一关（打 yes 再回车）是两种交互。
 mut_disk_console_restores_blanking() {
   delete_line "$RT/lib/storage.sh" '  setterm -blank 0 -powersave off 2>/dev/null || true'
+}
+
+mut_disk_console_input_isolation() {
+  replace_line "$RT/lib/storage.sh" '    < /proc/self/fd/0 || terminal_rc=$?' '    || terminal_rc=$?'
 }
 
 mut_disk_console_no_receipt() {
