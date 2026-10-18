@@ -25,7 +25,7 @@ git tag -l --sort=version:refname
 
 另有候选 tag：`v1.11.2` `v1.11.3` `v1.11.5` `v1.11.6` `v1.11.7` `v1.11.8` `v1.11.11`；候选 tag 不等于 GitHub Release 或公开发布。
 
-## v1.11.11（候选版本，尚未发布）
+## v1.11.11（公开预发布候选）
 
 - 两道中文确认单独重新打开标准输入，隔离 FbTerm 对输入描述符设置的
   `O_NONBLOCK`，避免正常测试结束后收尾菜单报 EAGAIN。保留不熄屏恢复，
@@ -33,7 +33,8 @@ git tag -l --sort=version:refname
 - 1.11.10 长测末段实际截图确认屏幕仍亮，但收尾菜单读键报错，因此不交付、
   不打 tag。源码测试通过不代替实际菜单与双版验收。
 - full/mem 从同一干净提交 `ec73e66` 构建，annotated tag `v1.11.11`
-  指向该提交；源码与标签已按所有者授权推送，未发布 ISO 或创建 Release。
+  指向该提交；源码与标签已推送。所有者明确要求公开后，Release 已从草稿转为
+  公开预发布，附 full/mem ISO 和 SHA256SUMS；未提升为稳定版或修改旧资产。
   源码 2149/0（含 root 磁盘排除 11/0），变异
   146 抓住、0 逃逸、0 施加失败；129 个提交文件及权限与受测快照一致。
   full 固件/依赖 52/0、BIOS 冒烟 10/0、隔离 QEMU 完整写盘 32/0；
@@ -45,7 +46,8 @@ git tag -l --sort=version:refname
   界面验收通过。mem 三张启动/完成图已看，启动警告及缺序列号 FAIL 原样保留。
   full 原始结果为 17 PASS / 20 SKIP / 2 WARN，mem 为 6 PASS / 1 FAIL /
   2 SKIP（QEMU 缺 DIMM 序列号）；不等于真机硬件验收。当前版 UEFI、真机、
-  Secure Boot 与公开分发 NOT_RUN。首轮源码归档误带 macOS AppleDouble 导致
+  Secure Boot 为 NOT_RUN。新增 FbTerm 的精确版本对应源码交付记录仍待核对，
+  公开状态不代表分发审查已完成。首轮源码归档误带 macOS AppleDouble 导致
   lint 两项失败，改用无扩展属性的独立快照重跑，原失败日志保留。
 
 ## v1.11.10（视觉验收未通过，未交付）
