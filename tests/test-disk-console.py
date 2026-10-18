@@ -101,6 +101,25 @@ disk_confirm_console 2
                 else:
                     self.assertTrue((session / 'reason').read_text().strip())
 
+    def test_terminal_exit_restores_original_no_blanking_policy(self):
+        for terminal_rc, receipt in ((0, 'confirmed'), (0, ''), (1, ''), (124, 'confirmed')):
+            with self.subTest(terminal_rc=terminal_rc, receipt=receipt):
+                result = run(f'''
+timeout() {{
+  local session="${{@: -2:1}}"
+  printf '%s\\n' '{receipt}' > "$session/result"
+  printf 'TERMINAL_EXIT\\n'
+  return {terminal_rc}
+}}
+setterm() {{ printf 'SETTERM %s\\n' "$*"; }}
+disk_confirm_console 2 || true
+''')
+                self.assertEqual(result.returncode, 0, result.stderr)
+                self.assertIn('SETTERM -blank 0 -powersave off', result.stdout)
+                self.assertIn('SETTERM -cursor on', result.stdout)
+                self.assertLess(result.stdout.index('TERMINAL_EXIT'),
+                                result.stdout.index('SETTERM -blank 0 -powersave off'))
+
 
 if __name__ == '__main__':
     outcome = unittest.TextTestRunner(verbosity=2).run(

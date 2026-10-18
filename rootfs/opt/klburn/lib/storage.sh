@@ -406,6 +406,10 @@ disk_confirm_console() {
   HOME="$session" LC_ALL=C.UTF-8 timeout --foreground --kill-after=5s "$(( timeout + 75 ))" \
     fbterm --font-names='WenQuanYi Micro Hei Mono' --font-size=16 \
     -- /bin/bash /opt/klburn/disk-confirm-console.sh "$session" "$timeout" || terminal_rc=$?
+  # FbTerm 1.7 的 Screen 析构会发送 ESC[9;10]，重新启用十分钟熄屏。
+  # 无论确认成功、拒绝还是终端异常，都恢复主流程原有的不熄屏策略。
+  setterm -blank 0 -powersave off 2>/dev/null || true
+  setterm -cursor on 2>/dev/null || true
   if (( terminal_rc == 0 )) && [[ -f "$session/result" ]] && [[ "$(< "$session/result")" == confirmed ]]; then
     rc=0
   else
