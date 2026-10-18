@@ -39,7 +39,7 @@ apt-get update -qq || fail "apt update 失败（检查 WSL 网络 / 镜像地址
 
 # ---------------------------------------------------------------- 装包
 PKGS=( "${PKGS_COLLECT[@]}" "${PKGS_DIAG[@]}" "${PKGS_NET[@]}" "${PKGS_STRESS[@]}"
-       "${PKGS_MISC[@]}" "${PKGS_REPORT[@]}" "${PKGS_PLATFORM[@]}" )
+       "${PKGS_MISC[@]}" "${PKGS_REPORT[@]}" "${PKGS_PLATFORM[@]}" "${PKGS_DISK_CONSOLE[@]}" )
 if [[ "${KLBURN_EDITION:-full}" == "mem" ]]; then
   # 源镜像本来就带有部分整机工具，只是不安装仍会留下它们。
   # 仅清除配置中明确列出的整机专属包，保留共享包与全部内核驱动。
@@ -81,6 +81,10 @@ verify_tools() {
   for entry in "${required[@]}"; do
     command -v "$entry" >/dev/null 2>&1 || missing+=("$entry")
   done
+  if [[ "${KLBURN_EDITION:-full}" == "full" ]]; then
+    command -v fbterm >/dev/null 2>&1 || missing+=(fbterm)
+    [[ -r /usr/share/fonts/truetype/wqy/wqy-microhei.ttc ]] || missing+=(wqy-microhei.ttc)
+  fi
   if ((${#missing[@]})); then
     fail "$when：以下工具不存在: ${missing[*]}"
   fi

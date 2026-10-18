@@ -11,7 +11,7 @@
 # ⚠️ 改完脚本要「先 bump 再构建」。0.3.0 就栽过一次：ISO 构建完之后又改了
 # core.sh/collect.sh 却没动版本号，于是现场那根盘自称 0.3.0、跑的却是修复前的
 # 代码（lshw 卡满 90s、屏幕上冒 Killed），对着仓库怎么看都对不上。
-KLBURN_VERSION="1.11.8"
+KLBURN_VERSION="1.11.9"
 
 # ================================================================
 # 版本（edition）：这张盘是整机全测盘，还是内存专用盘
@@ -376,6 +376,8 @@ PKGS_MISC=(
 PKGS_REPORT=(
   weasyprint fonts-wqy-microhei
 )
+# 仅 full 的破坏性硬盘确认屏使用；复用报告已有的中文字体。
+PKGS_DISK_CONSOLE=(fbterm)
 # CPU 微码 / 平台守护进程
 #
 # 这几个本来是 `linux-image-generic` 的 Recommends，带的是**自动安装**标记。

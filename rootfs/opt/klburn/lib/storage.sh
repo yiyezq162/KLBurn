@@ -391,6 +391,39 @@ scan_disks() {
 
 # ---------------------------------------------------------------- 破坏性写确认
 # 返回 0 = 用户确认，可以写；返回 1 = 跳过硬盘压测
+# fbterm 只包住确认界面，结束后回到原来的 Linux 控制台。
+# 不使用终端进程的退出码作为授权：只有子进程完成两道确认后写出的凭据才有效。
+disk_confirm_console() {
+  local timeout="$1" session rc=1 terminal_rc=0
+  DISK_SKIP_REASON="中文确认界面未完成，跳过破坏性硬盘测试"
+  session="$(mktemp -d /tmp/klburn-confirm.XXXXXX)" || return 1
+  if ! (umask 077; declare -p DISK_CAND DISK_INFO DISK_EXCLUDED MAIN_LOG > "$session/state"); then
+    rmdir "$session" 2>/dev/null || true
+    return 1
+  fi
+  # 独立 HOME 不读取现场用户的 fbterm 配置/输入法，不改变全局 locale 或字体。
+  # 总超时是两道原有倒计时外加启动余量，异常退出不能留下无人值守的终端。
+  HOME="$session" LC_ALL=C.UTF-8 timeout --foreground --kill-after=5s "$(( timeout + 75 ))" \
+    fbterm --font-names='WenQuanYi Micro Hei Mono' --font-size=16 \
+    -- /bin/bash /opt/klburn/disk-confirm-console.sh "$session" "$timeout" || terminal_rc=$?
+  if (( terminal_rc == 0 )) && [[ -f "$session/result" ]] && [[ "$(< "$session/result")" == confirmed ]]; then
+    rc=0
+  else
+    DISK_SKIP_REASON="中文确认界面未完成，跳过破坏性硬盘测试"
+    [[ ! -f "$session/reason" ]] || DISK_SKIP_REASON="$(< "$session/reason")"
+    warn "Disk confirmation not completed; destructive disk testing is SKIPPED."
+  fi
+  rm -f -- "$session/state" "$session/started" "$session/result" "$session/reason" "$session/.fbtermrc"
+  rmdir -- "$session" 2>/dev/null || true
+  return "$rc"
+}
+
+# 中文只在我们启动的中文终端中输出，裸 VT/串口保留完整英文安全信息。
+disk_warning_zh() {
+  [[ "${KLB_DISK_CJK:-0}" != 1 ]] || printf '  %s\n' "$1"
+  return 0
+}
+
 confirm_disk_write() {
   local timeout="${1:-120}"
 
@@ -398,13 +431,29 @@ confirm_disk_write() {
     return 1
   fi
 
+  if [[ "${KLB_DISK_CJK:-0}" != 1 && "${TERM:-}" == linux && -t 0 && -t 1 && -c /dev/fb0 ]] \
+      && command -v fbterm >/dev/null 2>&1 \
+      && [[ -r /usr/share/fonts/truetype/wqy/wqy-microhei.ttc ]]; then
+    disk_confirm_console "$timeout"
+    return $?
+  fi
+
   brand_bar "$(panel_width)" "DISK STRESS CONFIRM"
   section "DISK STRESS TEST  (OPTIONAL, DESTRUCTIVE)"
   printf '  Disk %sinventory%s (model / capacity / serial / firmware / SMART health)\n' "$C_GRN" "$C_RST"
   printf '  has %salready been collected%s and will appear in the report either way.\n\n' "$C_GRN" "$C_RST"
   printf '%s' "$C_RED$C_BLD"
-  printf '  The optional STRESS test makes fio write RANDOM DATA directly to the\n'
-  printf '  RAW DEVICES listed below. ALL DATA ON THEM WOULD BE DESTROYED.\n'
+  disk_warning_zh '警告：破坏性硬盘测试'
+  printf '  WARNING: DESTRUCTIVE DISK TEST\n\n'
+  disk_warning_zh '测试将直接向下列硬盘写入数据，覆盖原有内容！'
+  printf '  This test writes directly to the disks listed below,\n'
+  printf '  overwriting existing data!\n\n'
+  disk_warning_zh '写入测速阶段就会覆盖数据，无需等到硬盘压力测试。'
+  printf '  Data overwriting begins during the write benchmark,\n'
+  printf '  BEFORE the disk stress test.\n\n'
+  disk_warning_zh '测试导致数据丢失，一切损失由测试者负责。'
+  printf '  The test causes data loss. The operator is responsible\n'
+  printf '  for all resulting losses.\n'
   printf '%s' "$C_RST"
   printf '  %sDefault is to SKIP. Only continue if you really mean to wipe these disks.%s\n\n' "$C_YEL" "$C_RST"
 
@@ -446,7 +495,9 @@ confirm_disk_write() {
   #
   #    ⚠️ 放宽的**只有认哪些字符串**。两关都要回车、两关都在、默认全是跳过，
   #      这三条一个都没动，test-hw-checks 和 mutate 里各有断言钉着。
+  disk_warning_zh '输入 y 或 yes 并按回车，进入最终确认。'
   printf '  %sType  y  or  yes  and press ENTER to continue to the final confirmation.%s\n' "$C_BLD" "$C_RST"
+  disk_warning_zh '直接回车、其他输入或超时：跳过破坏性硬盘测试。'
   printf '  %sENTER alone, any other text (typo included), or %ds timeout  ->  SKIP.%s\n\n' \
     "$C_GRY" "$timeout" "$C_RST"
 
@@ -473,10 +524,17 @@ confirm_disk_write() {
   # ---------------- 第 2 关：最终警告面板 ----------------
   printf '\n%s' "$C_RED$C_BLD"
   printf '  +==========================================================+\n'
-  printf '  |                    F I N A L   W A R N I N G             |\n'
+  disk_warning_zh '                  最终警告'
+  printf '                    FINAL WARNING\n'
   printf '  +==========================================================+\n'
-  printf '  |  These disks are about to be OVERWRITTEN with random data|\n'
-  printf '  |  This CANNOT be undone.                                  |\n'
+  disk_warning_zh '下列硬盘上的原有数据将被覆盖，此操作无法撤销！'
+  printf '  Existing data on the disks below will be overwritten.\n'
+  printf '  This action CANNOT be undone!\n\n'
+  disk_warning_zh '请确认重要数据已备份，再继续测试。'
+  printf '  Back up all important data before proceeding.\n\n'
+  disk_warning_zh '测试导致数据丢失，一切损失由测试者负责。'
+  printf '  The test causes data loss. The operator is responsible\n'
+  printf '  for all resulting losses.\n'
   printf '  +==========================================================+\n'
   printf '%s' "$C_RST"
   local rec path size model serial rota tran pttype
@@ -497,9 +555,12 @@ confirm_disk_write() {
   # `[n]` 那一项也去掉了 —— "不擦"是默认动作，不需要专门给它一个按键，
   # 列出来反而让人以为"必须选一个"。
   printf '  %s[YES]%s  erase and stress-test these disks\n' "$C_BLD" "$C_RST"
-  printf '  %s       type  y  or  yes  and press ENTER. Anything else%s\n' "$C_GRY" "$C_RST"
-  printf '  %s       (typo, ENTER alone, or %ds timeout) SKIPS the test.%s\n\n' \
-    "$C_GRY" "60" "$C_RST"
+  disk_warning_zh '输入 y 或 yes 并按回车，授权覆盖数据并继续测试。'
+  printf '  Type y or yes and press ENTER to authorize\n'
+  printf '  data overwriting and continue testing.\n'
+  disk_warning_zh '直接回车、其他输入或超时：跳过破坏性硬盘测试。'
+  printf '  %sENTER alone, any other input, or %ds timeout:\n' "$C_GRY" "60"
+  printf '  SKIP destructive disk testing.%s\n\n' "$C_RST"
 
   local answer2="" final_timeout=60
   if ! read_line_countdown answer2 "$final_timeout" \

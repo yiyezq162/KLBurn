@@ -52,6 +52,8 @@ RT="rootfs/opt/klburn"
 # 让函数兼职报告文件名的话就得先跑一次再回滚，那才是真正危险的设计。
 S=$'\x1f'
 MUTATIONS=(
+"disk-console-no-receipt${S}终端正常退出就授权而不检查两次确认凭据${S}test-disk-console${S}$RT/lib/storage.sh${S}mut_disk_console_no_receipt"
+"disk-console-abnormal-exit${S}终端异常退出后仍接收授权${S}test-disk-console${S}$RT/lib/storage.sh${S}mut_disk_console_abnormal_exit"
 "ssh-source-exec-mode${S}SSH 归档丢掉 Git 执行位，发送端干净但接收端无法启动${S}test-customize${S}tools/customize/klburn-builder.py${S}mut_ssh_source_exec_mode"
 "ssh-receiver-mode-check${S}接收端继承 filemode=false，执行位篡改无法触发脏源码守卫${S}test-customize${S}tools/customize/klburn-builder.py${S}mut_ssh_receiver_mode_check"
 "package-notice-wrong-version${S}用另一版本版权文本填补缺失声明（基础包精确版本绑定失效）${S}test-package-notices${S}build/package-notices.py${S}mut_package_notice_wrong_version"
@@ -1235,6 +1237,18 @@ mut_psu_bench_wiring_warn() {
 
 # 1.9.9：破坏性写确认的第二关退回单键。按下 y 的一瞬间就开始擦盘，
 # 连反悔的余地都没有；而且和第一关（打 yes 再回车）是两种交互。
+mut_disk_console_no_receipt() {
+  replace_line "$RT/lib/storage.sh" \
+    '  if (( terminal_rc == 0 )) && [[ -f "$session/result" ]] && [[ "$(< "$session/result")" == confirmed ]]; then' \
+    '  if (( terminal_rc == 0 )); then'
+}
+
+mut_disk_console_abnormal_exit() {
+  replace_line "$RT/lib/storage.sh" \
+    '  if (( terminal_rc == 0 )) && [[ -f "$session/result" ]] && [[ "$(< "$session/result")" == confirmed ]]; then' \
+    '  if [[ -f "$session/result" ]] && [[ "$(< "$session/result")" == confirmed ]]; then'
+}
+
 mut_disk_confirm_single_key() {
   replace_line "$RT/lib/storage.sh" \
     '  if ! read_line_countdown answer2 "$final_timeout" \' \

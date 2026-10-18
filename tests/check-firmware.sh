@@ -409,7 +409,7 @@ if grep -qx 'KLBURN_EDITION="mem"' "$ROOTFS/opt/klburn/klburn.conf"; then
   mapfile -t EXTRA_TOOLS < <(find "$ROOTFS/opt/klburn/tools" -type f 2>/dev/null)
   (( ${#EXTRA_TOOLS[@]} == 0 )) && ok "mem 无 GPU/阵列卡/性能基准 vendor 程序" \
     || bad "mem 留下了整机 vendor 程序: ${EXTRA_TOOLS[*]}"
-  for entry in nvidia-smi nvme smartctl ipmitool fio sysbench mstflint fwupdmgr; do
+  for entry in nvidia-smi nvme smartctl ipmitool fio sysbench mstflint fwupdmgr fbterm; do
     if [[ -e "$ROOTFS/usr/bin/$entry" || -e "$ROOTFS/usr/sbin/$entry" ]]; then
       bad "mem 留下了整机专属命令 $entry"
     else
@@ -422,6 +422,10 @@ if grep -qx 'KLBURN_EDITION="mem"' "$ROOTFS/opt/klburn/klburn.conf"; then
        -o -name 'libcuda.so*' -o -name 'libcublas*' -o -name 'libcudart*' \) 2>/dev/null)
   (( ${#GPU_FILES[@]} == 0 )) && ok "mem 无 NVIDIA/CUDA 模块与计算库" \
     || bad "mem 留下 NVIDIA/CUDA 文件: ${GPU_FILES[*]}"
+else
+  for entry in /usr/bin/fbterm /usr/share/fonts/truetype/wqy/wqy-microhei.ttc /opt/klburn/disk-confirm-console.sh; do
+    rootfs_exists "$entry" && ok "双语硬盘确认组件存在：$entry" || bad "双语硬盘确认组件缺失：$entry"
+  done
 fi
 printf '通过 %d 项，失败 %d 项\n' "$PASS" "$FAIL"
 exit $(( FAIL > 0 ? 1 : 0 ))

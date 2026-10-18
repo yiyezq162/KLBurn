@@ -29,6 +29,7 @@ SUITES=(
   test-log-parsing
   test-hw-checks
   test-screen-render
+  test-disk-console
   test-report-render
   test-internal-report
   test-mem-edition

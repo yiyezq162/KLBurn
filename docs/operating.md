@@ -20,7 +20,8 @@
 这是无人值守测试的硬约束：
 插上盘没人管的时候它必须跑完，绝不能停在一个等按键的屏上。
 
-> 屏幕上全是英文——Linux 文本控制台显示不了中文（会变一屏方块）。
+> 普通界面保持英文。两道破坏性硬盘确认在具备帧缓冲的本地控制台使用
+> fbterm 显示中英双语；缺少显示条件时保留完整英文，中文终端异常则不授权写盘。
 > **U 盘里那份报告是全中文的**，不受影响。
 
 ---
@@ -145,6 +146,11 @@ live 系统内的修改通常重启即失；需要保存的文件请明确写到
 
 ⚠️ **这是全项目唯一会毁掉数据的操作。**
 
+两处红色警告均提示“测试导致数据丢失，一切损失由测试者负责”及对应英文。
+确认后的**性能基准写入测速**就会覆盖数据，不必等到 CPU/GPU 之后的硬盘压测。
+本地中文确认使用 UTF-8 和已有的文泉驿微米黑字体；结束后退出中文终端，
+其他界面不变。无帧缓冲等条件时以下英文安全信息仍完整保留。
+
 ```
 +==============================================================================+
 |  DISK STRESS TEST  (OPTIONAL, DESTRUCTIVE)                                   |
@@ -152,8 +158,13 @@ live 系统内的修改通常重启即失；需要保存的文件请明确写到
  Disk inventory (model / capacity / serial / firmware / SMART health)
  has already been collected and will appear in the report either way.
 
- The optional STRESS test makes fio write RANDOM DATA directly to the
- RAW DEVICES listed below. ALL DATA ON THEM WOULD BE DESTROYED.
+ WARNING: DESTRUCTIVE DISK TEST
+ This test writes directly to the disks listed below,
+ overwriting existing data!
+ Data overwriting begins during the write benchmark,
+ BEFORE the disk stress test.
+ The test causes data loss. The operator is responsible
+ for all resulting losses.
  Default is to SKIP. Only continue if you really mean to wipe these disks.
 
  DEVICE          SIZE   MODEL                SERIAL      PARTITION TABLE

@@ -1,5 +1,9 @@
 # 盘里封了哪些工具
 
+full 的两道破坏性硬盘确认使用 Ubuntu `fbterm` 包在帧缓冲上显示 UTF-8 双语，
+复用报告已有的 `fonts-wqy-microhei` 字体，不增加桌面环境或输入法。
+仅确认期间启动，其他界面仍用原控制台；mem 不安装 fbterm。
+
 本表默认说明整机版 full。1.10.6 起内存专用版 mem 使用 `PKGS_MEM` 精简清单，
 只带内存/SPD、压测/ECC、中文 PDF、USB 落盘与联网校时工具，不带
 NVIDIA/CUDA、GPU/CPU 性能基准、硬盘/阵列卡/BMC 检测程序。

@@ -625,6 +625,7 @@ elif (( DISK_STRESS )); then
   disk_confirm_sent=0
   if wait_for_log "Configuration review done" 90 "配置核对面板已过（下一步就是破坏性写确认）"; then
     sleep 3
+    mon "screendump $WORK/shot-disk-confirm-first.ppm"
     for c in y e s; do mon "sendkey $c"; done
     mon "sendkey ret"
     disk_confirm_sent=1
@@ -645,6 +646,7 @@ elif (( DISK_STRESS )); then
   #    **所以这里必须补一个 ret，只发 y 是过不去的。**
   if (( disk_confirm_sent )); then
     sleep 4
+    mon "screendump $WORK/shot-disk-confirm-final.ppm"
     mon "sendkey y"; sleep 1; mon "sendkey ret"
     if wait_for_log "Disk stress test confirmed by operator" 90 "两道确认都通过"; then
       ok "两道破坏性写确认都通过了（fio 会真的往裸盘上写）"
